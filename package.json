@@ -9,9 +9,14 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
+    "lucide-react": "^0.563.0",
+    "nanoid": "^5.1.6",
     "next": "16.1.6",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.10"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

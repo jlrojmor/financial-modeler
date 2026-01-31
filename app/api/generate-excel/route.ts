@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ModelState } from "@/store/useModelStore";
-import { exportStatementToExcel } from "@/lib/excel-export";
+import { exportStatementToExcel, exportSbcDisclosureToExcel } from "@/lib/excel-export";
 
 // Force Node runtime (ExcelJS needs Node APIs)
 export const runtime = "nodejs";
@@ -20,20 +20,57 @@ export async function POST(request: Request) {
       ...(modelState.meta.years.projection || []),
     ];
     
-    // Income Statement
-    const isWs = wb.addWorksheet("Income Statement");
-    exportStatementToExcel(isWs, modelState.incomeStatement, years, 1, modelState.meta.currencyUnit);
+    // Single continuous worksheet - everything flows top to bottom: IS → SBC → BS → CFS
+    const ws = wb.addWorksheet("Financial Model");
+    let currentRow = 1;
     
-    // Balance Sheet
-    if (modelState.balanceSheet && modelState.balanceSheet.length > 0) {
-      const bsWs = wb.addWorksheet("Balance Sheet");
-      exportStatementToExcel(bsWs, modelState.balanceSheet, years, 1, modelState.meta.currencyUnit);
+    // Income Statement (first statement - includes currency note and headers)
+    currentRow = exportStatementToExcel(
+      ws, 
+      modelState.incomeStatement, 
+      years, 
+      currentRow, 
+      modelState.meta.currencyUnit,
+      undefined, // no statement label for first statement
+      true // isFirstStatement
+    );
+    
+    // Add SBC Disclosure section below Income Statement
+    if (modelState.sbcBreakdowns) {
+      currentRow = exportSbcDisclosureToExcel(
+        ws,
+        modelState.incomeStatement,
+        modelState.sbcBreakdowns,
+        years,
+        currentRow,
+        modelState.meta.currencyUnit
+      );
     }
     
-    // Cash Flow Statement
+    // Balance Sheet (below SBC - add statement header)
+    if (modelState.balanceSheet && modelState.balanceSheet.length > 0) {
+      currentRow = exportStatementToExcel(
+        ws, 
+        modelState.balanceSheet, 
+        years, 
+        currentRow, 
+        modelState.meta.currencyUnit,
+        "Balance Sheet", // statement label
+        false // not first statement
+      );
+    }
+    
+    // Cash Flow Statement (below Balance Sheet - add statement header)
     if (modelState.cashFlow && modelState.cashFlow.length > 0) {
-      const cfsWs = wb.addWorksheet("Cash Flow");
-      exportStatementToExcel(cfsWs, modelState.cashFlow, years, 1, modelState.meta.currencyUnit);
+      currentRow = exportStatementToExcel(
+        ws, 
+        modelState.cashFlow, 
+        years, 
+        currentRow, 
+        modelState.meta.currencyUnit,
+        "Cash Flow Statement", // statement label
+        false // not first statement
+      );
     }
     
     const buffer = await wb.xlsx.writeBuffer();
@@ -48,8 +85,11 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Excel export error:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    console.error("Error details:", { errorMessage, errorStack });
     return NextResponse.json(
-      { error: "Failed to generate Excel file" },
+      { error: "Failed to generate Excel file", details: errorMessage },
       { status: 500 }
     );
   }

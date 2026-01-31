@@ -8,6 +8,7 @@ import {
   getUnitLabel,
   formatCurrencyDisplay,
 } from "@/lib/currency-utils";
+import CollapsibleSection from "@/components/collapsible-section";
 
 /**
  * Standard SG&A breakdown suggestions (IB-grade)
@@ -40,6 +41,9 @@ export default function SgaBuilder() {
   const [newSgaItem, setNewSgaItem] = useState("");
   const [showAddCustom, setShowAddCustom] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  // Check if section is locked
+  const isSgaLocked = useModelStore((s) => s.sectionLocks["sga"] ?? false);
 
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
@@ -84,19 +88,19 @@ export default function SgaBuilder() {
   console.log("SgaBuilder render - hasBreakdowns:", hasBreakdowns, "availableSuggestions:", availableSuggestions.length, "showAddCustom:", showAddCustom);
 
   return (
-    <div className="space-y-6" style={{ position: 'relative', zIndex: 1 }}>
-      {/* SG&A Section */}
-      <div className="rounded-lg border border-purple-800/40 bg-purple-950/20 p-4" style={{ position: 'relative', zIndex: 1 }}>
-        <div className="mb-4">
-          <h3 className="text-sm font-semibold text-purple-200 mb-1">
-            Selling, General & Administrative (SG&A)
-          </h3>
-          <p className="text-xs text-purple-300/80">
-            {hasBreakdowns
-              ? "SG&A is calculated from the sum of components below. Enter values for each component."
-              : "Enter total SG&A directly, or break it down into components (Sales & Marketing, G&A, etc.)."}
-          </p>
-        </div>
+    <CollapsibleSection
+      sectionId="sga"
+      title="Selling, General & Administrative (SG&A)"
+      description={
+        hasBreakdowns
+          ? "SG&A is calculated from the sum of components below. Enter values for each component."
+          : "Enter total SG&A directly, or break it down into components (Sales & Marketing, G&A, etc.)."
+      }
+      borderColor="border-purple-800/40"
+      bgColor="bg-purple-950/20"
+      textColor="text-purple-200"
+      confirmButtonLabel="Done"
+    >
 
         {/* Validation Error */}
         {validationError && (
@@ -145,8 +149,9 @@ export default function SgaBuilder() {
                     <input
                       type="number"
                       step="any"
-                      className="w-full rounded-md border border-purple-800 bg-purple-950 px-2 py-1 text-xs text-purple-100"
+                      className="w-full rounded-md border border-purple-800 bg-purple-950 px-2 py-1 text-xs text-purple-100 disabled:opacity-50 disabled:cursor-not-allowed"
                       value={displayValue === 0 ? "" : String(displayValue)}
+                      disabled={isSgaLocked}
                       onChange={(e) => {
                         const val = e.target.value;
                         if (val === "" || val === "-") {
@@ -198,8 +203,9 @@ export default function SgaBuilder() {
                         e.stopPropagation();
                         handleAddStandard(suggestion.label);
                       }}
-                      className="rounded-md border border-purple-700/40 bg-purple-950/40 p-3 text-left hover:bg-purple-950/60 transition cursor-pointer"
+                      className="rounded-md border border-purple-700/40 bg-purple-950/40 p-3 text-left hover:bg-purple-950/60 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       style={{ position: 'relative', zIndex: 10, pointerEvents: 'auto' }}
+                      disabled={isSgaLocked}
                     >
                       <div className="text-xs font-semibold text-purple-200">
                         {suggestion.label}
@@ -224,8 +230,9 @@ export default function SgaBuilder() {
                     console.log("Custom add button clicked");
                     setShowAddCustom(true);
                   }}
-                  className="rounded-md border border-purple-700/40 bg-purple-950/40 px-4 py-2 text-xs font-semibold text-purple-200 hover:bg-purple-950/60 transition cursor-pointer"
+                  className="rounded-md border border-purple-700/40 bg-purple-950/40 px-4 py-2 text-xs font-semibold text-purple-200 hover:bg-purple-950/60 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   style={{ position: 'relative', zIndex: 10, pointerEvents: 'auto' }}
+                  disabled={isSgaLocked}
                 >
                   + Add Custom SG&A Component
                 </button>
@@ -316,7 +323,9 @@ export default function SgaBuilder() {
                     </div>
                     <button
                       onClick={() => handleRemoveBreakdown(breakdown.id)}
-                      className="text-[10px] text-red-400 hover:text-red-300"
+                      className="text-[10px] text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={isSgaLocked}
+                      type="button"
                     >
                       Remove
                     </button>
@@ -445,8 +454,9 @@ export default function SgaBuilder() {
                                     <input
                                       type="number"
                                       step="any"
-                                      className="w-full rounded-md border border-purple-700 bg-purple-950 px-2 py-1 text-[11px] text-purple-100"
+                                      className="w-full rounded-md border border-purple-700 bg-purple-950 px-2 py-1 text-[11px] text-purple-100 disabled:opacity-50 disabled:cursor-not-allowed"
                                       value={displayValue === 0 ? "" : String(displayValue)}
+                                      disabled={isSgaLocked}
                                       onChange={(e) => {
                                         const val = e.target.value;
                                         if (val === "" || val === "-") {
@@ -594,7 +604,6 @@ export default function SgaBuilder() {
             </div>
           </div>
         )}
-      </div>
-    </div>
+      </CollapsibleSection>
   );
 }

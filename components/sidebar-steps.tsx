@@ -1,54 +1,64 @@
 "use client";
 
-import React from "react";
 import { useModelStore } from "@/store/useModelStore";
 import { WIZARD_STEPS } from "@/types/finance";
-import { CheckCircle2, Circle } from "lucide-react";
 
 export default function SidebarSteps() {
-  const current = useModelStore((s) => s.currentStepId);
+  const currentStepId = useModelStore((s) => s.currentStepId);
   const completed = useModelStore((s) => s.completedStepIds);
   const goToStep = useModelStore((s) => s.goToStep);
 
   return (
-    <aside className="h-full w-full border-r border-slate-800 bg-slate-950 px-3 py-4">
-      <div className="px-2 pb-4">
-        <div className="text-xs font-semibold tracking-wide text-slate-300">
-          MODEL BUILDER
+    <aside className="h-full w-full border-r border-slate-800 bg-slate-950 p-4">
+      <div className="mb-4">
+        <div className="text-sm font-semibold text-slate-100">
+          Financial Model Builder
         </div>
-        <div className="mt-1 text-[11px] text-slate-500">
-          Guided steps • IB-style • Inputs blue
+        <div className="text-xs text-slate-400">
+          Guided build (IB-style)
         </div>
       </div>
 
-      <nav className="space-y-1">
-        {WIZARD_STEPS.map((s) => {
-          const isDone = completed.includes(s.id);
-          const isActive = current === s.id;
+      <div className="space-y-2">
+        {WIZARD_STEPS.map((step) => {
+          const isActive = step.id === currentStepId;
+          const isDone = completed.includes(step.id);
 
           return (
             <button
-              key={s.id}
-              onClick={() => goToStep(s.id)}
+              key={step.id}
+              onClick={() => goToStep(step.id)}
               className={[
-                "w-full rounded-md px-2 py-2 text-left text-sm transition",
+                "w-full rounded-md border px-3 py-2 text-left transition",
                 isActive
-                  ? "bg-slate-900 text-slate-100"
-                  : "text-slate-300 hover:bg-slate-900/60",
+                  ? "border-slate-600 bg-slate-900"
+                  : "border-slate-900 bg-slate-950 hover:bg-slate-900/60",
               ].join(" ")}
             >
-              <div className="flex items-center gap-2">
-                {isDone ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                ) : (
-                  <Circle className="h-4 w-4 text-slate-600" />
-                )}
-                <span className="text-sm">{s.label}</span>
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold text-slate-100">
+                  {step.label}
+                </div>
+
+                <div
+                  className={[
+                    "text-[10px] px-2 py-0.5 rounded-full",
+                    isDone
+                      ? "bg-emerald-600/20 text-emerald-300 border border-emerald-700/40"
+                      : "bg-slate-800/40 text-slate-400 border border-slate-700/30",
+                  ].join(" ")}
+                >
+                  {isDone ? "Done" : "Pending"}
+                </div>
+              </div>
+
+              <div className="mt-1 text-[11px] leading-snug text-slate-400">
+                {step.description}
               </div>
             </button>
           );
         })}
-      </nav>
+      </div>
     </aside>
   );
 }

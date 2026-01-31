@@ -8,7 +8,9 @@
  */
 
 import type { Row } from "@/types/finance";
+import type { CurrencyUnit } from "@/lib/currency-utils";
 import { generateExcelFormula } from "./excel-formulas";
+import { storedToDisplay } from "./currency-utils";
 
 function flattenRows(rows: Row[], depth = 0): Array<{ row: Row; depth: number }> {
   const out: Array<{ row: Row; depth: number }> = [];
@@ -27,12 +29,34 @@ export function exportStatementToExcel(
   rows: Row[],
   years: string[],
   startRow: number = 1,
-  currencyUnit?: string
+  currencyUnit?: string,
+  statementLabel?: string,
+  isFirstStatement: boolean = true
 ): number {
+  if (!rows || rows.length === 0) {
+    return startRow;
+  }
+  if (!years || years.length === 0) {
+    return startRow;
+  }
   const flattened = flattenRows(rows);
   
-  // Add currency unit note if provided (only applies to currency values)
-  if (currencyUnit && currencyUnit !== "units") {
+  // Add statement label header if provided and not first statement
+  if (statementLabel && !isFirstStatement) {
+    // Add spacing before new statement
+    startRow += 2;
+    ws.getCell(startRow, 1).value = statementLabel;
+    ws.getCell(startRow, 1).font = { bold: true, size: 12, color: { argb: "FF000000" } };
+    ws.getRow(startRow).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE5E7EB" }, // Light grey background for statement header
+    };
+    startRow += 1;
+  }
+  
+  // Add currency unit note if provided (only for first statement)
+  if (isFirstStatement && currencyUnit && currencyUnit !== "units") {
     const unitLabel = currencyUnit === "millions" ? "M" : currencyUnit === "thousands" ? "K" : "";
     if (unitLabel) {
       ws.getCell(startRow, 1).value = `All currency amounts in ${unitLabel} (${currencyUnit}). Other values (shares, percentages, etc.) are in actual units.`;
@@ -41,19 +65,23 @@ export function exportStatementToExcel(
     }
   }
   
-  // Headers
-  ws.getCell(startRow, 1).value = "Line Item";
-  years.forEach((year, idx) => {
-    ws.getCell(startRow, 2 + idx).value = year;
-  });
-  
-  // Style header row
-  ws.getRow(startRow).font = { bold: true, color: { argb: "FFFFFFFF" } };
-  ws.getRow(startRow).fill = {
-    type: "pattern",
-    pattern: "solid",
-    fgColor: { argb: "FF0F172A" },
-  };
+  // Headers (only add if this is the first statement, otherwise reuse existing headers)
+  if (isFirstStatement) {
+    ws.getCell(startRow, 1).value = "Line Item";
+    years.forEach((year, idx) => {
+      ws.getCell(startRow, 2 + idx).value = year;
+    });
+    
+    // Style header row - IB standard: dark background, white text
+    ws.getRow(startRow).font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+    ws.getRow(startRow).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1E293B" }, // Dark slate background
+    };
+    ws.getRow(startRow).alignment = { horizontal: "left", vertical: "middle" };
+    startRow += 1;
+  }
   
   // Data rows
   flattened.forEach(({ row, depth }, idx) => {
@@ -61,7 +89,8 @@ export function exportStatementToExcel(
     const isInput = row.kind === "input";
     const isGrossMargin = row.id === "gross_margin";
     const isEbitdaMargin = row.id === "ebitda_margin";
-    const isMargin = isGrossMargin || isEbitdaMargin;
+    const isNetIncomeMargin = row.id === "net_income_margin";
+    const isMargin = isGrossMargin || isEbitdaMargin || isNetIncomeMargin;
     const isPercent = row.valueType === "percent";
     const isCurrency = row.valueType === "currency";
     
@@ -69,15 +98,49 @@ export function exportStatementToExcel(
     const indent = "  ".repeat(depth);
     ws.getCell(excelRow, 1).value = indent + row.label;
     
-    // Label styling: Margins (Gross Margin, EBITDA Margin) in italic, smaller font, light grey
+    // Check for children - needed for formatting decisions
+    const hasChildren = row.children && row.children.length > 0;
+    
+    // IB Standard Excel Formatting:
+    // - White background for all rows
+    // - Black text for labels (readable on white)
+    // - Margins: italic, smaller font, grey text
+    // - Bold for totals and key calculations
+    const isSubtotal = row.kind === "subtotal" || row.kind === "total";
+    const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
+    const isParentWithChildren = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
+    const shouldBeBold = isSubtotal || isKeyCalculation || isParentWithChildren;
+    
+    // Set row background to white
+    ws.getRow(excelRow).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFFFFFFF" }, // White background
+    };
+    
+    // Label styling
     if (isMargin) {
       ws.getCell(excelRow, 1).font = { 
         italic: true, 
-        size: 10, // 1pt smaller (default is 11)
-        color: { argb: "FF94A3B8" } // Light grey
+        size: 10,
+        color: { argb: "FF64748B" } // Grey for margins
+      };
+    } else if (shouldBeBold) {
+      ws.getCell(excelRow, 1).font = { 
+        bold: true,
+        color: { argb: "FF000000" } // Black, bold for totals
       };
     } else {
-      ws.getCell(excelRow, 1).font = { color: { argb: "FFE2E8F0" } }; // White for labels
+      ws.getCell(excelRow, 1).font = { 
+        color: { argb: "FF000000" } // Black for regular labels
+      };
+    }
+    
+    // Add top border for key rows (like in preview)
+    if (shouldBeBold || isKeyCalculation) {
+      ws.getRow(excelRow).border = {
+        top: { style: "thin", color: { argb: "FFCBD5E1" } },
+      };
     }
     
     // Values for each year
@@ -85,72 +148,157 @@ export function exportStatementToExcel(
       const col = 2 + yearIdx;
       const value = row.values?.[year];
       const isLink = row.excelFormula?.includes("!") || false; // Links reference other sheets
+      // hasChildren is already defined above for this row
       
-      // Generate formula if it's a calc row
-      if (!isInput && (row.kind === "calc" || row.kind === "subtotal" || row.kind === "total")) {
-        const formula = generateExcelFormula(row, yearIdx, flattened, 2);
-        if (formula) {
-          ws.getCell(excelRow, col).value = { formula: formula.replace(/^=/, "") };
-          
-          // IB styling rules:
-          // - Links (from other sheets): green
-          // - Percent outputs: grey
-          // - Currency outputs: white
-          // - Other outputs: white
-          if (isLink) {
-            ws.getCell(excelRow, col).font = { color: { argb: "FF22C55E" } }; // Green for links
-          } else if (isPercent) {
-            ws.getCell(excelRow, col).font = { color: { argb: "FF94A3B8" } }; // Grey for percentages
+      // CRITICAL: Generate formula for ANY row that should be calculated (calc rows OR input rows with children)
+      // Input rows with children (Revenue, COGS, SG&A when broken down) should show SUM formulas, not hardcoded values
+      const shouldHaveFormula = (!isInput && (row.kind === "calc" || row.kind === "subtotal" || row.kind === "total")) ||
+                                (isInput && hasChildren); // Input rows with children need formulas too
+      
+      if (shouldHaveFormula) {
+        try {
+          const formula = generateExcelFormula(row, yearIdx, flattened, 2, startRow);
+          if (formula && formula.trim()) {
+            // ExcelJS expects formula without the leading =
+            const formulaStr = formula.replace(/^=/, "").trim();
+            if (formulaStr) {
+              ws.getCell(excelRow, col).value = { formula: formulaStr };
+              
+              // IB Standard Excel Formatting (white background):
+              // - Input rows with children: blue text (they're still inputs, just calculated from children)
+              // - Links (from other sheets): green text
+              // - Percent outputs: black text (readable on white)
+              // - Currency outputs: black text (readable on white)
+              // - Bold for totals and key calculations
+              const isSubtotal = row.kind === "subtotal" || row.kind === "total";
+              const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
+              const isParentWithChildren = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
+              const shouldBeBold = isSubtotal || isKeyCalculation || isParentWithChildren;
+              
+              if (isInput && hasChildren) {
+                ws.getCell(excelRow, col).font = { 
+                  color: { argb: "FF0066CC" }, // Blue for input rows with children
+                  bold: shouldBeBold
+                };
+              } else if (isLink) {
+                ws.getCell(excelRow, col).font = { 
+                  color: { argb: "FF22C55E" }, // Green for links
+                  bold: shouldBeBold
+                };
+              } else if (isPercent) {
+                ws.getCell(excelRow, col).font = { 
+                  color: { argb: "FF64748B" }, // Grey for percentages
+                  italic: true,
+                  size: 10
+                };
+              } else {
+                ws.getCell(excelRow, col).font = { 
+                  color: { argb: "FF000000" }, // Black for currency and other outputs (readable on white)
+                  bold: shouldBeBold
+                };
+              }
+              
+              // Margins (Gross Margin, EBITDA Margin): italic and smaller font
+              if (isMargin) {
+                const currentFont = ws.getCell(excelRow, col).font || {};
+                ws.getCell(excelRow, col).font = {
+                  ...currentFont,
+                  italic: true,
+                  size: 10, // 1pt smaller
+                };
+              }
+            } else {
+              // Formula was empty or invalid, fall through to value assignment
+              if (typeof value === "number") {
+                const excelValue = isPercent ? value / 100 : value;
+                ws.getCell(excelRow, col).value = excelValue;
+              }
+            }
           } else {
-            ws.getCell(excelRow, col).font = { color: { argb: "FFFFFFFF" } }; // White for currency and other outputs
+            // No formula generated, use value
+            if (typeof value === "number") {
+              const excelValue = isPercent ? value / 100 : value;
+              ws.getCell(excelRow, col).value = excelValue;
+            }
           }
-          
-          // Margins (Gross Margin, EBITDA Margin): italic and smaller font
-          if (isMargin) {
-            const currentFont = ws.getCell(excelRow, col).font || {};
-            ws.getCell(excelRow, col).font = {
-              ...currentFont,
-              italic: true,
-              size: 10, // 1pt smaller
-            };
-          }
-        } else if (typeof value === "number") {
-          // For percentages, Excel expects decimal (0.755 for 75.5%), so divide by 100
-          const excelValue = isPercent ? value / 100 : value;
-          ws.getCell(excelRow, col).value = excelValue;
-          
-          // Apply same color rules
-          if (isLink) {
-            ws.getCell(excelRow, col).font = { color: { argb: "FF22C55E" } };
-          } else if (isPercent) {
-            ws.getCell(excelRow, col).font = { color: { argb: "FF94A3B8" } };
-          } else {
-            ws.getCell(excelRow, col).font = { color: { argb: "FFFFFFFF" } };
-          }
-          
-          if (isGrossMargin) {
-            const currentFont = ws.getCell(excelRow, col).font || {};
-            ws.getCell(excelRow, col).font = {
-              ...currentFont,
-              italic: true,
-              size: 10,
-            };
+        } catch (formulaError) {
+          console.error(`Error generating formula for row ${row.id}, year ${year}:`, formulaError);
+          // Fallback to value if formula generation fails
+          if (typeof value === "number") {
+            const excelValue = isPercent ? value / 100 : value;
+            ws.getCell(excelRow, col).value = excelValue;
           }
         }
+      } else if (typeof value === "number") {
+        // Fallback: if no formula generated, use the calculated value
+        // For percentages, Excel expects decimal (0.755 for 75.5%), so divide by 100
+        const excelValue = isPercent ? value / 100 : value;
+        ws.getCell(excelRow, col).value = excelValue;
+        
+        // Apply same color rules (with white background)
+        const isSubtotal = row.kind === "subtotal" || row.kind === "total";
+        const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
+        const isParentWithChildren = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
+        const shouldBeBold = isSubtotal || isKeyCalculation || isParentWithChildren;
+        
+        if (isInput && hasChildren) {
+          ws.getCell(excelRow, col).font = { 
+            color: { argb: "FF0066CC" }, // Blue
+            bold: shouldBeBold
+          };
+        } else if (isLink) {
+          ws.getCell(excelRow, col).font = { 
+            color: { argb: "FF22C55E" }, // Green
+            bold: shouldBeBold
+          };
+        } else if (isPercent) {
+          ws.getCell(excelRow, col).font = { 
+            color: { argb: "FF64748B" }, // Grey
+            italic: true,
+            size: 10
+          };
+        } else {
+          ws.getCell(excelRow, col).font = { 
+            color: { argb: "FF000000" }, // Black (readable on white)
+            bold: shouldBeBold
+          };
+        }
+        
+        if (isMargin) {
+          const currentFont = ws.getCell(excelRow, col).font || {};
+          ws.getCell(excelRow, col).font = {
+            ...currentFont,
+            italic: true,
+            size: 10,
+          };
+        }
       } else {
-        // Input value (blue)
+        // Pure input value (no children, no calculation) - blue text on white background
         ws.getCell(excelRow, col).value = typeof value === "number" ? value : null;
-        ws.getCell(excelRow, col).font = { color: { argb: "FF2563EB" } }; // Blue for inputs
+        ws.getCell(excelRow, col).font = { color: { argb: "FF0066CC" } }; // Blue for inputs
       }
       
-      // Number formatting
+      // Ensure cell background is white
+      ws.getCell(excelRow, col).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFFFFFFF" }, // White background
+      };
+      
+      // Number formatting - IB standard
       if (row.valueType === "currency") {
+        // Format as currency with thousands separator
         ws.getCell(excelRow, col).numFmt = '"$"#,##0';
       } else if (row.valueType === "percent") {
+        // Format as percentage (Excel will display 0.755 as 75.50%)
         ws.getCell(excelRow, col).numFmt = "0.00%";
       } else if (row.valueType === "number") {
         ws.getCell(excelRow, col).numFmt = "#,##0";
       }
+      
+      // Alignment
+      ws.getCell(excelRow, col).alignment = { horizontal: "right", vertical: "middle" };
+      ws.getCell(excelRow, 1).alignment = { horizontal: "left", vertical: "middle" };
     });
   });
   
@@ -161,4 +309,185 @@ export function exportStatementToExcel(
   });
   
   return startRow + 1 + flattened.length;
+}
+
+/**
+ * Export SBC Disclosure to Excel worksheet (10-K style)
+ */
+export function exportSbcDisclosureToExcel(
+  ws: any,
+  incomeStatement: Row[],
+  sbcBreakdowns: Record<string, Record<string, number>>,
+  years: string[],
+  startRow: number,
+  currencyUnit?: string
+): number {
+  const sgaRow = incomeStatement.find((r) => r.id === "sga");
+  const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+  const sgaBreakdowns = sgaRow?.children ?? [];
+  const cogsBreakdowns = cogsRow?.children ?? [];
+  const hasSgaBreakdowns = sgaBreakdowns.length > 0;
+  const hasCogsBreakdowns = cogsBreakdowns.length > 0;
+  
+  // Helper to get SBC value
+  const getSbcValue = (categoryId: string, year: string): number => {
+    return sbcBreakdowns[categoryId]?.[year] ?? 0;
+  };
+  
+  // Check if there's any SBC data to show
+  let hasAnySbc = false;
+  years.forEach((y) => {
+    if (hasSgaBreakdowns) {
+      sgaBreakdowns.forEach((b) => {
+        if (getSbcValue(b.id, y) !== 0) hasAnySbc = true;
+      });
+    } else {
+      if (getSbcValue("sga", y) !== 0) hasAnySbc = true;
+    }
+    if (hasCogsBreakdowns) {
+      cogsBreakdowns.forEach((b) => {
+        if (getSbcValue(b.id, y) !== 0) hasAnySbc = true;
+      });
+    } else {
+      if (getSbcValue("cogs", y) !== 0) hasAnySbc = true;
+    }
+  });
+  
+  if (!hasAnySbc) return startRow; // Skip if no SBC data
+  
+  // Add spacing
+  startRow += 2;
+  
+  // Title
+  ws.getCell(startRow, 1).value = "Stock-Based Compensation Expense";
+  ws.getCell(startRow, 1).font = { bold: true, size: 11, color: { argb: "FFFFD700" } };
+  startRow += 1;
+  
+  // Note
+  ws.getCell(startRow, 1).value = "Amounts include stock-based compensation expense, as follows:";
+  ws.getCell(startRow, 1).font = { italic: true, size: 10, color: { argb: "FFFFD700" } };
+  startRow += 1;
+  
+  // Headers
+  ws.getCell(startRow, 1).value = "Category";
+  years.forEach((year, idx) => {
+    ws.getCell(startRow, 2 + idx).value = year;
+  });
+  ws.getRow(startRow).font = { bold: true, color: { argb: "FFFFD700" } };
+  ws.getRow(startRow).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF78350F" }, // Dark amber background
+  };
+  startRow += 1;
+  
+  // Track row numbers for SBC components to build formulas
+  const sbcComponentRows: number[] = [];
+  
+  // Helper to get column letter (A=1, B=2, etc.)
+  const getColumnLetter = (col: number): string => {
+    let result = "";
+    while (col > 0) {
+      col--;
+      result = String.fromCharCode(65 + (col % 26)) + result;
+      col = Math.floor(col / 26);
+    }
+    return result;
+  };
+  
+  // COGS SBC
+  if (hasCogsBreakdowns) {
+    cogsBreakdowns.forEach((breakdown) => {
+      const breakdownSbc = years.map((y) => getSbcValue(breakdown.id, y));
+      if (breakdownSbc.some(v => v !== 0)) {
+        ws.getCell(startRow, 1).value = `Cost of revenues — ${breakdown.label}`;
+        years.forEach((y, idx) => {
+          const storedValue = getSbcValue(breakdown.id, y);
+          // Convert stored value to display value for Excel (SBC values are stored in same format as IS values)
+          const displayValue = currencyUnit && currencyUnit !== "units" 
+            ? storedToDisplay(storedValue, currencyUnit as CurrencyUnit)
+            : storedValue;
+          ws.getCell(startRow, 2 + idx).value = displayValue;
+          ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
+        });
+        ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+        sbcComponentRows.push(startRow); // Track this row for total formula
+        startRow += 1;
+      }
+    });
+  } else {
+    const cogsSbc = years.map((y) => getSbcValue("cogs", y));
+    if (cogsSbc.some(v => v !== 0)) {
+      ws.getCell(startRow, 1).value = "Cost of revenues";
+      years.forEach((y, idx) => {
+        const storedValue = getSbcValue("cogs", y);
+        const displayValue = currencyUnit && currencyUnit !== "units" 
+          ? storedToDisplay(storedValue, currencyUnit as CurrencyUnit)
+          : storedValue;
+        ws.getCell(startRow, 2 + idx).value = displayValue;
+        ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
+      });
+      ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+      sbcComponentRows.push(startRow); // Track this row for total formula
+      startRow += 1;
+    }
+  }
+  
+  // SG&A SBC
+  if (hasSgaBreakdowns) {
+    sgaBreakdowns.forEach((breakdown) => {
+      const breakdownSbc = years.map((y) => getSbcValue(breakdown.id, y));
+      if (breakdownSbc.some(v => v !== 0)) {
+        ws.getCell(startRow, 1).value = breakdown.label;
+        years.forEach((y, idx) => {
+          const storedValue = getSbcValue(breakdown.id, y);
+          const displayValue = currencyUnit && currencyUnit !== "units" 
+            ? storedToDisplay(storedValue, currencyUnit as CurrencyUnit)
+            : storedValue;
+          ws.getCell(startRow, 2 + idx).value = displayValue;
+          ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
+        });
+        ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+        sbcComponentRows.push(startRow); // Track this row for total formula
+        startRow += 1;
+      }
+    });
+  } else {
+    const sgaSbc = years.map((y) => getSbcValue("sga", y));
+    if (sgaSbc.some(v => v !== 0)) {
+      ws.getCell(startRow, 1).value = "Selling, General & Administrative";
+      years.forEach((y, idx) => {
+        const storedValue = getSbcValue("sga", y);
+        const displayValue = currencyUnit && currencyUnit !== "units" 
+          ? storedToDisplay(storedValue, currencyUnit as CurrencyUnit)
+          : storedValue;
+        ws.getCell(startRow, 2 + idx).value = displayValue;
+        ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
+      });
+      ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+      sbcComponentRows.push(startRow); // Track this row for total formula
+      startRow += 1;
+    }
+  }
+  
+  // Total SBC (with formula that sums all component rows)
+  if (sbcComponentRows.length > 0) {
+    ws.getCell(startRow, 1).value = "Total stock-based compensation expense";
+    ws.getCell(startRow, 1).font = { bold: true, color: { argb: "FFFFD700" } };
+    years.forEach((y, idx) => {
+      const col = 2 + idx; // Column B=2, C=3, etc.
+      const colLetter = getColumnLetter(col);
+      
+      // Build SUM formula that references all component rows for this column
+      const cellReferences = sbcComponentRows.map(rowNum => `${colLetter}${rowNum}`);
+      const formula = `=SUM(${cellReferences.join(",")})`;
+      
+      ws.getCell(startRow, col).value = { formula: formula };
+      ws.getCell(startRow, col).numFmt = '"$"#,##0';
+      ws.getCell(startRow, col).font = { bold: true, color: { argb: "FFFFD700" } };
+    });
+    startRow += 1;
+  }
+  
+  return startRow;
 }

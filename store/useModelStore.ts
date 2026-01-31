@@ -120,6 +120,10 @@ export type ModelState = {
   currentStepId: WizardStepId;
   completedStepIds: WizardStepId[];
   isModelComplete: boolean;
+
+  // Section lock and expand state for Builder Panel
+  sectionLocks: Record<string, boolean>; // { [sectionId]: isLocked }
+  sectionExpanded: Record<string, boolean>; // { [sectionId]: isExpanded }
 };
 
 export type ModelActions = {
@@ -127,15 +131,25 @@ export type ModelActions = {
   recalculateAll: () => void;
   goToStep: (stepId: WizardStepId) => void;
   completeCurrentStep: () => void;
+  saveCurrentStep: () => void;
+  continueToNextStep: () => void;
 
   // Row management - generic for any statement
   addChildRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", parentId: string, label: string) => void;
+  insertRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", index: number, row: Row) => void;
+  moveRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, direction: "up" | "down") => void;
   removeRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string) => void;
   updateRowValue: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, year: string, value: number) => void;
   updateRowKind: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, kind: "input" | "calc" | "subtotal" | "total") => void;
   
   // SBC annotation
   updateSbcValue: (categoryId: string, year: string, value: number) => void;
+  
+  // Section lock and expand management
+  lockSection: (sectionId: string) => void;
+  unlockSection: (sectionId: string) => void;
+  toggleSectionExpanded: (sectionId: string) => void;
+  setSectionExpanded: (sectionId: string, expanded: boolean) => void;
   
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => void;
@@ -229,6 +243,10 @@ const defaultState: ModelState = {
   currentStepId: "historicals",
   completedStepIds: [],
   isModelComplete: false,
+
+  // Section lock and expand state - default all sections unlocked and expanded
+  sectionLocks: {},
+  sectionExpanded: {},
 };
 
 /**
@@ -354,6 +372,138 @@ export const useModelStore = create<ModelState & ModelActions>()(
           id: "ebit",
           label: "EBIT (Operating Income)",
           kind: "calc",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      // Migration: Update "Other Income / (Expense)" label to "Other Income / (Expense), net"
+      const otherIncomeRow = incomeStatement.find((r) => r.id === "other_income");
+      if (otherIncomeRow && otherIncomeRow.label === "Other Income / (Expense)") {
+        otherIncomeRow.label = "Other Income / (Expense), net";
+      }
+
+      // Migration: Ensure Balance Sheet subtotals exist and are in correct order
+      // This ensures subtotals appear in the preview in the right positions
+      const totalCurrentAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_current_assets");
+      const totalAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_assets");
+      const totalCurrentLiabIndex = balanceSheet.findIndex((r) => r.id === "total_current_liabilities");
+      const totalLiabIndex = balanceSheet.findIndex((r) => r.id === "total_liabilities");
+      const totalEquityIndex = balanceSheet.findIndex((r) => r.id === "total_equity");
+      const totalLiabAndEquityIndex = balanceSheet.findIndex((r) => r.id === "total_liab_and_equity");
+      
+      // Ensure Total Current Assets exists (after current assets items, before fixed assets)
+      if (totalCurrentAssetsIndex === -1) {
+        // Find last current asset item
+        const caIds = ["cash", "ar", "inventory", "other_ca"];
+        let insertIndex = 0;
+        for (let i = balanceSheet.length - 1; i >= 0; i--) {
+          if (caIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("ca_")) {
+            insertIndex = i + 1;
+            break;
+          }
+        }
+        balanceSheet.splice(insertIndex, 0, {
+          id: "total_current_assets",
+          label: "Total Current Assets",
+          kind: "subtotal",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+      
+      // Ensure Total Assets exists (after fixed assets items)
+      if (totalAssetsIndex === -1) {
+        const newTotalCAIndex = balanceSheet.findIndex((r) => r.id === "total_current_assets");
+        const faIds = ["ppe", "intangible_assets", "other_assets"];
+        let insertIndex = newTotalCAIndex + 1;
+        for (let i = balanceSheet.length - 1; i > newTotalCAIndex; i--) {
+          if (faIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("fa_")) {
+            insertIndex = i + 1;
+            break;
+          }
+        }
+        balanceSheet.splice(insertIndex, 0, {
+          id: "total_assets",
+          label: "Total Assets",
+          kind: "total",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+      
+      // Ensure Total Current Liabilities exists
+      if (totalCurrentLiabIndex === -1) {
+        const newTotalAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_assets");
+        const clIds = ["ap", "st_debt", "other_cl"];
+        let insertIndex = newTotalAssetsIndex + 1;
+        for (let i = balanceSheet.length - 1; i > newTotalAssetsIndex; i--) {
+          if (clIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("cl_")) {
+            insertIndex = i + 1;
+            break;
+          }
+        }
+        balanceSheet.splice(insertIndex, 0, {
+          id: "total_current_liabilities",
+          label: "Total Current Liabilities",
+          kind: "subtotal",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+      
+      // Ensure Total Liabilities exists
+      if (totalLiabIndex === -1) {
+        const newTotalCLIndex = balanceSheet.findIndex((r) => r.id === "total_current_liabilities");
+        const nclIds = ["lt_debt", "other_liab"];
+        let insertIndex = newTotalCLIndex + 1;
+        for (let i = balanceSheet.length - 1; i > newTotalCLIndex; i--) {
+          if (nclIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("ncl_")) {
+            insertIndex = i + 1;
+            break;
+          }
+        }
+        balanceSheet.splice(insertIndex, 0, {
+          id: "total_liabilities",
+          label: "Total Liabilities",
+          kind: "total",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+      
+      // Ensure Total Equity exists
+      if (totalEquityIndex === -1) {
+        const newTotalLiabIndex = balanceSheet.findIndex((r) => r.id === "total_liabilities");
+        const equityIds = ["common_stock", "retained_earnings", "other_equity"];
+        let insertIndex = newTotalLiabIndex + 1;
+        for (let i = balanceSheet.length - 1; i > newTotalLiabIndex; i--) {
+          if (equityIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("equity_")) {
+            insertIndex = i + 1;
+            break;
+          }
+        }
+        balanceSheet.splice(insertIndex, 0, {
+          id: "total_equity",
+          label: "Total Equity",
+          kind: "total",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+      
+      // Ensure Total Liabilities & Equity exists (at the very end)
+      if (totalLiabAndEquityIndex === -1) {
+        balanceSheet.push({
+          id: "total_liab_and_equity",
+          label: "Total Liabilities & Equity",
+          kind: "total",
           valueType: "currency",
           values: {},
           children: [],
@@ -562,6 +712,177 @@ export const useModelStore = create<ModelState & ModelActions>()(
       });
     }
 
+    // Migration: Ensure Tax exists (should be in template, but check anyway)
+    const hasTax = incomeStatement.some((r) => r.id === "tax");
+    if (!hasTax) {
+      const ebtIndex = incomeStatement.findIndex((r) => r.id === "ebt");
+      const insertIndex = ebtIndex >= 0 ? ebtIndex + 1 : incomeStatement.length;
+      incomeStatement.splice(insertIndex, 0, {
+        id: "tax",
+        label: "Income Tax Expense",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    // Migration: Ensure Net Income exists (should be in template, but check anyway)
+    const hasNetIncome = incomeStatement.some((r) => r.id === "net_income");
+    if (!hasNetIncome) {
+      const taxIndex = incomeStatement.findIndex((r) => r.id === "tax");
+      const insertIndex = taxIndex >= 0 ? taxIndex + 1 : incomeStatement.length;
+      incomeStatement.splice(insertIndex, 0, {
+        id: "net_income",
+        label: "Net Income",
+        kind: "calc",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    // Migration: Ensure Net Income Margin exists (added in later version)
+    const hasNetIncomeMargin = incomeStatement.some((r) => r.id === "net_income_margin");
+    if (!hasNetIncomeMargin) {
+      const netIncomeIndex = incomeStatement.findIndex((r) => r.id === "net_income");
+      if (netIncomeIndex >= 0) {
+        // Insert Net Income Margin right after Net Income
+        incomeStatement.splice(netIncomeIndex + 1, 0, {
+          id: "net_income_margin",
+          label: "Net Income Margin %",
+          kind: "calc",
+          valueType: "percent",
+          values: {},
+          children: [],
+        });
+      }
+    }
+
+    // Migration: Update "Other Income / (Expense)" label to "Other Income / (Expense), net"
+    const otherIncomeRow = incomeStatement.find((r) => r.id === "other_income");
+    if (otherIncomeRow && otherIncomeRow.label === "Other Income / (Expense)") {
+      otherIncomeRow.label = "Other Income / (Expense), net";
+    }
+
+    // Migration: Ensure Balance Sheet subtotals exist (same logic as initializeModel)
+    const totalCurrentAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_current_assets");
+    const totalAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_assets");
+    const totalCurrentLiabIndex = balanceSheet.findIndex((r) => r.id === "total_current_liabilities");
+    const totalLiabIndex = balanceSheet.findIndex((r) => r.id === "total_liabilities");
+    const totalEquityIndex = balanceSheet.findIndex((r) => r.id === "total_equity");
+    const totalLiabAndEquityIndex = balanceSheet.findIndex((r) => r.id === "total_liab_and_equity");
+    
+    if (totalCurrentAssetsIndex === -1) {
+      const caIds = ["cash", "ar", "inventory", "other_ca"];
+      let insertIndex = 0;
+      for (let i = balanceSheet.length - 1; i >= 0; i--) {
+        if (caIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("ca_")) {
+          insertIndex = i + 1;
+          break;
+        }
+      }
+      balanceSheet.splice(insertIndex, 0, {
+        id: "total_current_assets",
+        label: "Total Current Assets",
+        kind: "subtotal",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    
+    if (totalAssetsIndex === -1) {
+      const newTotalCAIndex = balanceSheet.findIndex((r) => r.id === "total_current_assets");
+      const faIds = ["ppe", "intangible_assets", "other_assets"];
+      let insertIndex = newTotalCAIndex >= 0 ? newTotalCAIndex + 1 : balanceSheet.length;
+      for (let i = balanceSheet.length - 1; i > (newTotalCAIndex >= 0 ? newTotalCAIndex : -1); i--) {
+        if (faIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("fa_")) {
+          insertIndex = i + 1;
+          break;
+        }
+      }
+      balanceSheet.splice(insertIndex, 0, {
+        id: "total_assets",
+        label: "Total Assets",
+        kind: "total",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    
+    if (totalCurrentLiabIndex === -1) {
+      const newTotalAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_assets");
+      const clIds = ["ap", "st_debt", "other_cl"];
+      let insertIndex = newTotalAssetsIndex >= 0 ? newTotalAssetsIndex + 1 : balanceSheet.length;
+      for (let i = balanceSheet.length - 1; i > (newTotalAssetsIndex >= 0 ? newTotalAssetsIndex : -1); i--) {
+        if (clIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("cl_")) {
+          insertIndex = i + 1;
+          break;
+        }
+      }
+      balanceSheet.splice(insertIndex, 0, {
+        id: "total_current_liabilities",
+        label: "Total Current Liabilities",
+        kind: "subtotal",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    
+    if (totalLiabIndex === -1) {
+      const newTotalCLIndex = balanceSheet.findIndex((r) => r.id === "total_current_liabilities");
+      const nclIds = ["lt_debt", "other_liab"];
+      let insertIndex = newTotalCLIndex >= 0 ? newTotalCLIndex + 1 : balanceSheet.length;
+      for (let i = balanceSheet.length - 1; i > (newTotalCLIndex >= 0 ? newTotalCLIndex : -1); i--) {
+        if (nclIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("ncl_")) {
+          insertIndex = i + 1;
+          break;
+        }
+      }
+      balanceSheet.splice(insertIndex, 0, {
+        id: "total_liabilities",
+        label: "Total Liabilities",
+        kind: "total",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    
+    if (totalEquityIndex === -1) {
+      const newTotalLiabIndex = balanceSheet.findIndex((r) => r.id === "total_liabilities");
+      const equityIds = ["common_stock", "retained_earnings", "other_equity"];
+      let insertIndex = newTotalLiabIndex >= 0 ? newTotalLiabIndex + 1 : balanceSheet.length;
+      for (let i = balanceSheet.length - 1; i > (newTotalLiabIndex >= 0 ? newTotalLiabIndex : -1); i--) {
+        if (equityIds.includes(balanceSheet[i].id) || balanceSheet[i].id.startsWith("equity_")) {
+          insertIndex = i + 1;
+          break;
+        }
+      }
+      balanceSheet.splice(insertIndex, 0, {
+        id: "total_equity",
+        label: "Total Equity",
+        kind: "total",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    
+    if (totalLiabAndEquityIndex === -1) {
+      balanceSheet.push({
+        id: "total_liab_and_equity",
+        label: "Total Liabilities & Equity",
+        kind: "total",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
     // Recalculate all years for all statements
     allYears.forEach((year) => {
       incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement);
@@ -598,6 +919,41 @@ export const useModelStore = create<ModelState & ModelActions>()(
       completedStepIds: completed,
       currentStepId: next,
       isModelComplete: allStepsCompleted,
+    });
+  },
+
+  saveCurrentStep: () => {
+    const state = get();
+    // Just mark the current step as complete (save progress)
+    const completed = state.completedStepIds.includes(state.currentStepId)
+      ? state.completedStepIds
+      : [...state.completedStepIds, state.currentStepId];
+
+    const allStepIds = WIZARD_STEPS.map((s) => s.id);
+    const allStepsCompleted = allStepIds.every((id) => completed.includes(id));
+
+    set({
+      completedStepIds: completed,
+      isModelComplete: allStepsCompleted,
+    });
+  },
+
+  continueToNextStep: () => {
+    const state = get();
+    // Only continue if current step is complete
+    if (!state.completedStepIds.includes(state.currentStepId)) {
+      return; // Can't continue if step isn't saved/completed
+    }
+
+    const allStepIds = WIZARD_STEPS.map((s) => s.id);
+    const currentIndex = allStepIds.indexOf(state.currentStepId);
+    const next =
+      currentIndex === -1
+        ? allStepIds[0]
+        : allStepIds[Math.min(currentIndex + 1, allStepIds.length - 1)];
+
+    set({
+      currentStepId: next,
     });
   },
 
@@ -686,6 +1042,69 @@ export const useModelStore = create<ModelState & ModelActions>()(
     });
   },
 
+  insertRow: (statement, index, row) => {
+    set((state) => {
+      const currentRows = [...(state[statement] ?? [])];
+      currentRows.splice(index, 0, row);
+      
+      // Recalculate all years after inserting
+      const allYears = [
+        ...(state.meta.years.historical || []),
+        ...(state.meta.years.projection || []),
+      ];
+      
+      let recalculatedRows = currentRows;
+      allYears.forEach((year) => {
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows);
+      });
+      
+      return { [statement]: recalculatedRows };
+    });
+  },
+
+  moveRow: (statement, rowId, direction) => {
+    set((state) => {
+      const currentRows = [...(state[statement] ?? [])];
+      const currentIndex = currentRows.findIndex(r => r.id === rowId);
+      
+      if (currentIndex === -1) return state; // Row not found
+      
+      // Don't allow moving total/subtotal rows
+      const row = currentRows[currentIndex];
+      if (row.id.startsWith("total_") || row.kind === "total" || row.kind === "subtotal") {
+        return state;
+      }
+      
+      const newIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+      
+      // Bounds check
+      if (newIndex < 0 || newIndex >= currentRows.length) return state;
+      
+      // Don't allow moving past total/subtotal rows
+      const targetRow = currentRows[newIndex];
+      if (targetRow.id.startsWith("total_") || targetRow.kind === "total" || targetRow.kind === "subtotal") {
+        return state;
+      }
+      
+      // Swap rows
+      const newRows = [...currentRows];
+      [newRows[currentIndex], newRows[newIndex]] = [newRows[newIndex], newRows[currentIndex]];
+      
+      // Recalculate all years after moving
+      const allYears = [
+        ...(state.meta.years.historical || []),
+        ...(state.meta.years.projection || []),
+      ];
+      
+      let recalculatedRows = newRows;
+      allYears.forEach((year) => {
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows);
+      });
+      
+      return { [statement]: recalculatedRows };
+    });
+  },
+
   removeRow: (statement, rowId) => {
     set((state) => {
       const currentRows = state[statement];
@@ -750,6 +1169,47 @@ export const useModelStore = create<ModelState & ModelActions>()(
         },
       };
     });
+  },
+
+  // Section lock and expand management
+  lockSection: (sectionId) => {
+    set((state) => ({
+      sectionLocks: {
+        ...state.sectionLocks,
+        [sectionId]: true,
+      },
+      sectionExpanded: {
+        ...state.sectionExpanded,
+        [sectionId]: false, // Collapse when locked
+      },
+    }));
+  },
+
+  unlockSection: (sectionId) => {
+    set((state) => ({
+      sectionLocks: {
+        ...state.sectionLocks,
+        [sectionId]: false,
+      },
+    }));
+  },
+
+  toggleSectionExpanded: (sectionId) => {
+    set((state) => ({
+      sectionExpanded: {
+        ...state.sectionExpanded,
+        [sectionId]: !(state.sectionExpanded[sectionId] ?? true), // Default to expanded
+      },
+    }));
+  },
+
+  setSectionExpanded: (sectionId, expanded) => {
+    set((state) => ({
+      sectionExpanded: {
+        ...state.sectionExpanded,
+        [sectionId]: expanded,
+      },
+    }));
   },
 
   // Legacy/backward compatibility actions
@@ -970,6 +1430,59 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+          }
+
+          // Migration: Ensure Tax exists (should be in template, but check anyway)
+          const hasTax = incomeStatement.some((r) => r.id === "tax");
+          if (!hasTax) {
+            const ebtIndex = incomeStatement.findIndex((r) => r.id === "ebt");
+            const insertIndex = ebtIndex >= 0 ? ebtIndex + 1 : incomeStatement.length;
+            incomeStatement.splice(insertIndex, 0, {
+              id: "tax",
+              label: "Income Tax Expense",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          // Migration: Ensure Net Income exists (should be in template, but check anyway)
+          const hasNetIncome = incomeStatement.some((r) => r.id === "net_income");
+          if (!hasNetIncome) {
+            const taxIndex = incomeStatement.findIndex((r) => r.id === "tax");
+            const insertIndex = taxIndex >= 0 ? taxIndex + 1 : incomeStatement.length;
+            incomeStatement.splice(insertIndex, 0, {
+              id: "net_income",
+              label: "Net Income",
+              kind: "calc",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          // Migration: Ensure Net Income Margin exists (added in later version)
+          const hasNetIncomeMargin = incomeStatement.some((r) => r.id === "net_income_margin");
+          if (!hasNetIncomeMargin) {
+            const netIncomeIndex = incomeStatement.findIndex((r) => r.id === "net_income");
+            if (netIncomeIndex >= 0) {
+              // Insert Net Income Margin right after Net Income
+              incomeStatement.splice(netIncomeIndex + 1, 0, {
+                id: "net_income_margin",
+                label: "Net Income Margin %",
+                kind: "calc",
+                valueType: "percent",
+                values: {},
+                children: [],
+              });
+            }
+          }
+
+          // Migration: Update "Other Income / (Expense)" label to "Other Income / (Expense), net"
+          const otherIncomeRow = incomeStatement.find((r) => r.id === "other_income");
+          if (otherIncomeRow && otherIncomeRow.label === "Other Income / (Expense)") {
+            otherIncomeRow.label = "Other Income / (Expense), net";
           }
 
           // Recalculate all years for all statements

@@ -9,6 +9,7 @@ import {
   getUnitLabel,
   formatCurrencyDisplay,
 } from "@/lib/currency-utils";
+import CollapsibleSection from "@/components/collapsible-section";
 
 /**
  * Guided Revenue & COGS Builder
@@ -27,6 +28,10 @@ export default function RevenueCogsBuilder() {
 
   const [newRevenueStream, setNewRevenueStream] = useState("");
   const [showAddRevenue, setShowAddRevenue] = useState(false);
+
+  // Check if sections are locked
+  const isRevenueLocked = useModelStore((s) => s.sectionLocks["revenue"] ?? false);
+  const isCogsLocked = useModelStore((s) => s.sectionLocks["cogs"] ?? false);
 
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
@@ -61,15 +66,19 @@ export default function RevenueCogsBuilder() {
   return (
     <div className="space-y-6">
       {/* Revenue Section */}
-      <div className="rounded-lg border border-blue-800/40 bg-blue-950/20 p-4">
-        <div className="mb-4">
-          <h3 className="text-sm font-semibold text-blue-200 mb-1">Revenue</h3>
-          <p className="text-xs text-blue-300/80">
-            {hasRevenueStreams
-              ? "Revenue is calculated from the sum of revenue streams below."
-              : "Add revenue streams to break down your revenue. Each stream will have its own COGS."}
-          </p>
-        </div>
+      <CollapsibleSection
+        sectionId="revenue"
+        title="Revenue"
+        description={
+          hasRevenueStreams
+            ? "Revenue is calculated from the sum of revenue streams below."
+            : "Add revenue streams to break down your revenue. Each stream will have its own COGS."
+        }
+        borderColor="border-blue-800/40"
+        bgColor="bg-blue-950/20"
+        textColor="text-blue-200"
+        confirmButtonLabel="Done"
+      >
 
         {/* Revenue Total - Input when no streams, Calculated when streams exist */}
         <div className="mb-4 rounded-md border border-blue-700/40 bg-blue-950/40 p-3">
@@ -111,7 +120,7 @@ export default function RevenueCogsBuilder() {
                     <input
                       type="number"
                       step="any"
-                      className="w-full rounded-md border border-blue-800 bg-blue-950 px-2 py-1 text-xs text-blue-100"
+                      className="w-full rounded-md border border-blue-800 bg-blue-950 px-2 py-1 text-xs text-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
                       value={displayValue === 0 ? "" : displayValue}
                       onChange={(e) => {
                         const displayNum = Number(e.target.value || 0);
@@ -119,6 +128,7 @@ export default function RevenueCogsBuilder() {
                         updateRowValue("incomeStatement", "rev", y, storedNum);
                       }}
                       placeholder="0"
+                      disabled={isRevenueLocked}
                     />
                   </label>
                 );
@@ -132,7 +142,9 @@ export default function RevenueCogsBuilder() {
           {!showAddRevenue ? (
             <button
               onClick={() => setShowAddRevenue(true)}
-              className="rounded-md bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500 transition"
+              className="rounded-md bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isRevenueLocked}
+              type="button"
             >
               + Add Revenue Stream
             </button>
@@ -207,7 +219,9 @@ export default function RevenueCogsBuilder() {
                           removeRow("incomeStatement", matchingCogs.id);
                         }
                       }}
-                      className="text-[10px] text-red-400 hover:text-red-300"
+                      className="text-[10px] text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={isRevenueLocked}
+                      type="button"
                     >
                       Remove
                     </button>
@@ -224,7 +238,7 @@ export default function RevenueCogsBuilder() {
                           <input
                             type="number"
                             step="any"
-                            className="w-full rounded-md border border-blue-800 bg-blue-950 px-2 py-1 text-xs text-blue-100"
+                            className="w-full rounded-md border border-blue-800 bg-blue-950 px-2 py-1 text-xs text-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
                             value={displayValue === 0 ? "" : String(displayValue)}
                             onChange={(e) => {
                               const val = e.target.value;
@@ -245,6 +259,7 @@ export default function RevenueCogsBuilder() {
                               }
                             }}
                             placeholder="0"
+                            disabled={isRevenueLocked}
                           />
                         </label>
                       );
@@ -255,20 +270,22 @@ export default function RevenueCogsBuilder() {
             })}
           </div>
         )}
-      </div>
+      </CollapsibleSection>
 
       {/* COGS Section */}
-      <div className="rounded-lg border border-orange-800/40 bg-orange-950/20 p-4">
-        <div className="mb-4">
-          <h3 className="text-sm font-semibold text-orange-200 mb-1">
-            Cost of Goods Sold (COGS)
-          </h3>
-          <p className="text-xs text-orange-300/80">
-            {hasRevenueStreams
-              ? "Enter COGS for each revenue stream. Total COGS is calculated automatically."
-              : "Add revenue streams first, then enter COGS for each stream."}
-          </p>
-        </div>
+      <CollapsibleSection
+        sectionId="cogs"
+        title="Cost of Goods Sold (COGS)"
+        description={
+          hasRevenueStreams
+            ? "Enter COGS for each revenue stream. Total COGS is calculated automatically."
+            : "Add revenue streams first, then enter COGS for each stream."
+        }
+        borderColor="border-orange-800/40"
+        bgColor="bg-orange-950/20"
+        textColor="text-orange-200"
+        confirmButtonLabel="Done"
+      >
 
         {/* COGS Total - Input when no streams, Calculated when streams exist */}
         <div className="mb-4 rounded-md border border-orange-700/40 bg-orange-950/40 p-3">
@@ -310,7 +327,7 @@ export default function RevenueCogsBuilder() {
                     <input
                       type="number"
                       step="any"
-                      className="w-full rounded-md border border-orange-800 bg-orange-950 px-2 py-1 text-xs text-orange-100"
+                      className="w-full rounded-md border border-orange-800 bg-orange-950 px-2 py-1 text-xs text-orange-100 disabled:opacity-50 disabled:cursor-not-allowed"
                       value={displayValue === 0 ? "" : displayValue}
                       onChange={(e) => {
                         const displayNum = Number(e.target.value || 0);
@@ -318,6 +335,7 @@ export default function RevenueCogsBuilder() {
                         updateRowValue("incomeStatement", "cogs", y, storedNum);
                       }}
                       placeholder="0"
+                      disabled={isCogsLocked}
                     />
                   </label>
                 );
@@ -356,7 +374,9 @@ export default function RevenueCogsBuilder() {
                     </div>
                     <button
                       onClick={() => removeRow("incomeStatement", cogsStream.id)}
-                      className="text-[10px] text-red-400 hover:text-red-300"
+                      className="text-[10px] text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={isCogsLocked}
+                      type="button"
                     >
                       Remove
                     </button>
@@ -373,7 +393,7 @@ export default function RevenueCogsBuilder() {
                           <input
                             type="number"
                             step="any"
-                            className="w-full rounded-md border border-orange-800 bg-orange-950 px-2 py-1 text-xs text-orange-100"
+                            className="w-full rounded-md border border-orange-800 bg-orange-950 px-2 py-1 text-xs text-orange-100 disabled:opacity-50 disabled:cursor-not-allowed"
                             value={displayValue === 0 ? "" : String(displayValue)}
                             onChange={(e) => {
                               const val = e.target.value;
@@ -394,6 +414,7 @@ export default function RevenueCogsBuilder() {
                               }
                             }}
                             placeholder="0"
+                            disabled={isCogsLocked}
                           />
                         </label>
                       );
@@ -412,7 +433,7 @@ export default function RevenueCogsBuilder() {
             </p>
           </div>
         )}
-      </div>
+      </CollapsibleSection>
 
       {/* Gross Profit Section - Always shown */}
       <div className="rounded-lg border border-emerald-800/40 bg-emerald-950/20 p-4">

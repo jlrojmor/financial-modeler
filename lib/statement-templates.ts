@@ -118,7 +118,7 @@ export function createIncomeStatementTemplate(): Row[] {
     },
     {
       id: "other_income",
-      label: "Other Income / (Expense)",
+      label: "Other Income / (Expense), net",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -145,6 +145,14 @@ export function createIncomeStatementTemplate(): Row[] {
       label: "Net Income",
       kind: "calc",
       valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "net_income_margin",
+      label: "Net Income Margin %",
+      kind: "calc",
+      valueType: "percent",
       values: {},
       children: [],
     },
@@ -192,7 +200,7 @@ export function createBalanceSheetTemplate(): Row[] {
     {
       id: "total_current_assets",
       label: "Total Current Assets",
-      kind: "total",
+      kind: "subtotal",
       valueType: "currency",
       values: {},
       children: [],
@@ -257,7 +265,7 @@ export function createBalanceSheetTemplate(): Row[] {
     {
       id: "total_current_liabilities",
       label: "Total Current Liabilities",
-      kind: "total",
+      kind: "subtotal",
       valueType: "currency",
       values: {},
       children: [],
@@ -286,10 +294,43 @@ export function createBalanceSheetTemplate(): Row[] {
       values: {},
       children: [],
     },
-    // EQUITY
+    // EQUITY (10-K Standard Structure)
+    {
+      id: "preferred_stock",
+      label: "Preferred Stock (Par Value)",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
     {
       id: "common_stock",
-      label: "Common Stock",
+      label: "Common Stock (Par Value)",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "apic",
+      label: "Additional Paid-in Capital (APIC)",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "treasury_stock",
+      label: "Treasury Stock (at cost)",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      // Note: Treasury stock is typically negative (contra-equity account)
+    },
+    {
+      id: "aoci",
+      label: "Accumulated Other Comprehensive Income (AOCI)",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -298,14 +339,6 @@ export function createBalanceSheetTemplate(): Row[] {
     {
       id: "retained_earnings",
       label: "Retained Earnings",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
-    {
-      id: "other_equity",
-      label: "Other Equity",
       kind: "input",
       valueType: "currency",
       values: {},

@@ -4,82 +4,397 @@ import { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { formatCurrencyDisplay, storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
+import { checkBalanceSheetBalance } from "@/lib/calculations";
 
-function flattenRows(rows: Row[], depth = 0): Array<{ row: Row; depth: number }> {
-  const out: Array<{ row: Row; depth: number }> = [];
+function flattenRows(
+  rows: Row[], 
+  depth = 0, 
+  expandedRows: Set<string> | null = null
+): Array<{ row: Row; depth: number; parentId?: string }> {
+  const out: Array<{ row: Row; depth: number; parentId?: string }> = [];
   for (const r of rows) {
     out.push({ row: r, depth });
-    if (r.children?.length) out.push(...flattenRows(r.children, depth + 1));
+    // Only include children if this row is expanded (null means all expanded by default)
+    // Check both that children exists and is an array with length > 0
+    if (Array.isArray(r.children) && r.children.length > 0 && (expandedRows === null || expandedRows.has(r.id))) {
+      out.push(...flattenRows(r.children, depth + 1, expandedRows).map(item => ({ ...item, parentId: r.id })));
+    }
   }
   return out;
 }
 
+// Helper function to get Balance Sheet category for a row based on its position relative to total rows
+function getBSCategory(rowId: string, rows: Row[]): string | null {
+  // Check if this is a total row - these don't belong to a category
+  if (["total_assets", "total_liabilities", "total_liab_and_equity"].includes(rowId)) {
+    return null;
+  }
+  
+  const rowIndex = rows.findIndex(r => r.id === rowId);
+  if (rowIndex === -1) return null;
+  
+  const totalCurrentAssetsIndex = rows.findIndex(r => r.id === "total_current_assets");
+  const totalAssetsIndex = rows.findIndex(r => r.id === "total_assets");
+  const totalCurrentLiabIndex = rows.findIndex(r => r.id === "total_current_liabilities");
+  const totalLiabIndex = rows.findIndex(r => r.id === "total_liabilities");
+  const totalEquityIndex = rows.findIndex(r => r.id === "total_equity");
+  
+  // Current Assets: before total_current_assets
+  if (totalCurrentAssetsIndex >= 0 && rowIndex < totalCurrentAssetsIndex) {
+    return "current_assets";
+  }
+  
+  // Fixed Assets: after total_current_assets, before total_assets
+  if (totalCurrentAssetsIndex >= 0 && totalAssetsIndex >= 0 && 
+      rowIndex > totalCurrentAssetsIndex && rowIndex < totalAssetsIndex) {
+    return "fixed_assets";
+  }
+  
+  // Current Liabilities: after total_assets, before total_current_liabilities
+  if (totalAssetsIndex >= 0 && totalCurrentLiabIndex >= 0 && 
+      rowIndex > totalAssetsIndex && rowIndex < totalCurrentLiabIndex) {
+    return "current_liabilities";
+  }
+  
+  // Non-Current Liabilities: after total_current_liabilities, before total_liabilities
+  if (totalCurrentLiabIndex >= 0 && totalLiabIndex >= 0 && 
+      rowIndex > totalCurrentLiabIndex && rowIndex < totalLiabIndex) {
+    return "non_current_liabilities";
+  }
+  
+  // Equity: after total_liabilities, before total_equity
+  if (totalLiabIndex >= 0 && totalEquityIndex >= 0 && 
+      rowIndex > totalLiabIndex && rowIndex < totalEquityIndex) {
+    return "equity";
+  }
+  
+  return null;
+}
+
+// Helper component to render a statement table
+function StatementTable({ 
+  rows, 
+  label, 
+  years, 
+  meta, 
+  showDecimals, 
+  expandedRows, 
+  toggleRow 
+}: { 
+  rows: Row[]; 
+  label: string; 
+  years: string[]; 
+  meta: any; 
+  showDecimals: boolean; 
+  expandedRows: Set<string> | null; 
+  toggleRow: (rowId: string) => void;
+}) {
+  const flat = useMemo(() => flattenRows(rows ?? [], 0, expandedRows), [rows, expandedRows]);
+  const isBalanceSheet = label === "Balance Sheet";
+  
+  // Track category changes for Balance Sheet
+  const categoryLabels: Record<string, string> = {
+    current_assets: "Current Assets",
+    fixed_assets: "Fixed / Non-Current Assets",
+    current_liabilities: "Current Liabilities",
+    non_current_liabilities: "Non-Current Liabilities",
+    equity: "Shareholders' Equity",
+  };
+
+  return (
+    <>
+      {/* Statement Header */}
+      <tr className="border-t-4 border-slate-700">
+        <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/50">
+          <h3 className="text-sm font-bold text-slate-100">{label}</h3>
+        </td>
+      </tr>
+      
+      {/* Statement Rows */}
+      {flat.map(({ row, depth }, flatIndex) => {
+        // For Balance Sheet, detect category changes
+        const currentCategory = isBalanceSheet ? getBSCategory(row.id, rows) : null;
+        const prevRow = flatIndex > 0 ? flat[flatIndex - 1] : null;
+        const prevCategory = isBalanceSheet && prevRow ? getBSCategory(prevRow.row.id, rows) : null;
+        const isCategoryStart = isBalanceSheet && currentCategory && currentCategory !== prevCategory;
+        
+        const isInput = row.kind === "input";
+        const isGrossMargin = row.id === "gross_margin";
+        const isEbitdaMargin = row.id === "ebitda_margin";
+        const isNetIncomeMargin = row.id === "net_income_margin";
+        const isMargin = isGrossMargin || isEbitdaMargin || isNetIncomeMargin;
+        const isLink = row.excelFormula?.includes("!") || false;
+        const hasChildren = Array.isArray(row.children) && row.children.length > 0;
+        const isExpanded = expandedRows === null || expandedRows.has(row.id);
+        
+        const isSubtotal = row.kind === "subtotal" || row.kind === "total";
+        const isCalculatedWithChildren = row.kind === "calc" && hasChildren;
+        const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
+        const isBalanceSheetSubtotal = ["total_current_assets", "total_assets", "total_current_liabilities", "total_liabilities", "total_equity", "total_liab_and_equity"].includes(row.id);
+        const isParentSubtotal = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
+        const hasTopBorder = isSubtotal || isCalculatedWithChildren || isKeyCalculation || isParentSubtotal || isBalanceSheetSubtotal;
+        const shouldBeBold = isSubtotal || isKeyCalculation || isParentSubtotal || isCalculatedWithChildren || isBalanceSheetSubtotal;
+        
+        // Category header colors for Balance Sheet
+        const categoryColors: Record<string, { bg: string; text: string; border: string }> = {
+          current_assets: { bg: "bg-green-950/30", text: "text-green-300", border: "border-green-700/50" },
+          fixed_assets: { bg: "bg-blue-950/30", text: "text-blue-300", border: "border-blue-700/50" },
+          current_liabilities: { bg: "bg-orange-950/30", text: "text-orange-300", border: "border-orange-700/50" },
+          non_current_liabilities: { bg: "bg-red-950/30", text: "text-red-300", border: "border-red-700/50" },
+          equity: { bg: "bg-purple-950/30", text: "text-purple-300", border: "border-purple-700/50" },
+        };
+        
+        const labelClass = isMargin
+          ? "text-slate-400 italic text-[11px]"
+          : shouldBeBold
+          ? "text-slate-200 font-bold"
+          : "text-slate-200";
+        
+        // Enhanced spacing for Balance Sheet subtotals
+        const isBSCategorySubtotal = isBalanceSheet && isBalanceSheetSubtotal && !["total_assets", "total_liabilities", "total_liab_and_equity"].includes(row.id);
+        const spacingAfterSubtotal = isBSCategorySubtotal ? "mb-2" : "";
+        
+        return (
+          <>
+            {/* Category Header for Balance Sheet */}
+            {isCategoryStart && currentCategory && (
+              <tr className="border-t-2 border-slate-600">
+                <td colSpan={1 + years.length} className={`px-3 py-2 ${categoryColors[currentCategory]?.bg || "bg-slate-900/50"} ${categoryColors[currentCategory]?.border || "border-slate-700"} border-b`}>
+                  <div className={`text-xs font-bold ${categoryColors[currentCategory]?.text || "text-slate-300"} uppercase tracking-wider`}>
+                    {categoryLabels[currentCategory]}
+                  </div>
+                </td>
+              </tr>
+            )}
+            
+            {/* Spacing row after category header */}
+            {isCategoryStart && (
+              <tr>
+                <td colSpan={1 + years.length} className="h-1 bg-transparent"></td>
+              </tr>
+            )}
+            
+            {/* Main row */}
+            <tr 
+            key={row.id} 
+            className={`border-b border-slate-900 hover:bg-slate-900/40 ${hasTopBorder ? "border-t-2 border-slate-300" : ""} ${spacingAfterSubtotal}`}
+          >
+            <td className={`px-3 py-2 ${labelClass}`}>
+              <div style={{ paddingLeft: depth * 14 }} className="flex items-center gap-1">
+                {hasChildren ? (
+                  <button
+                    onClick={() => toggleRow(row.id)}
+                    className="flex items-center justify-center w-4 h-4 text-slate-400 hover:text-slate-200 transition-colors"
+                    title={isExpanded ? "Collapse" : "Expand"}
+                  >
+                    <span className="text-[10px]">{isExpanded ? "▼" : "▶"}</span>
+                  </button>
+                ) : (
+                  <span className="w-4" />
+                )}
+                <span className="inline-block">
+                  {row.label}
+                </span>
+              </div>
+            </td>
+
+            {years.map((y) => {
+              const storedValue = row.values?.[y] ?? 0;
+              const isCurrency = row.valueType === "currency";
+              const isPercent = row.valueType === "percent";
+              
+              let display = "";
+              if (typeof storedValue === "number") {
+                if (storedValue === 0) {
+                  display = "—";
+                } else if (isCurrency && meta?.currencyUnit) {
+                  const displayValue = storedToDisplay(storedValue, meta.currencyUnit);
+                  const unitLabel = getUnitLabel(meta.currencyUnit);
+                  const decimals = showDecimals ? 2 : 0;
+                  display = `${displayValue.toLocaleString(undefined, {
+                    minimumFractionDigits: decimals,
+                    maximumFractionDigits: decimals,
+                  })}${unitLabel ? ` ${unitLabel}` : ""}`;
+                } else if (isPercent) {
+                  display = `${storedValue.toFixed(2)}%`;
+                } else {
+                  const decimals = showDecimals ? 2 : 0;
+                  display = storedValue.toLocaleString(undefined, {
+                    minimumFractionDigits: decimals,
+                    maximumFractionDigits: decimals,
+                  });
+                }
+              }
+              
+              let cellClass = "text-right";
+              if (isInput) {
+                cellClass += " text-blue-400 font-medium";
+              } else if (isLink) {
+                cellClass += " text-green-400";
+              } else if (isPercent) {
+                cellClass += " text-slate-400";
+              } else {
+                cellClass += " text-slate-100";
+              }
+              
+              if (isMargin) {
+                cellClass += " italic text-[11px]";
+              }
+              
+              if (shouldBeBold) {
+                cellClass += " font-bold";
+              }
+              
+              const isZero = typeof storedValue === "number" && storedValue === 0;
+              // For subtotals and totals, always show the value (even if 0) to make them visible
+              const isSubtotalOrTotal = row.kind === "subtotal" || row.kind === "total" || isBalanceSheetSubtotal;
+              if (isZero && !isSubtotalOrTotal) {
+                cellClass += " text-slate-500";
+              }
+              
+              // For subtotals/totals, show "0" or the calculated value, not "—"
+              const displayValue = isSubtotalOrTotal && storedValue === 0 
+                ? "0" 
+                : (display || (isInput ? "" : "—"));
+              
+              return (
+                <td key={`${row.id}-${y}`} className={`px-3 py-2 ${cellClass}`}>
+                  {displayValue}
+                </td>
+              );
+            })}
+          </tr>
+          
+          {/* Spacing row after Balance Sheet category subtotals */}
+          {isBSCategorySubtotal && (
+            <tr>
+              <td colSpan={1 + years.length} className="h-2 bg-transparent"></td>
+            </tr>
+          )}
+          </>
+        );
+      })}
+
+      {flat.length === 0 && (
+        <tr>
+          <td colSpan={Math.max(1, 1 + years.length)} className="px-3 py-8 text-center text-slate-500">
+            No rows yet. Start building your {label.toLowerCase()} in the Builder Panel.
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 export default function ExcelPreview() {
   const meta = useModelStore((s) => s.meta);
-  const currentStepId = useModelStore((s) => s.currentStepId);
   const incomeStatement = useModelStore((s) => s.incomeStatement);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const cashFlow = useModelStore((s) => s.cashFlow);
+  const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const [showDecimals, setShowDecimals] = useState(false);
+  const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
-  // Determine which statement to show based on current step
-  const getCurrentStatement = () => {
-    if (currentStepId === "bs_build") return { rows: balanceSheet, label: "Balance Sheet" };
-    if (currentStepId === "cfs_build") return { rows: cashFlow, label: "Cash Flow Statement" };
-    // Default to Income Statement for historicals, is_build, and others
-    return { rows: incomeStatement, label: "Income Statement" };
-  };
-
-  const { rows, label } = getCurrentStatement();
-
-  // ✅ HARD SAFETY: never assume meta.years exists
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
     const proj = meta?.years?.projection ?? [];
     return [...hist, ...proj];
   }, [meta]);
 
-  const flat = useMemo(() => flattenRows(rows ?? []), [rows]);
+  const toggleRow = (rowId: string) => {
+    setExpandedRows((prev) => {
+      if (prev === null) {
+        const allRowsWithChildren = new Set<string>();
+        const findRowsWithChildren = (rows: Row[]) => {
+          for (const r of rows) {
+            if (Array.isArray(r.children) && r.children.length > 0) {
+              allRowsWithChildren.add(r.id);
+              findRowsWithChildren(r.children);
+            }
+          }
+        };
+        findRowsWithChildren(incomeStatement ?? []);
+        findRowsWithChildren(balanceSheet ?? []);
+        findRowsWithChildren(cashFlow ?? []);
+        const next = new Set(allRowsWithChildren);
+        next.delete(rowId);
+        return next;
+      }
+      
+      const next = new Set(prev);
+      if (next.has(rowId)) {
+        next.delete(rowId);
+      } else {
+        next.add(rowId);
+      }
+      return next;
+    });
+  };
+
+  // Calculate total rows for display
+  const totalRows = useMemo(() => {
+    const isFlat = flattenRows(incomeStatement ?? [], 0, expandedRows);
+    const bsFlat = flattenRows(balanceSheet ?? [], 0, expandedRows);
+    const cfsFlat = flattenRows(cashFlow ?? [], 0, expandedRows);
+    return isFlat.length + bsFlat.length + cfsFlat.length;
+  }, [incomeStatement, balanceSheet, cashFlow, expandedRows]);
 
   return (
-    <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-slate-100">Real-time Excel Preview</h2>
-          <p className="text-xs text-slate-500">
-            <span className="text-slate-300">{meta?.companyName ?? "—"}</span> ·{" "}
-            <span className="text-slate-300 capitalize">{meta?.companyType ?? "—"}</span> ·{" "}
-            <span className="text-slate-300 uppercase">{meta?.modelType ?? "—"}</span> ·{" "}
-            <span className="text-slate-300">{meta?.currency ?? "—"}</span>
-            {meta?.currencyUnit && (
-              <> · <span className="text-slate-300">({getUnitLabel(meta.currencyUnit) || meta.currencyUnit})</span></>
-            )}
-          </p>
-        </div>
+    <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
+      {/* Header - Fixed */}
+      <div className="flex-shrink-0 p-4 pb-2 border-b border-slate-800">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-100">Real-time Excel Preview</h2>
+            <p className="text-xs text-slate-500">
+              <span className="text-slate-300">{meta?.companyName ?? "—"}</span> ·{" "}
+              <span className="text-slate-300 capitalize">{meta?.companyType ?? "—"}</span> ·{" "}
+              <span className="text-slate-300 uppercase">{meta?.modelType ?? "—"}</span> ·{" "}
+              <span className="text-slate-300">{meta?.currency ?? "—"}</span>
+              {meta?.currencyUnit && (
+                <> · <span className="text-slate-300">({getUnitLabel(meta.currencyUnit) || meta.currencyUnit})</span></>
+              )}
+            </p>
+          </div>
 
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showDecimals}
-              onChange={(e) => setShowDecimals(e.target.checked)}
-              className="rounded border-slate-700 bg-slate-900"
-            />
-            <span>Show decimals</span>
-          </label>
-          <div className="text-xs text-slate-500">
-            Rows: <span className="text-slate-300">{flat.length}</span> · Years:{" "}
-            <span className="text-slate-300">{years.length}</span>
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showDecimals}
+                onChange={(e) => setShowDecimals(e.target.checked)}
+                className="rounded border-slate-700 bg-slate-900"
+              />
+              <span>Show decimals</span>
+            </label>
+            <button
+              onClick={() => {
+                if (expandedRows === null) {
+                  setExpandedRows(new Set());
+                } else {
+                  setExpandedRows(null);
+                }
+              }}
+              className="text-xs text-slate-400 hover:text-slate-200 px-2 py-1 rounded border border-slate-700 hover:border-slate-600 transition-colors"
+              title={expandedRows === null ? "Collapse all" : "Expand all"}
+            >
+              {expandedRows === null ? "Collapse All" : "Expand All"}
+            </button>
+            <div className="text-xs text-slate-500">
+              Rows: <span className="text-slate-300">{totalRows}</span> · Years:{" "}
+              <span className="text-slate-300">{years.length}</span>
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="h-[calc(100%-56px)] overflow-auto rounded-lg border border-slate-800">
+      {/* Table - Scrollable */}
+      <div className="flex-1 overflow-y-auto overflow-x-auto p-4">
         <table className="w-full border-collapse text-xs">
-          <thead className="sticky top-0 bg-slate-950">
+          <thead className="sticky top-0 bg-slate-950 z-10">
             <tr className="border-b border-slate-800">
               <th className="w-[280px] px-3 py-2 text-left font-semibold text-slate-300">
-                {label}
+                Line Item
               </th>
               {years.map((y) => (
                 <th key={y} className="px-3 py-2 text-right font-semibold text-slate-400">
@@ -90,108 +405,356 @@ export default function ExcelPreview() {
           </thead>
 
           <tbody>
-            {flat.map(({ row, depth }) => {
-              const isInput = row.kind === "input";
-              const isGrossMargin = row.id === "gross_margin";
-              const isEbitdaMargin = row.id === "ebitda_margin";
-              const isMargin = isGrossMargin || isEbitdaMargin;
-              const isLink = row.excelFormula?.includes("!") || false; // Links reference other sheets
+            {/* Income Statement */}
+            <StatementTable
+              rows={incomeStatement}
+              label="Income Statement"
+              years={years}
+              meta={meta}
+              showDecimals={showDecimals}
+              expandedRows={expandedRows}
+              toggleRow={toggleRow}
+            />
+
+            {/* Stock-Based Compensation Disclosure */}
+            {(() => {
+              const sgaRow = incomeStatement.find((r) => r.id === "sga");
+              const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+              const sgaBreakdowns = sgaRow?.children ?? [];
+              const cogsBreakdowns = cogsRow?.children ?? [];
+              const hasSgaBreakdowns = sgaBreakdowns.length > 0;
+              const hasCogsBreakdowns = cogsBreakdowns.length > 0;
               
-              // Row label styling
-              const labelClass = isMargin
-                ? "text-slate-400 italic text-[11px]" // 1pt smaller, italic, light grey
-                : "text-slate-200";
+              // Check if there's any SBC data
+              let hasAnySbc = false;
+              years.forEach((y) => {
+                if (hasSgaBreakdowns) {
+                  sgaBreakdowns.forEach((b) => {
+                    if (sbcBreakdowns[b.id]?.[y]) hasAnySbc = true;
+                  });
+                } else {
+                  if (sbcBreakdowns["sga"]?.[y]) hasAnySbc = true;
+                }
+                if (hasCogsBreakdowns) {
+                  cogsBreakdowns.forEach((b) => {
+                    if (sbcBreakdowns[b.id]?.[y]) hasAnySbc = true;
+                  });
+                } else {
+                  if (sbcBreakdowns["cogs"]?.[y]) hasAnySbc = true;
+                }
+              });
+              
+              if (!hasAnySbc) return null;
               
               return (
-                <tr key={row.id} className="border-b border-slate-900 hover:bg-slate-900/40">
-                  <td className={`px-3 py-2 ${labelClass}`}>
-                    <span style={{ paddingLeft: depth * 14 }} className="inline-block">
-                      {row.label}
-                    </span>
-                  </td>
-
-                  {years.map((y) => {
-                    const storedValue = row.values?.[y] ?? 0;
-                    const isCurrency = row.valueType === "currency";
-                    const isPercent = row.valueType === "percent";
-                    
-                    // Format based on value type - only apply currency unit scaling to currency values
-                    let display = "";
-                    if (typeof storedValue === "number" && storedValue !== 0) {
-                      if (isCurrency && meta?.currencyUnit) {
-                        const displayValue = storedToDisplay(storedValue, meta.currencyUnit);
-                        const unitLabel = getUnitLabel(meta.currencyUnit);
-                        const decimals = showDecimals ? 2 : 0;
-                        display = `${displayValue.toLocaleString(undefined, {
-                          minimumFractionDigits: decimals,
-                          maximumFractionDigits: decimals,
-                        })}${unitLabel ? ` ${unitLabel}` : ""}`;
-                      } else if (isPercent) {
-                        // Always show decimals for percentages (value is already a percentage, e.g., 75.5 for 75.5%)
-                        display = `${storedValue.toFixed(2)}%`;
-                      } else {
-                        const decimals = showDecimals ? 2 : 0;
-                        display = storedValue.toLocaleString(undefined, {
-                          minimumFractionDigits: decimals,
-                          maximumFractionDigits: decimals,
-                        });
-                      }
-                    }
-                    
-                    // IB styling rules:
-                    // - Inputs: blue
-                    // - Links (from other sheets): green
-                    // - Currency outputs: white
-                    // - Percent outputs: grey
-                    // - Other outputs: white
-                    let cellClass = "text-right";
-                    if (isInput) {
-                      cellClass += " text-blue-400 font-medium";
-                    } else if (isLink) {
-                      cellClass += " text-green-400";
-                    } else if (isPercent) {
-                      cellClass += " text-slate-400"; // Grey for percentages
-                    } else {
-                      cellClass += " text-slate-100"; // White for currency and other outputs
-                    }
-                    
-                    // Margins (Gross Margin, EBITDA Margin): italic and smaller font
-                    if (isMargin) {
-                      cellClass += " italic text-[11px]";
-                    }
+                <>
+                  {/* SBC Header */}
+                  <tr className="border-t-4 border-amber-700/50">
+                    <td colSpan={1 + years.length} className="px-3 py-3 bg-amber-950/30">
+                      <h3 className="text-sm font-bold text-amber-200">Stock-Based Compensation Expense</h3>
+                      <p className="text-[10px] text-amber-300/70 italic mt-1">
+                        Amounts include stock-based compensation expense, as follows:
+                      </p>
+                    </td>
+                  </tr>
+                  
+                  {/* COGS SBC */}
+                  {hasCogsBreakdowns ? (
+                    cogsBreakdowns.map((breakdown) => {
+                      const breakdownSbc = years.map((y) => sbcBreakdowns[breakdown.id]?.[y] ?? 0);
+                      const hasAnySbc = breakdownSbc.some(v => v !== 0);
+                      if (!hasAnySbc) return null;
+                      
+                      return (
+                        <tr key={breakdown.id} className="border-b border-amber-900/30 bg-amber-950/10">
+                          <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
+                            Cost of revenues — {breakdown.label}
+                          </td>
+                          {years.map((y) => {
+                            const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
+                            const displayValue = storedToDisplay(value, meta.currencyUnit);
+                            const unitLabel = getUnitLabel(meta.currencyUnit);
+                            return (
+                              <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                                {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                  minimumFractionDigits: showDecimals ? 2 : 0,
+                                  maximumFractionDigits: showDecimals ? 2 : 0,
+                                })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    }).filter(Boolean)
+                  ) : (() => {
+                    const cogsSbc = years.map((y) => sbcBreakdowns["cogs"]?.[y] ?? 0);
+                    const hasAnySbc = cogsSbc.some(v => v !== 0);
+                    if (!hasAnySbc) return null;
                     
                     return (
-                      <td key={`${row.id}-${y}`} className={`px-3 py-2 ${cellClass}`}>
-                        {display || (isInput ? "" : "—")}
-                      </td>
+                      <tr className="border-b border-amber-900/30 bg-amber-950/10">
+                        <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
+                          Cost of revenues
+                        </td>
+                        {years.map((y) => {
+                          const value = sbcBreakdowns["cogs"]?.[y] ?? 0;
+                          const displayValue = storedToDisplay(value, meta.currencyUnit);
+                          const unitLabel = getUnitLabel(meta.currencyUnit);
+                          return (
+                            <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                              {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                minimumFractionDigits: showDecimals ? 2 : 0,
+                                maximumFractionDigits: showDecimals ? 2 : 0,
+                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                            </td>
+                          );
+                        })}
+                      </tr>
                     );
-                  })}
-                </tr>
-              );
-            })}
+                  })()}
 
-            {/* If no years or rows, show a friendly empty state */}
-            {flat.length === 0 && (
-              <tr>
-                <td colSpan={Math.max(1, 1 + years.length)} className="px-3 py-8 text-center text-slate-500">
-                  No rows yet. Start building your {label.toLowerCase()} in the Builder Panel.
-                </td>
-              </tr>
+                  {/* SG&A SBC */}
+                  {hasSgaBreakdowns ? (
+                    sgaBreakdowns.map((breakdown) => {
+                      const breakdownSbc = years.map((y) => sbcBreakdowns[breakdown.id]?.[y] ?? 0);
+                      const hasAnySbc = breakdownSbc.some(v => v !== 0);
+                      if (!hasAnySbc) return null;
+                      
+                      return (
+                        <tr key={breakdown.id} className="border-b border-amber-900/30 bg-amber-950/10">
+                          <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
+                            {breakdown.label}
+                          </td>
+                          {years.map((y) => {
+                            const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
+                            const displayValue = storedToDisplay(value, meta.currencyUnit);
+                            const unitLabel = getUnitLabel(meta.currencyUnit);
+                            return (
+                              <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                                {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                  minimumFractionDigits: showDecimals ? 2 : 0,
+                                  maximumFractionDigits: showDecimals ? 2 : 0,
+                                })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    }).filter(Boolean)
+                  ) : (() => {
+                    const sgaSbc = years.map((y) => sbcBreakdowns["sga"]?.[y] ?? 0);
+                    const hasAnySbc = sgaSbc.some(v => v !== 0);
+                    if (!hasAnySbc) return null;
+                    
+                    return (
+                      <tr className="border-b border-amber-900/30 bg-amber-950/10">
+                        <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
+                          Selling, General & Administrative
+                        </td>
+                        {years.map((y) => {
+                          const value = sbcBreakdowns["sga"]?.[y] ?? 0;
+                          const displayValue = storedToDisplay(value, meta.currencyUnit);
+                          const unitLabel = getUnitLabel(meta.currencyUnit);
+                          return (
+                            <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                              {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                minimumFractionDigits: showDecimals ? 2 : 0,
+                                maximumFractionDigits: showDecimals ? 2 : 0,
+                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })()}
+
+                  {/* Total SBC Row */}
+                  {(() => {
+                    const totalSbcByYear = years.map((y) => {
+                      let total = 0;
+                      if (hasSgaBreakdowns) {
+                        sgaBreakdowns.forEach((b) => {
+                          total += sbcBreakdowns[b.id]?.[y] ?? 0;
+                        });
+                      } else {
+                        total += sbcBreakdowns["sga"]?.[y] ?? 0;
+                      }
+                      if (hasCogsBreakdowns) {
+                        cogsBreakdowns.forEach((b) => {
+                          total += sbcBreakdowns[b.id]?.[y] ?? 0;
+                        });
+                      } else {
+                        total += sbcBreakdowns["cogs"]?.[y] ?? 0;
+                      }
+                      return total;
+                    });
+                    
+                    const hasAnySbc = totalSbcByYear.some(v => v !== 0);
+                    if (!hasAnySbc) return null;
+                    
+                    return (
+                      <tr className="border-t-2 border-amber-700/50 bg-amber-950/30">
+                        <td className="px-3 py-2 font-semibold text-amber-200">
+                          Total stock-based compensation expense
+                        </td>
+                        {years.map((y, idx) => {
+                          const value = totalSbcByYear[idx];
+                          const displayValue = storedToDisplay(value, meta.currencyUnit);
+                          const unitLabel = getUnitLabel(meta.currencyUnit);
+                          return (
+                            <td key={y} className="px-3 py-2 text-right font-semibold text-amber-100">
+                              {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                minimumFractionDigits: showDecimals ? 2 : 0,
+                                maximumFractionDigits: showDecimals ? 2 : 0,
+                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })()}
+                </>
+              );
+            })()}
+
+            {/* Balance Sheet */}
+            {balanceSheet && balanceSheet.length > 0 && (
+              <>
+                <StatementTable
+                  rows={balanceSheet}
+                  label="Balance Sheet"
+                  years={years}
+                  meta={meta}
+                  showDecimals={showDecimals}
+                  expandedRows={expandedRows}
+                  toggleRow={toggleRow}
+                />
+                
+                {/* Balance Check */}
+                {(() => {
+                  const balanceCheck = checkBalanceSheetBalance(balanceSheet, years);
+                  const allBalanced = balanceCheck.every(b => b.balances);
+                  const hasAnyData = balanceCheck.some(b => b.totalAssets !== 0 || b.totalLiabAndEquity !== 0);
+                  
+                  if (!hasAnyData) return null;
+                  
+                  return (
+                    <>
+                      {/* Spacing */}
+                      <tr>
+                        <td colSpan={1 + years.length} className="h-4 bg-transparent"></td>
+                      </tr>
+                      
+                      {/* Balance Check Header */}
+                      <tr className={`border-t-4 ${allBalanced ? "border-emerald-600" : "border-red-600"}`}>
+                        <td colSpan={1 + years.length} className={`px-3 py-3 ${allBalanced ? "bg-emerald-950/30" : "bg-red-950/30"}`}>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-lg ${allBalanced ? "text-emerald-400" : "text-red-400"}`}>
+                              {allBalanced ? "✓" : "✗"}
+                            </span>
+                            <h3 className={`text-sm font-bold ${allBalanced ? "text-emerald-200" : "text-red-200"}`}>
+                              Balance Check: {allBalanced ? "BALANCED" : "OUT OF BALANCE"}
+                            </h3>
+                          </div>
+                          <p className={`text-xs mt-1 ${allBalanced ? "text-emerald-300/80" : "text-red-300/80"}`}>
+                            {allBalanced 
+                              ? "Total Assets = Total Liabilities + Total Equity ✓" 
+                              : "⚠️ Total Assets ≠ Total Liabilities + Total Equity. Please review your inputs."}
+                          </p>
+                        </td>
+                      </tr>
+                      
+                      {/* Balance Check Details */}
+                      <tr className={`border-b-2 ${allBalanced ? "border-emerald-700/50" : "border-red-700/50"}`}>
+                        <td className={`px-3 py-2 font-semibold ${allBalanced ? "text-emerald-200" : "text-red-200"}`}>
+                          Total Assets
+                        </td>
+                        {years.map((y) => {
+                          const check = balanceCheck.find(b => b.year === y);
+                          if (!check) return <td key={y} className="px-3 py-2"></td>;
+                          const displayValue = storedToDisplay(check.totalAssets, meta.currencyUnit);
+                          const unitLabel = getUnitLabel(meta.currencyUnit);
+                          return (
+                            <td key={y} className={`px-3 py-2 text-right font-semibold ${allBalanced ? "text-emerald-100" : "text-red-100"}`}>
+                              {check.totalAssets === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                minimumFractionDigits: showDecimals ? 2 : 0,
+                                maximumFractionDigits: showDecimals ? 2 : 0,
+                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      
+                      <tr className={`border-b ${allBalanced ? "border-emerald-800/30" : "border-red-800/30"}`}>
+                        <td className={`px-3 py-2 font-semibold ${allBalanced ? "text-emerald-200" : "text-red-200"}`}>
+                          Total Liabilities + Equity
+                        </td>
+                        {years.map((y) => {
+                          const check = balanceCheck.find(b => b.year === y);
+                          if (!check) return <td key={y} className="px-3 py-2"></td>;
+                          const displayValue = storedToDisplay(check.totalLiabAndEquity, meta.currencyUnit);
+                          const unitLabel = getUnitLabel(meta.currencyUnit);
+                          return (
+                            <td key={y} className={`px-3 py-2 text-right font-semibold ${allBalanced ? "text-emerald-100" : "text-red-100"}`}>
+                              {check.totalLiabAndEquity === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                minimumFractionDigits: showDecimals ? 2 : 0,
+                                maximumFractionDigits: showDecimals ? 2 : 0,
+                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      
+                      {/* Difference Row - only show if not balanced */}
+                      {!allBalanced && (
+                        <tr className="border-b-2 border-red-700/50 bg-red-950/20">
+                          <td className="px-3 py-2 font-bold text-red-300">
+                            Difference (Out of Balance)
+                          </td>
+                          {years.map((y) => {
+                            const check = balanceCheck.find(b => b.year === y);
+                            if (!check || check.balances) return <td key={y} className="px-3 py-2"></td>;
+                            const displayValue = storedToDisplay(Math.abs(check.difference), meta.currencyUnit);
+                            const unitLabel = getUnitLabel(meta.currencyUnit);
+                            return (
+                              <td key={y} className="px-3 py-2 text-right font-bold text-red-200">
+                                {check.difference === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
+                                  minimumFractionDigits: showDecimals ? 2 : 0,
+                                  maximumFractionDigits: showDecimals ? 2 : 0,
+                                })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      )}
+                    </>
+                  );
+                })()}
+              </>
+            )}
+
+            {/* Cash Flow Statement */}
+            {cashFlow && cashFlow.length > 0 && (
+              <StatementTable
+                rows={cashFlow}
+                label="Cash Flow Statement"
+                years={years}
+                meta={meta}
+                showDecimals={showDecimals}
+                expandedRows={expandedRows}
+                toggleRow={toggleRow}
+              />
             )}
 
             {years.length === 0 && (
               <tr>
                 <td colSpan={1} className="px-3 py-8 text-center text-slate-500">
-                  No years found. (We’ll fix meta years next.)
+                  No years found.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
-      </div>
-
-      <div className="mt-3 text-[10px] text-slate-600">
-        Next: Excel export maps this state into ExcelJS with formulas + IB formatting (blue inputs, black formulas).
       </div>
     </section>
   );

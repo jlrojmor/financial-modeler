@@ -61,8 +61,16 @@ function computeFormula(row: Row, year: string, statementRows: Row[]): number {
   if (rowId === "ebitda") {
     const grossProfit = findRowValue(statementRows, "gross_profit", year);
     const sga = findRowValue(statementRows, "sga", year); // This will sum all SG&A breakdowns if they exist
-    const rd = findRowValue(statementRows, "rd", year);
-    const otherOpEx = findRowValue(statementRows, "other_opex", year);
+    
+    // Check if R&D and Other Opex are children of SG&A (in which case they're already included in SG&A)
+    const sgaRow = statementRows.find(r => r.id === "sga");
+    const rdIsChildOfSga = sgaRow?.children?.some(c => c.id === "rd") ?? false;
+    const otherOpexIsChildOfSga = sgaRow?.children?.some(c => c.id === "other_opex") ?? false;
+    
+    // Only subtract R&D and Other Opex separately if they're NOT children of SG&A
+    const rd = rdIsChildOfSga ? 0 : findRowValue(statementRows, "rd", year);
+    const otherOpEx = otherOpexIsChildOfSga ? 0 : findRowValue(statementRows, "other_opex", year);
+    
     return grossProfit - sga - rd - otherOpEx;
   }
 
@@ -93,8 +101,28 @@ function computeFormula(row: Row, year: string, statementRows: Row[]): number {
     return ebt - tax;
   }
 
-  // Balance Sheet formulas
+  if (rowId === "net_income_margin") {
+    const netIncome = findRowValue(statementRows, "net_income", year);
+    const revenue = findRowValue(statementRows, "rev", year);
+    if (revenue === 0) return 0;
+    return (netIncome / revenue) * 100; // Return as percentage (e.g., 15.5 for 15.5%)
+  }
+
+  // Balance Sheet formulas - subtotals should sum all items in their category dynamically
   if (rowId === "total_current_assets") {
+    // Find all current assets items (everything before total_current_assets that's not a total/subtotal)
+    const totalCurrentAssetsIndex = statementRows.findIndex(r => r.id === "total_current_assets");
+    if (totalCurrentAssetsIndex >= 0) {
+      let sum = 0;
+      for (let i = 0; i < totalCurrentAssetsIndex; i++) {
+        const item = statementRows[i];
+        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
+          sum += findRowValue(statementRows, item.id, year);
+        }
+      }
+      return sum;
+    }
+    // Fallback to hardcoded items if structure is unexpected
     const cash = findRowValue(statementRows, "cash", year);
     const ar = findRowValue(statementRows, "ar", year);
     const inventory = findRowValue(statementRows, "inventory", year);
@@ -103,13 +131,41 @@ function computeFormula(row: Row, year: string, statementRows: Row[]): number {
   }
 
   if (rowId === "total_assets") {
+    // Sum total_current_assets + all fixed assets items
     const currentAssets = findRowValue(statementRows, "total_current_assets", year);
+    const totalCurrentAssetsIndex = statementRows.findIndex(r => r.id === "total_current_assets");
+    const totalAssetsIndex = statementRows.findIndex(r => r.id === "total_assets");
+    if (totalCurrentAssetsIndex >= 0 && totalAssetsIndex >= 0) {
+      let fixedAssetsSum = 0;
+      for (let i = totalCurrentAssetsIndex + 1; i < totalAssetsIndex; i++) {
+        const item = statementRows[i];
+        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
+          fixedAssetsSum += findRowValue(statementRows, item.id, year);
+        }
+      }
+      return currentAssets + fixedAssetsSum;
+    }
+    // Fallback
     const ppe = findRowValue(statementRows, "ppe", year);
     const otherAssets = findRowValue(statementRows, "other_assets", year);
     return currentAssets + ppe + otherAssets;
   }
 
   if (rowId === "total_current_liabilities") {
+    // Find all current liabilities items dynamically
+    const totalAssetsIndex = statementRows.findIndex(r => r.id === "total_assets");
+    const totalCurrentLiabIndex = statementRows.findIndex(r => r.id === "total_current_liabilities");
+    if (totalAssetsIndex >= 0 && totalCurrentLiabIndex >= 0) {
+      let sum = 0;
+      for (let i = totalAssetsIndex + 1; i < totalCurrentLiabIndex; i++) {
+        const item = statementRows[i];
+        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
+          sum += findRowValue(statementRows, item.id, year);
+        }
+      }
+      return sum;
+    }
+    // Fallback
     const ap = findRowValue(statementRows, "ap", year);
     const stDebt = findRowValue(statementRows, "st_debt", year);
     const otherCL = findRowValue(statementRows, "other_cl", year);
@@ -117,13 +173,41 @@ function computeFormula(row: Row, year: string, statementRows: Row[]): number {
   }
 
   if (rowId === "total_liabilities") {
+    // Sum total_current_liabilities + all non-current liabilities items
     const currentLiab = findRowValue(statementRows, "total_current_liabilities", year);
+    const totalCurrentLiabIndex = statementRows.findIndex(r => r.id === "total_current_liabilities");
+    const totalLiabIndex = statementRows.findIndex(r => r.id === "total_liabilities");
+    if (totalCurrentLiabIndex >= 0 && totalLiabIndex >= 0) {
+      let nonCurrentLiabSum = 0;
+      for (let i = totalCurrentLiabIndex + 1; i < totalLiabIndex; i++) {
+        const item = statementRows[i];
+        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
+          nonCurrentLiabSum += findRowValue(statementRows, item.id, year);
+        }
+      }
+      return currentLiab + nonCurrentLiabSum;
+    }
+    // Fallback
     const ltDebt = findRowValue(statementRows, "lt_debt", year);
     const otherLiab = findRowValue(statementRows, "other_liab", year);
     return currentLiab + ltDebt + otherLiab;
   }
 
   if (rowId === "total_equity") {
+    // Sum all equity items dynamically
+    const totalLiabIndex = statementRows.findIndex(r => r.id === "total_liabilities");
+    const totalEquityIndex = statementRows.findIndex(r => r.id === "total_equity");
+    if (totalLiabIndex >= 0 && totalEquityIndex >= 0) {
+      let equitySum = 0;
+      for (let i = totalLiabIndex + 1; i < totalEquityIndex; i++) {
+        const item = statementRows[i];
+        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
+          equitySum += findRowValue(statementRows, item.id, year);
+        }
+      }
+      return equitySum;
+    }
+    // Fallback
     const commonStock = findRowValue(statementRows, "common_stock", year);
     const retainedEarnings = findRowValue(statementRows, "retained_earnings", year);
     const otherEquity = findRowValue(statementRows, "other_equity", year);
@@ -166,6 +250,40 @@ function computeFormula(row: Row, year: string, statementRows: Row[]): number {
   }
 
   return 0;
+}
+
+/**
+ * Check if Balance Sheet balances: Total Assets = Total Liabilities + Total Equity
+ * Returns an object with balance status and difference for each year
+ * Uses findRowValue internally to get computed values
+ */
+export function checkBalanceSheetBalance(
+  balanceSheet: Row[],
+  years: string[]
+): { year: string; balances: boolean; totalAssets: number; totalLiabAndEquity: number; difference: number }[] {
+  const results = years.map(year => {
+    // Use findRowValue to get the computed values (it handles children, formulas, etc.)
+    const totalAssets = findRowValue(balanceSheet, "total_assets", year);
+    const totalLiabilities = findRowValue(balanceSheet, "total_liabilities", year);
+    const totalEquity = findRowValue(balanceSheet, "total_equity", year);
+    const totalLiabAndEquity = totalLiabilities + totalEquity;
+    
+    // Calculate difference (should be 0 if balanced)
+    const difference = totalAssets - totalLiabAndEquity;
+    
+    // Consider it balanced if difference is within rounding tolerance (0.01)
+    const balances = Math.abs(difference) < 0.01;
+    
+    return {
+      year,
+      balances,
+      totalAssets,
+      totalLiabAndEquity,
+      difference,
+    };
+  });
+  
+  return results;
 }
 
 /**
@@ -235,10 +353,19 @@ export function recomputeCalculations(
       ? recomputeCalculations(row.children, year, statementRows)
       : undefined;
 
-    // For input rows with children, compute the sum and store it FIRST
-    // This allows formulas to reference the parent (e.g., COGS) and get the sum of children
+    // CRITICAL: For input rows with children, compute the sum and store it FIRST
+    // This allows formulas to reference the parent (e.g., COGS, SG&A) and get the sum of children
+    // This must happen BEFORE calc rows are computed, so formulas can reference the correct totals
     if (row.kind === "input" && newChildren && newChildren.length > 0) {
+      // Sum all children values (handles nested children recursively)
       const sum = newChildren.reduce((total, child) => {
+        // If child has its own children, recursively sum them
+        if (child.children && child.children.length > 0) {
+          const childSum = child.children.reduce((childTotal, grandchild) => {
+            return childTotal + (grandchild.values?.[year] ?? 0);
+          }, 0);
+          return total + childSum;
+        }
         return total + (child.values?.[year] ?? 0);
       }, 0);
       const newValues = { ...(row.values ?? {}), [year]: sum };

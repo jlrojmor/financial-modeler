@@ -39,6 +39,9 @@ export default function StatementBuilder({
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [newChildLabels, setNewChildLabels] = useState<Record<string, string>>({});
   const [showAddChild, setShowAddChild] = useState<Record<string, boolean>>({});
+  const [showAddNewItem, setShowAddNewItem] = useState(false);
+  const [newItemLabel, setNewItemLabel] = useState("");
+  const [newItemParent, setNewItemParent] = useState<string>("top"); // "top", "rev", "cogs", "sga", or specific parent ID
 
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
@@ -101,13 +104,168 @@ export default function StatementBuilder({
     );
   };
 
+  // Get available parent options for adding new items
+  const getParentOptions = () => {
+    const options: Array<{ id: string; label: string }> = [
+      { id: "top", label: "Top Level (New Line Item)" },
+    ];
+    
+    // Add Revenue option
+    const revRow = rows?.find(r => r.id === "rev");
+    if (revRow) {
+      if (revRow.children && revRow.children.length > 0) {
+        // If Revenue has breakdowns, show them as options
+        revRow.children.forEach(child => {
+          options.push({ id: child.id, label: `Revenue → ${child.label}` });
+        });
+      } else {
+        // If no breakdowns, show Revenue as option
+        options.push({ id: "rev", label: "Revenue" });
+      }
+    }
+    
+    // Add COGS option
+    const cogsRow = rows?.find(r => r.id === "cogs");
+    if (cogsRow) {
+      if (cogsRow.children && cogsRow.children.length > 0) {
+        cogsRow.children.forEach(child => {
+          options.push({ id: child.id, label: `COGS → ${child.label}` });
+        });
+      } else {
+        options.push({ id: "cogs", label: "COGS" });
+      }
+    }
+    
+    // Add SG&A option
+    const sgaRow = rows?.find(r => r.id === "sga");
+    if (sgaRow) {
+      if (sgaRow.children && sgaRow.children.length > 0) {
+        sgaRow.children.forEach(child => {
+          options.push({ id: child.id, label: `SG&A → ${child.label}` });
+        });
+      } else {
+        options.push({ id: "sga", label: "SG&A" });
+      }
+    }
+    
+    return options;
+  };
+
+  const handleAddNewItem = () => {
+    const trimmed = newItemLabel.trim();
+    if (!trimmed) return;
+
+    if (newItemParent === "top") {
+      // Add as top-level item
+      // Find where to insert it - after Tax, before Net Income
+      const taxIndex = rows?.findIndex(r => r.id === "tax");
+      const insertIndex = taxIndex >= 0 ? taxIndex + 1 : rows?.length ?? 0;
+      
+      // Create new row
+      const newRow: Row = {
+        id: `id_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        label: trimmed,
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      };
+      
+      // Update store directly
+      useModelStore.setState((state) => {
+        const currentRows = [...(state[statement] ?? [])];
+        currentRows.splice(insertIndex, 0, newRow);
+        return { [statement]: currentRows };
+      });
+    } else {
+      // Add as child of selected parent
+      addChildRow(statement, newItemParent, trimmed);
+    }
+
+    // Reset form
+    setNewItemLabel("");
+    setNewItemParent("top");
+    setShowAddNewItem(false);
+  };
+
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-slate-800 bg-slate-950 p-4">
-        <div className="mb-3">
-          <h3 className="text-sm font-semibold text-slate-100">{statementLabel}</h3>
-          <p className="mt-1 text-xs text-slate-400">{description}</p>
+        <div className="mb-3 flex items-start justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-100">{statementLabel}</h3>
+            <p className="mt-1 text-xs text-slate-400">{description}</p>
+          </div>
+          {statement === "incomeStatement" && (
+            <button
+              onClick={() => setShowAddNewItem(true)}
+              className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 transition"
+            >
+              + Add Item
+            </button>
+          )}
         </div>
+
+        {/* Add New Item Dialog */}
+        {showAddNewItem && (
+          <div className="mb-4 rounded-lg border border-blue-800/40 bg-blue-950/20 p-4">
+            <h4 className="mb-3 text-xs font-semibold text-blue-200">Add New Income Statement Item</h4>
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-[10px] text-blue-300">Item Name</label>
+                <input
+                  type="text"
+                  className="w-full rounded-md border border-blue-800 bg-blue-950/50 px-2 py-1.5 text-xs text-blue-100"
+                  placeholder="e.g., Other Revenue, Warranty Expense..."
+                  value={newItemLabel}
+                  onChange={(e) => setNewItemLabel(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      handleAddNewItem();
+                    } else if (e.key === "Escape") {
+                      setShowAddNewItem(false);
+                      setNewItemLabel("");
+                    }
+                  }}
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] text-blue-300">Add Under</label>
+                <select
+                  className="w-full rounded-md border border-blue-800 bg-blue-950/50 px-2 py-1.5 text-xs text-blue-100"
+                  value={newItemParent}
+                  onChange={(e) => setNewItemParent(e.target.value)}
+                >
+                  {getParentOptions().map(opt => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleAddNewItem}
+                  disabled={!newItemLabel.trim()}
+                  className="flex-1 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                >
+                  Add Item
+                </button>
+                <button
+                  onClick={() => {
+                    setShowAddNewItem(false);
+                    setNewItemLabel("");
+                    setNewItemParent("top");
+                  }}
+                  className="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-600 transition"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="space-y-2">
           {flat
@@ -126,6 +284,42 @@ export default function StatementBuilder({
               }
               // Hide Interest Expense, Interest Income, Other Income (handled by InterestOtherBuilder)
               if (row.id === "interest_expense" || row.id === "interest_income" || row.id === "other_income") {
+                return false;
+              }
+              // Hide Tax (handled by TaxBuilder)
+              if (row.id === "tax") {
+                return false;
+              }
+              // Hide all calculated totals and margins (they're automatically calculated)
+              if (row.id === "gross_profit" || row.id === "gross_margin" || 
+                  row.id === "ebitda" || row.id === "ebitda_margin" ||
+                  row.id === "ebit" || row.id === "ebt" ||
+                  row.id === "net_income" || row.id === "net_income_margin") {
+                return false;
+              }
+              // Hide R&D and Other Opex if they're children of SG&A (handled by SgaBuilder)
+              if (row.id === "rd" || row.id === "other_opex") {
+                // Check if they're children of SG&A
+                const sgaRow = rows?.find(r => r.id === "sga");
+                if ((sgaRow?.children?.some(c => c.id === row.id)) || 
+                    (sgaRow?.children?.some(c => c.children?.some(cc => cc.id === row.id)))) {
+                  return false;
+                }
+              }
+              // Hide children of Revenue, COGS, and SG&A (they're managed in dedicated builders)
+              const isChildOfManagedRow = (r: Row, parentRows: Row[]): boolean => {
+                for (const parent of parentRows) {
+                  if ((parent.id === "rev" || parent.id === "cogs" || parent.id === "sga") && 
+                      parent.children?.some(c => c.id === r.id)) {
+                    return true;
+                  }
+                  if (parent.children && isChildOfManagedRow(r, parent.children)) {
+                    return true;
+                  }
+                }
+                return false;
+              };
+              if (isChildOfManagedRow(row, rows ?? [])) {
                 return false;
               }
               return true;

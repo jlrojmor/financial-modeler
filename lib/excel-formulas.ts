@@ -146,10 +146,42 @@ export function generateExcelFormula(
   }
 
   if (rowId === "ebit") {
-    const ebitdaRow = findExcelRowNumber(flattenedRows, "ebitda", startRow);
+    // EBIT = Gross Profit - SG&A - R&D - Other Opex - D&A
+    const gpRow = findExcelRowNumber(flattenedRows, "gross_profit", startRow);
+    const sgaRow = findExcelRowNumber(flattenedRows, "sga", startRow);
+    
+    // Check if R&D and Other Opex are children of SG&A
+    const sgaFlattenedRow = flattenedRows.find(r => r.row.id === "sga");
+    const rdIsChildOfSga = sgaFlattenedRow?.row.children?.some(c => c.id === "rd") ?? false;
+    const otherOpexIsChildOfSga = sgaFlattenedRow?.row.children?.some(c => c.id === "other_opex") ?? false;
+    
+    const parts: string[] = [];
+    if (gpRow) parts.push(getCellAddress(gpRow, yearCol));
+    if (sgaRow) parts.push(`-${getCellAddress(sgaRow, yearCol)}`);
+    
+    // Only subtract R&D and Other Opex separately if they're NOT children of SG&A
+    if (!rdIsChildOfSga) {
+      const rdRow = findExcelRowNumber(flattenedRows, "rd", startRow);
+      if (rdRow) parts.push(`-${getCellAddress(rdRow, yearCol)}`);
+    }
+    if (!otherOpexIsChildOfSga) {
+      const otherOpexRow = findExcelRowNumber(flattenedRows, "other_opex", startRow);
+      if (otherOpexRow) parts.push(`-${getCellAddress(otherOpexRow, yearCol)}`);
+    }
+    
     const dandaRow = findExcelRowNumber(flattenedRows, "danda", startRow);
-    if (ebitdaRow && dandaRow) {
-      return `=${getCellAddress(ebitdaRow, yearCol)}-${getCellAddress(dandaRow, yearCol)}`;
+    if (dandaRow) parts.push(`-${getCellAddress(dandaRow, yearCol)}`);
+    
+    if (parts.length > 0) return `=${parts.join("")}`;
+  }
+
+  if (rowId === "ebit_margin") {
+    const ebitRow = findExcelRowNumber(flattenedRows, "ebit", startRow);
+    const revRow = findExcelRowNumber(flattenedRows, "rev", startRow);
+    if (ebitRow && revRow) {
+      // Excel percentage format expects decimal (0.145 for 14.5%), so divide by 100
+      // The percentage number format will automatically display it as 14.50%
+      return `=IF(${getCellAddress(revRow, yearCol)}=0,0,${getCellAddress(ebitRow, yearCol)}/${getCellAddress(revRow, yearCol)})`;
     }
   }
 
@@ -209,8 +241,43 @@ export function generateExcelFormula(
     if (rows.length > 0) return `=${rows.join("+")}`;
   }
 
+  if (rowId === "total_fixed_assets") {
+    // Sum all fixed assets items (everything between total_current_assets and total_assets)
+    const totalCurrentAssetsIndex = flattenedRows.findIndex(r => r.row.id === "total_current_assets");
+    const totalAssetsIndex = flattenedRows.findIndex(r => r.row.id === "total_assets");
+    if (totalCurrentAssetsIndex >= 0 && totalAssetsIndex >= 0) {
+      const addresses: string[] = [];
+      for (let i = totalCurrentAssetsIndex + 1; i < totalAssetsIndex; i++) {
+        const item = flattenedRows[i].row;
+        // Skip the total_fixed_assets row itself and other subtotals
+        if (item.id !== "total_fixed_assets" && !item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
+          const rowNum = findExcelRowNumber(flattenedRows, item.id, startRow);
+          if (rowNum) {
+            addresses.push(getCellAddress(rowNum, yearCol));
+          }
+        }
+      }
+      if (addresses.length > 0) return `=${addresses.join("+")}`;
+    }
+    // Fallback
+    const rows = ["ppe", "intangible_assets", "other_assets"]
+      .map((id) => findExcelRowNumber(flattenedRows, id, startRow))
+      .filter((r): r is number => r !== null)
+      .map((r) => getCellAddress(r, yearCol));
+    if (rows.length > 0) return `=${rows.join("+")}`;
+  }
+
   if (rowId === "total_assets") {
-    // Sum total_current_assets + all fixed assets items
+    // Sum total_current_assets + total_fixed_assets (or all fixed assets items if subtotal doesn't exist)
+    const totalFixedAssetsRowNum = findExcelRowNumber(flattenedRows, "total_fixed_assets", startRow);
+    if (totalFixedAssetsRowNum) {
+      // Use the subtotal if it exists
+      const currentAssetsRowNum = findExcelRowNumber(flattenedRows, "total_current_assets", startRow);
+      if (currentAssetsRowNum) {
+        return `=${getCellAddress(currentAssetsRowNum, yearCol)}+${getCellAddress(totalFixedAssetsRowNum, yearCol)}`;
+      }
+    }
+    // Fallback: calculate manually if subtotal doesn't exist
     const totalCurrentAssetsIndex = flattenedRows.findIndex(r => r.row.id === "total_current_assets");
     const totalAssetsIndex = flattenedRows.findIndex(r => r.row.id === "total_assets");
     if (totalCurrentAssetsIndex >= 0 && totalAssetsIndex >= 0) {
@@ -230,7 +297,7 @@ export function generateExcelFormula(
       }
       if (addresses.length > 0) return `=${addresses.join("+")}`;
     }
-    // Fallback
+    // Final fallback
     const rows = ["total_current_assets", "ppe", "other_assets"]
       .map((id) => findExcelRowNumber(flattenedRows, id, startRow))
       .filter((r): r is number => r !== null)
@@ -263,8 +330,43 @@ export function generateExcelFormula(
     if (rows.length > 0) return `=${rows.join("+")}`;
   }
 
+  if (rowId === "total_non_current_liabilities") {
+    // Sum all non-current liabilities items (everything between total_current_liabilities and total_liabilities)
+    const totalCurrentLiabIndex = flattenedRows.findIndex(r => r.row.id === "total_current_liabilities");
+    const totalLiabIndex = flattenedRows.findIndex(r => r.row.id === "total_liabilities");
+    if (totalCurrentLiabIndex >= 0 && totalLiabIndex >= 0) {
+      const addresses: string[] = [];
+      for (let i = totalCurrentLiabIndex + 1; i < totalLiabIndex; i++) {
+        const item = flattenedRows[i].row;
+        // Skip the total_non_current_liabilities row itself and other subtotals
+        if (item.id !== "total_non_current_liabilities" && !item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
+          const rowNum = findExcelRowNumber(flattenedRows, item.id, startRow);
+          if (rowNum) {
+            addresses.push(getCellAddress(rowNum, yearCol));
+          }
+        }
+      }
+      if (addresses.length > 0) return `=${addresses.join("+")}`;
+    }
+    // Fallback
+    const rows = ["lt_debt", "other_liab"]
+      .map((id) => findExcelRowNumber(flattenedRows, id, startRow))
+      .filter((r): r is number => r !== null)
+      .map((r) => getCellAddress(r, yearCol));
+    if (rows.length > 0) return `=${rows.join("+")}`;
+  }
+
   if (rowId === "total_liabilities") {
-    // Sum total_current_liabilities + all non-current liabilities items
+    // Sum total_current_liabilities + total_non_current_liabilities (or all non-current items if subtotal doesn't exist)
+    const totalNonCurrentLiabRowNum = findExcelRowNumber(flattenedRows, "total_non_current_liabilities", startRow);
+    if (totalNonCurrentLiabRowNum) {
+      // Use the subtotal if it exists
+      const currentLiabRowNum = findExcelRowNumber(flattenedRows, "total_current_liabilities", startRow);
+      if (currentLiabRowNum) {
+        return `=${getCellAddress(currentLiabRowNum, yearCol)}+${getCellAddress(totalNonCurrentLiabRowNum, yearCol)}`;
+      }
+    }
+    // Fallback: calculate manually if subtotal doesn't exist
     const totalCurrentLiabIndex = flattenedRows.findIndex(r => r.row.id === "total_current_liabilities");
     const totalLiabIndex = flattenedRows.findIndex(r => r.row.id === "total_liabilities");
     if (totalCurrentLiabIndex >= 0 && totalLiabIndex >= 0) {
@@ -284,7 +386,7 @@ export function generateExcelFormula(
       }
       if (addresses.length > 0) return `=${addresses.join("+")}`;
     }
-    // Fallback
+    // Final fallback
     const rows = ["total_current_liabilities", "lt_debt", "other_liab"]
       .map((id) => findExcelRowNumber(flattenedRows, id, startRow))
       .filter((r): r is number => r !== null)
@@ -318,8 +420,8 @@ export function generateExcelFormula(
   }
 
   if (rowId === "total_liab_and_equity") {
-    const liabRow = findExcelRowNumber(flattenedRows, "total_liabilities");
-    const equityRow = findExcelRowNumber(flattenedRows, "total_equity");
+    const liabRow = findExcelRowNumber(flattenedRows, "total_liabilities", startRow);
+    const equityRow = findExcelRowNumber(flattenedRows, "total_equity", startRow);
     if (liabRow && equityRow) {
       return `=${getCellAddress(liabRow, yearCol)}+${getCellAddress(equityRow, yearCol)}`;
     }
@@ -338,15 +440,97 @@ export function generateExcelFormula(
   }
 
   if (rowId === "investing_cf") {
-    const capexRow = findExcelRowNumber(flattenedRows, "capex");
-    const otherRow = findExcelRowNumber(flattenedRows, "other_investing");
+    // Dynamically sum all investing items (between capex and investing_cf)
+    const capexIndex = flattenedRows.findIndex(r => r.row.id === "capex");
+    const investingCfIndex = flattenedRows.findIndex(r => r.row.id === "investing_cf");
+    
+    if (capexIndex >= 0 && investingCfIndex > capexIndex) {
+      const parts: string[] = [];
+      // Sum all items between capex and investing_cf
+      for (let i = capexIndex; i < investingCfIndex; i++) {
+        const item = flattenedRows[i].row;
+        // Skip the investing_cf row itself
+        if (item.id === "investing_cf") continue;
+        
+        const rowNum = findExcelRowNumber(flattenedRows, item.id, startRow);
+        if (!rowNum) continue;
+        
+        const cellAddress = getCellAddress(rowNum, yearCol);
+        
+        // Apply sign based on cfsLink.impact or default behavior
+        if (item.cfsLink && item.cfsLink.section === "investing") {
+          if (item.cfsLink.impact === "positive") {
+            parts.push(`+${cellAddress}`);
+          } else if (item.cfsLink.impact === "negative") {
+            parts.push(`-${cellAddress}`);
+          } else {
+            parts.push(`+${cellAddress}`);
+          }
+        } else {
+          // Default behavior: negative for outflows (capex), positive for others
+          if (item.id === "capex") {
+            parts.push(`-${cellAddress}`);
+          } else {
+            parts.push(`+${cellAddress}`);
+          }
+        }
+      }
+      if (parts.length > 0) return `=${parts.join("")}`;
+    }
+    
+    // Fallback to hardcoded calculation if structure is unexpected
+    const capexRow = findExcelRowNumber(flattenedRows, "capex", startRow);
+    const otherRow = findExcelRowNumber(flattenedRows, "other_investing", startRow);
     const parts: string[] = [];
     if (capexRow) parts.push(`-${getCellAddress(capexRow, yearCol)}`);
     if (otherRow) parts.push(`+${getCellAddress(otherRow, yearCol)}`);
-    if (parts.length > 0) return `=${parts.length === 1 ? parts[0] : `=${parts.join("")}`}`;
+    if (parts.length > 0) return `=${parts.join("")}`;
+    return null;
   }
 
   if (rowId === "financing_cf") {
+    // Dynamically sum all financing items (between investing_cf and financing_cf)
+    const investingCfIndex = flattenedRows.findIndex(r => r.row.id === "investing_cf");
+    const financingCfIndex = flattenedRows.findIndex(r => r.row.id === "financing_cf");
+    
+    if (investingCfIndex >= 0 && financingCfIndex > investingCfIndex) {
+      const parts: string[] = [];
+      // Sum all items between investing_cf and financing_cf
+      for (let i = investingCfIndex + 1; i < financingCfIndex; i++) {
+        const item = flattenedRows[i].row;
+        // Skip the financing_cf row itself
+        if (item.id === "financing_cf") continue;
+        
+        const rowNum = findExcelRowNumber(flattenedRows, item.id, startRow);
+        if (!rowNum) continue;
+        
+        const cellAddress = getCellAddress(rowNum, yearCol);
+        
+        // Apply sign based on cfsLink.impact or default behavior
+        if (item.cfsLink && item.cfsLink.section === "financing") {
+          if (item.cfsLink.impact === "positive") {
+            parts.push(`+${cellAddress}`);
+          } else if (item.cfsLink.impact === "negative") {
+            parts.push(`-${cellAddress}`);
+          } else {
+            parts.push(`+${cellAddress}`);
+          }
+        } else {
+          // Default behavior: positive for issuances, negative for repayments/dividends
+          if (item.id === "debt_issuance" || item.id === "equity_issuance") {
+            parts.push(`+${cellAddress}`);
+          } else if (item.id === "debt_repayment" || item.id === "dividends") {
+            parts.push(`-${cellAddress}`);
+          } else {
+            // Unknown item - default to positive
+            parts.push(`+${cellAddress}`);
+          }
+        }
+      }
+      if (parts.length > 0) return `=${parts.join("")}`;
+    }
+    
+    // Fallback to hardcoded calculation if structure is unexpected
     const rows = [
       { id: "debt_issuance", sign: "+" },
       { id: "debt_repayment", sign: "-" },
@@ -359,6 +543,7 @@ export function generateExcelFormula(
       })
       .filter((r): r is string => r !== null);
     if (rows.length > 0) return `=${rows.join("")}`;
+    return null;
   }
 
   if (rowId === "net_change_cash") {

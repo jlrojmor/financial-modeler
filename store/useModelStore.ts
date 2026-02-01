@@ -116,6 +116,11 @@ export type ModelState = {
 
   // Stock-Based Compensation annotation (for transparency, doesn't affect calculations)
   sbcBreakdowns: Record<string, Record<string, number>>; // { [categoryId]: { [year]: value } }
+  
+  // D&A location tracking (where D&A is embedded: "cogs", "sga", or "both")
+  danaLocation: "cogs" | "sga" | "both" | null;
+  // D&A values by year (only if we have exact allocation)
+  danaBreakdowns: Record<string, number>; // { [year]: value }
 
   currentStepId: WizardStepId;
   completedStepIds: WizardStepId[];
@@ -150,6 +155,9 @@ export type ModelActions = {
   unlockSection: (sectionId: string) => void;
   toggleSectionExpanded: (sectionId: string) => void;
   setSectionExpanded: (sectionId: string, expanded: boolean) => void;
+  
+  // Years management
+  updateYears: (years: { historical: string[]; projection: string[] }) => void;
   
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => void;
@@ -239,6 +247,9 @@ const defaultState: ModelState = {
   },
 
   sbcBreakdowns: {},
+  
+  danaLocation: null,
+  danaBreakdowns: {},
 
   currentStepId: "historicals",
   completedStepIds: [],
@@ -255,7 +266,7 @@ const defaultState: ModelState = {
 export const useModelStore = create<ModelState & ModelActions>()(
   persist(
     (set, get) => ({
-      ...defaultState,
+  ...defaultState,
 
   initializeModel: (meta) => {
     const state = get();
@@ -341,24 +352,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
         }
       }
 
-      // Migration: Ensure D&A exists (should be in template, but check anyway)
-      const hasDana = incomeStatement.some((r) => r.id === "danda");
-      if (!hasDana) {
-        // Find where to insert D&A - after EBITDA margin (or after EBITDA if margin doesn't exist)
-        const ebitdaMarginIndex = incomeStatement.findIndex((r) => r.id === "ebitda_margin");
-        const ebitdaIndex = incomeStatement.findIndex((r) => r.id === "ebitda");
-        const insertIndex = ebitdaMarginIndex >= 0 ? ebitdaMarginIndex + 1 : 
-                           ebitdaIndex >= 0 ? ebitdaIndex + 1 : 
-                           incomeStatement.length;
-        // Insert D&A
-        incomeStatement.splice(insertIndex, 0, {
-          id: "danda",
-          label: "Depreciation & Amortization (D&A)",
-          kind: "input",
-          valueType: "currency",
-          values: {},
-          children: [],
-        });
+      // Migration: Remove EBITDA and EBITDA Margin from IS (D&A is shown directly, then EBIT)
+      const ebitdaIndex = incomeStatement.findIndex((r) => r.id === "ebitda");
+      if (ebitdaIndex >= 0) {
+        incomeStatement.splice(ebitdaIndex, 1);
+      }
+      const ebitdaMarginIndex = incomeStatement.findIndex((r) => r.id === "ebitda_margin");
+      if (ebitdaMarginIndex >= 0) {
+        incomeStatement.splice(ebitdaMarginIndex, 1);
       }
 
       // Migration: Ensure EBIT exists (should be in template, but check anyway)
@@ -414,8 +415,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
         });
       }
       
-      // Ensure Total Assets exists (after fixed assets items)
-      if (totalAssetsIndex === -1) {
+      // Ensure Total Fixed Assets exists (after fixed assets items, before total_assets)
+      const totalFixedAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_fixed_assets");
+      if (totalFixedAssetsIndex === -1) {
         const newTotalCAIndex = balanceSheet.findIndex((r) => r.id === "total_current_assets");
         const faIds = ["ppe", "intangible_assets", "other_assets"];
         let insertIndex = newTotalCAIndex + 1;
@@ -425,6 +427,20 @@ export const useModelStore = create<ModelState & ModelActions>()(
             break;
           }
         }
+        balanceSheet.splice(insertIndex, 0, {
+          id: "total_fixed_assets",
+          label: "Total Fixed Assets",
+          kind: "subtotal",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      // Ensure Total Assets exists (after total_fixed_assets, before liabilities)
+      if (totalAssetsIndex === -1) {
+        const newTotalFixedAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_fixed_assets");
+        const insertIndex = newTotalFixedAssetsIndex >= 0 ? newTotalFixedAssetsIndex + 1 : balanceSheet.length;
         balanceSheet.splice(insertIndex, 0, {
           id: "total_assets",
           label: "Total Assets",
@@ -456,8 +472,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
         });
       }
       
-      // Ensure Total Liabilities exists
-      if (totalLiabIndex === -1) {
+      // Ensure Total Non-Current Liabilities exists (after non-current liabilities items, before total_liabilities)
+      const totalNonCurrentLiabIndex = balanceSheet.findIndex((r) => r.id === "total_non_current_liabilities");
+      if (totalNonCurrentLiabIndex === -1) {
         const newTotalCLIndex = balanceSheet.findIndex((r) => r.id === "total_current_liabilities");
         const nclIds = ["lt_debt", "other_liab"];
         let insertIndex = newTotalCLIndex + 1;
@@ -467,6 +484,20 @@ export const useModelStore = create<ModelState & ModelActions>()(
             break;
           }
         }
+        balanceSheet.splice(insertIndex, 0, {
+          id: "total_non_current_liabilities",
+          label: "Total Non-Current Liabilities",
+          kind: "subtotal",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      // Ensure Total Liabilities exists (after total_non_current_liabilities, before equity)
+      if (totalLiabIndex === -1) {
+        const newTotalNonCurrentLiabIndex = balanceSheet.findIndex((r) => r.id === "total_non_current_liabilities");
+        const insertIndex = newTotalNonCurrentLiabIndex >= 0 ? newTotalNonCurrentLiabIndex + 1 : balanceSheet.length;
         balanceSheet.splice(insertIndex, 0, {
           id: "total_liabilities",
           label: "Total Liabilities",
@@ -510,12 +541,127 @@ export const useModelStore = create<ModelState & ModelActions>()(
         });
       }
 
+      // Migration: Ensure CFS items exist (D&A, SBC, WC Change, Operating CF, Investing items)
+      // Migration: Ensure D&A exists in CFS
+      const hasDandaInCFS = cashFlow.some((r) => r.id === "danda");
+      if (!hasDandaInCFS) {
+        const netIncomeIndex = cashFlow.findIndex((r) => r.id === "net_income");
+        const insertIndex = netIncomeIndex >= 0 ? netIncomeIndex + 1 : cashFlow.length;
+        cashFlow.splice(insertIndex, 0, {
+          id: "danda",
+          label: "Depreciation & Amortization",
+          kind: "input",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      // Migration: Ensure SBC exists in CFS
+      const hasSbcInCFS = cashFlow.some((r) => r.id === "sbc");
+      if (!hasSbcInCFS) {
+        const dandaIndex = cashFlow.findIndex((r) => r.id === "danda");
+        const wcChangeIndex = cashFlow.findIndex((r) => r.id === "wc_change");
+        const insertIndex = dandaIndex >= 0 ? dandaIndex + 1 : 
+                           wcChangeIndex >= 0 ? wcChangeIndex : 
+                           cashFlow.length;
+        cashFlow.splice(insertIndex, 0, {
+          id: "sbc",
+          label: "Stock-Based Compensation",
+          kind: "calc",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      // Migration: Ensure WC Change exists in CFS
+      const hasWcChangeInCFS = cashFlow.some((r) => r.id === "wc_change");
+      if (!hasWcChangeInCFS) {
+        const sbcIndex = cashFlow.findIndex((r) => r.id === "sbc");
+        const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
+        const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+        const insertIndex = sbcIndex >= 0 ? sbcIndex + 1 : 
+                           otherOperatingIndex >= 0 ? otherOperatingIndex : 
+                           operatingCfIndex >= 0 ? operatingCfIndex : 
+                           cashFlow.length;
+        cashFlow.splice(insertIndex, 0, {
+          id: "wc_change",
+          label: "Change in Working Capital",
+          kind: "input",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      // Migration: Ensure Operating CF total exists
+      const hasOperatingCf = cashFlow.some((r) => r.id === "operating_cf");
+      if (!hasOperatingCf) {
+        const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
+        const insertIndex = otherOperatingIndex >= 0 ? otherOperatingIndex + 1 : cashFlow.length;
+        cashFlow.splice(insertIndex, 0, {
+          id: "operating_cf",
+          label: "Cash from Operating Activities",
+          kind: "calc",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      // Migration: Ensure Investing section items exist (capex, other_investing, investing_cf)
+      const hasCapex = cashFlow.some((r) => r.id === "capex");
+      if (!hasCapex) {
+        const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+        const insertIndex = operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length;
+        cashFlow.splice(insertIndex, 0, {
+          id: "capex",
+          label: "Capital Expenditures (CapEx)",
+          kind: "input",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      const hasOtherInvesting = cashFlow.some((r) => r.id === "other_investing");
+      if (!hasOtherInvesting) {
+        const capexIndex = cashFlow.findIndex((r) => r.id === "capex");
+        const insertIndex = capexIndex >= 0 ? capexIndex + 1 : cashFlow.length;
+        cashFlow.splice(insertIndex, 0, {
+          id: "other_investing",
+          label: "Other Investing Activities",
+          kind: "input",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      const hasInvestingCf = cashFlow.some((r) => r.id === "investing_cf");
+      if (!hasInvestingCf) {
+        const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
+        const insertIndex = otherInvestingIndex >= 0 ? otherInvestingIndex + 1 : cashFlow.length;
+        cashFlow.splice(insertIndex, 0, {
+          id: "investing_cf",
+          label: "Cash from Investing Activities",
+          kind: "calc",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
       // Recalculate all years for all statements
       const allYears = [...(meta.years.historical || []), ...(meta.years.projection || [])];
       allYears.forEach((year) => {
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement);
-        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet);
-        cashFlow = recomputeCalculations(cashFlow, year, cashFlow);
+        const allStatements = { incomeStatement, balanceSheet, cashFlow };
+        const sbcBreakdowns = get().sbcBreakdowns;
+        const danaBreakdowns = get().danaBreakdowns;
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
       });
 
       set({
@@ -544,6 +690,265 @@ export const useModelStore = create<ModelState & ModelActions>()(
     let incomeStatement = state.incomeStatement;
     let balanceSheet = state.balanceSheet;
     let cashFlow = state.cashFlow;
+    
+    // #region agent log
+    if (typeof window !== 'undefined') {
+      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:692',message:'recalculateAll - Before migrations',data:{cashFlowIds:cashFlow.map(r=>r.id),cashFlowCount:cashFlow.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'O'})}).catch(()=>{});
+    }
+    // #endregion
+
+    // Migration: Ensure D&A exists in CFS (should be in template, but check anyway)
+    const hasDandaInCFS = cashFlow.some((r) => r.id === "danda");
+    if (!hasDandaInCFS) {
+      // Find where to insert D&A - after net_income
+      const netIncomeIndex = cashFlow.findIndex((r) => r.id === "net_income");
+      const insertIndex = netIncomeIndex >= 0 ? netIncomeIndex + 1 : cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "danda",
+        label: "Depreciation & Amortization",
+        kind: "input", // Manual input in CFO
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    } else {
+      // Migration: Update D&A from "calc" to "input" (D&A is now manual input, not auto-populated)
+      const dandaRow = cashFlow.find((r) => r.id === "danda");
+      if (dandaRow && dandaRow.kind === "calc") {
+        dandaRow.kind = "input";
+      }
+    }
+
+    // Migration: Ensure SBC exists in CFS (added in later version)
+    const hasSbcInCFS = cashFlow.some((r) => r.id === "sbc");
+    if (!hasSbcInCFS) {
+      // Find where to insert SBC - after danda, before wc_change
+      const dandaIndex = cashFlow.findIndex((r) => r.id === "danda");
+      const wcChangeIndex = cashFlow.findIndex((r) => r.id === "wc_change");
+      const insertIndex = dandaIndex >= 0 ? dandaIndex + 1 : 
+                         wcChangeIndex >= 0 ? wcChangeIndex : 
+                         cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "sbc",
+        label: "Stock-Based Compensation",
+        kind: "calc",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    // Migration: Ensure WC Change exists in CFS (should be in template, but check anyway)
+    const hasWcChangeInCFS = cashFlow.some((r) => r.id === "wc_change");
+    if (!hasWcChangeInCFS) {
+      // Find where to insert WC Change - after sbc, before other_operating
+      const sbcIndex = cashFlow.findIndex((r) => r.id === "sbc");
+      const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
+      const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+      const insertIndex = sbcIndex >= 0 ? sbcIndex + 1 : 
+                         otherOperatingIndex >= 0 ? otherOperatingIndex : 
+                         operatingCfIndex >= 0 ? operatingCfIndex : 
+                         cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "wc_change",
+        label: "Change in Working Capital",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    // Migration: Ensure Operating CF total exists
+    const hasOperatingCf = cashFlow.some((r) => r.id === "operating_cf");
+    // #region agent log
+    if (typeof window !== 'undefined') {
+      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:644',message:'Checking Operating CF',data:{hasOperatingCf,cashFlowIds:cashFlow.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
+    }
+    // #endregion
+    if (!hasOperatingCf) {
+      // Insert after other_operating or at the end of operating section
+      const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
+      const insertIndex = otherOperatingIndex >= 0 ? otherOperatingIndex + 1 : cashFlow.length;
+      // #region agent log
+      if (typeof window !== 'undefined') {
+        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:650',message:'Adding Operating CF',data:{insertIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'G'})}).catch(()=>{});
+      }
+      // #endregion
+      cashFlow.splice(insertIndex, 0, {
+        id: "operating_cf",
+        label: "Cash from Operating Activities",
+        kind: "calc",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    // Migration: Ensure Investing section items exist (capex, other_investing, investing_cf)
+    const hasCapex = cashFlow.some((r) => r.id === "capex");
+    // #region agent log
+    if (typeof window !== 'undefined') {
+      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:664',message:'Checking Capex',data:{hasCapex,cashFlowIds:cashFlow.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'H'})}).catch(()=>{});
+    }
+    // #endregion
+    if (!hasCapex) {
+      // Find where to insert - after operating_cf
+      const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+      const insertIndex = operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length;
+      // #region agent log
+      if (typeof window !== 'undefined') {
+        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:670',message:'Adding Capex',data:{insertIndex,operatingCfIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'I'})}).catch(()=>{});
+      }
+      // #endregion
+      cashFlow.splice(insertIndex, 0, {
+        id: "capex",
+        label: "Capital Expenditures (CapEx)",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    const hasOtherInvesting = cashFlow.some((r) => r.id === "other_investing");
+    // #region agent log
+    if (typeof window !== 'undefined') {
+      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:682',message:'Checking Other Investing',data:{hasOtherInvesting},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'J'})}).catch(()=>{});
+    }
+    // #endregion
+    if (!hasOtherInvesting) {
+      // Insert after capex
+      const capexIndex = cashFlow.findIndex((r) => r.id === "capex");
+      const insertIndex = capexIndex >= 0 ? capexIndex + 1 : cashFlow.length;
+      // #region agent log
+      if (typeof window !== 'undefined') {
+        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:687',message:'Adding Other Investing',data:{insertIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'K'})}).catch(()=>{});
+      }
+      // #endregion
+      cashFlow.splice(insertIndex, 0, {
+        id: "other_investing",
+        label: "Other Investing Activities",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    const hasInvestingCf = cashFlow.some((r) => r.id === "investing_cf");
+    // #region agent log
+    if (typeof window !== 'undefined') {
+      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:699',message:'Checking Investing CF',data:{hasInvestingCf},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'L'})}).catch(()=>{});
+    }
+    // #endregion
+    if (!hasInvestingCf) {
+      // Insert after other_investing
+      const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
+      const insertIndex = otherInvestingIndex >= 0 ? otherInvestingIndex + 1 : cashFlow.length;
+      // #region agent log
+      if (typeof window !== 'undefined') {
+        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:704',message:'Adding Investing CF',data:{insertIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'M'})}).catch(()=>{});
+      }
+      // #endregion
+      cashFlow.splice(insertIndex, 0, {
+        id: "investing_cf",
+        label: "Cash from Investing Activities",
+        kind: "calc",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    
+    // #region agent log
+    if (typeof window !== 'undefined') {
+      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:714',message:'After Investing Migration',data:{cashFlowIds:cashFlow.map(r=>r.id),hasCapex:cashFlow.some(r=>r.id==='capex'),hasInvestingCf:cashFlow.some(r=>r.id==='investing_cf')},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'N'})}).catch(()=>{});
+    }
+    // #endregion
+
+    // Migration: Ensure Financing Activities standard items exist
+    const hasDebtIssuance = cashFlow.some((r) => r.id === "debt_issuance");
+    const hasDebtRepayment = cashFlow.some((r) => r.id === "debt_repayment");
+    const hasEquityIssuance = cashFlow.some((r) => r.id === "equity_issuance");
+    const hasDividends = cashFlow.some((r) => r.id === "dividends");
+    const hasFinancingCf = cashFlow.some((r) => r.id === "financing_cf");
+
+    if (!hasDebtIssuance) {
+      const investingCfIndex = cashFlow.findIndex((r) => r.id === "investing_cf");
+      const insertIndex = investingCfIndex >= 0 ? investingCfIndex + 1 : cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "debt_issuance",
+        label: "Debt Issuance",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    if (!hasDebtRepayment) {
+      const debtIssuanceIndex = cashFlow.findIndex((r) => r.id === "debt_issuance");
+      const insertIndex = debtIssuanceIndex >= 0 ? debtIssuanceIndex + 1 : cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "debt_repayment",
+        label: "Debt Repayment",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    if (!hasEquityIssuance) {
+      const debtRepaymentIndex = cashFlow.findIndex((r) => r.id === "debt_repayment");
+      const insertIndex = debtRepaymentIndex >= 0 ? debtRepaymentIndex + 1 : cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "equity_issuance",
+        label: "Equity Issuance",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    if (!hasDividends) {
+      const equityIssuanceIndex = cashFlow.findIndex((r) => r.id === "equity_issuance");
+      const insertIndex = equityIssuanceIndex >= 0 ? equityIssuanceIndex + 1 : cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "dividends",
+        label: "Dividends Paid",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+    if (!hasFinancingCf) {
+      const dividendsIndex = cashFlow.findIndex((r) => r.id === "dividends");
+      const insertIndex = dividendsIndex >= 0 ? dividendsIndex + 1 : cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "financing_cf",
+        label: "Cash from Financing Activities",
+        kind: "calc",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    // Migration: Ensure net_change_cash exists
+    const hasNetChangeCash = cashFlow.some((r) => r.id === "net_change_cash");
+    if (!hasNetChangeCash) {
+      const financingCfIndex = cashFlow.findIndex((r) => r.id === "financing_cf");
+      const insertIndex = financingCfIndex >= 0 ? financingCfIndex + 1 : cashFlow.length;
+      cashFlow.splice(insertIndex, 0, {
+        id: "net_change_cash",
+        label: "Net Change in Cash",
+        kind: "calc",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
 
     // Migration: Ensure gross_margin exists (added in later version)
     const hasGrossMargin = incomeStatement.some((r) => r.id === "gross_margin");
@@ -615,32 +1020,32 @@ export const useModelStore = create<ModelState & ModelActions>()(
       }
     }
 
-    // Migration: Ensure D&A exists (should be in template, but check anyway)
-    const hasDana = incomeStatement.some((r) => r.id === "danda");
-    if (!hasDana) {
-      // Find where to insert D&A - after EBITDA margin (or after EBITDA if margin doesn't exist)
-      const ebitdaMarginIndex = incomeStatement.findIndex((r) => r.id === "ebitda_margin");
-      const ebitdaIndex = incomeStatement.findIndex((r) => r.id === "ebitda");
-      const insertIndex = ebitdaMarginIndex >= 0 ? ebitdaMarginIndex + 1 : 
-                         ebitdaIndex >= 0 ? ebitdaIndex + 1 : 
-                         incomeStatement.length;
-      // Insert D&A
-      incomeStatement.splice(insertIndex, 0, {
-        id: "danda",
-        label: "Depreciation & Amortization (D&A)",
-        kind: "input",
-        valueType: "currency",
-        values: {},
-        children: [],
-      });
+    // Migration: Remove D&A from IS (it's now embedded in COGS or SG&A)
+    const danaIndex = incomeStatement.findIndex((r) => r.id === "danda");
+    if (danaIndex >= 0) {
+      // Save D&A values to danaBreakdowns before removing
+      const danaRow = incomeStatement[danaIndex];
+      if (danaRow.values && Object.keys(danaRow.values).length > 0) {
+        const danaBreakdowns: Record<string, number> = {};
+        Object.keys(danaRow.values).forEach(year => {
+          if (danaRow.values && danaRow.values[year] !== undefined) {
+            danaBreakdowns[year] = danaRow.values[year];
+          }
+        });
+        if (Object.keys(danaBreakdowns).length > 0) {
+          set({ danaBreakdowns });
+        }
+      }
+      // Remove D&A from IS
+      incomeStatement.splice(danaIndex, 1);
     }
 
     // Migration: Ensure EBIT exists (should be in template, but check anyway)
     const hasEbit = incomeStatement.some((r) => r.id === "ebit");
     if (!hasEbit) {
-      // Find where to insert EBIT - after D&A
-      const danaIndex = incomeStatement.findIndex((r) => r.id === "danda");
-      const insertIndex = danaIndex >= 0 ? danaIndex + 1 : incomeStatement.length;
+      // Find where to insert EBIT - after EBITDA margin
+      const ebitdaMarginIndex = incomeStatement.findIndex((r) => r.id === "ebitda_margin");
+      const insertIndex = ebitdaMarginIndex >= 0 ? ebitdaMarginIndex + 1 : incomeStatement.length;
       // Insert EBIT
       incomeStatement.splice(insertIndex, 0, {
         id: "ebit",
@@ -652,11 +1057,31 @@ export const useModelStore = create<ModelState & ModelActions>()(
       });
     }
 
+    // Migration: Ensure EBIT Margin exists (should be in template, but check anyway)
+    const hasEbitMargin = incomeStatement.some((r) => r.id === "ebit_margin");
+    if (!hasEbitMargin) {
+      // Find where to insert EBIT Margin - after EBIT
+      const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
+      const insertIndex = ebitIndex >= 0 ? ebitIndex + 1 : incomeStatement.length;
+      // Insert EBIT Margin
+      incomeStatement.splice(insertIndex, 0, {
+        id: "ebit_margin",
+        label: "EBIT Margin %",
+        kind: "calc",
+        valueType: "percent",
+        values: {},
+        children: [],
+      });
+    }
+
     // Migration: Ensure Interest Expense exists (should be in template, but check anyway)
     const hasInterestExpense = incomeStatement.some((r) => r.id === "interest_expense");
     if (!hasInterestExpense) {
+      const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
       const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
-      const insertIndex = ebitIndex >= 0 ? ebitIndex + 1 : incomeStatement.length;
+      const insertIndex = ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : 
+                         ebitIndex >= 0 ? ebitIndex + 1 : 
+                         incomeStatement.length;
       incomeStatement.splice(insertIndex, 0, {
         id: "interest_expense",
         label: "Interest Expense",
@@ -792,7 +1217,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       });
     }
     
-    if (totalAssetsIndex === -1) {
+    // Ensure Total Fixed Assets exists (after fixed assets items, before total_assets)
+    const totalFixedAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_fixed_assets");
+    if (totalFixedAssetsIndex === -1) {
       const newTotalCAIndex = balanceSheet.findIndex((r) => r.id === "total_current_assets");
       const faIds = ["ppe", "intangible_assets", "other_assets"];
       let insertIndex = newTotalCAIndex >= 0 ? newTotalCAIndex + 1 : balanceSheet.length;
@@ -802,6 +1229,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
           break;
         }
       }
+      balanceSheet.splice(insertIndex, 0, {
+        id: "total_fixed_assets",
+        label: "Total Fixed Assets",
+        kind: "subtotal",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    if (totalAssetsIndex === -1) {
+      const newTotalFixedAssetsIndex = balanceSheet.findIndex((r) => r.id === "total_fixed_assets");
+      const insertIndex = newTotalFixedAssetsIndex >= 0 ? newTotalFixedAssetsIndex + 1 : balanceSheet.length;
       balanceSheet.splice(insertIndex, 0, {
         id: "total_assets",
         label: "Total Assets",
@@ -832,7 +1272,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       });
     }
     
-    if (totalLiabIndex === -1) {
+    // Ensure Total Non-Current Liabilities exists (after non-current liabilities items, before total_liabilities)
+    const totalNonCurrentLiabIndex = balanceSheet.findIndex((r) => r.id === "total_non_current_liabilities");
+    if (totalNonCurrentLiabIndex === -1) {
       const newTotalCLIndex = balanceSheet.findIndex((r) => r.id === "total_current_liabilities");
       const nclIds = ["lt_debt", "other_liab"];
       let insertIndex = newTotalCLIndex >= 0 ? newTotalCLIndex + 1 : balanceSheet.length;
@@ -842,6 +1284,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
           break;
         }
       }
+      balanceSheet.splice(insertIndex, 0, {
+        id: "total_non_current_liabilities",
+        label: "Total Non-Current Liabilities",
+        kind: "subtotal",
+        valueType: "currency",
+        values: {},
+        children: [],
+      });
+    }
+
+    if (totalLiabIndex === -1) {
+      const newTotalNonCurrentLiabIndex = balanceSheet.findIndex((r) => r.id === "total_non_current_liabilities");
+      const insertIndex = newTotalNonCurrentLiabIndex >= 0 ? newTotalNonCurrentLiabIndex + 1 : balanceSheet.length;
       balanceSheet.splice(insertIndex, 0, {
         id: "total_liabilities",
         label: "Total Liabilities",
@@ -884,10 +1339,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
 
     // Recalculate all years for all statements
+    // Pass all statements so CFS can access IS/BS values, and sbcBreakdowns for SBC calculation
     allYears.forEach((year) => {
-      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement);
-      balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet);
-      cashFlow = recomputeCalculations(cashFlow, year, cashFlow);
+      const allStatements = { incomeStatement, balanceSheet, cashFlow };
+      const sbcBreakdowns = get().sbcBreakdowns;
+      const danaBreakdowns = get().danaBreakdowns;
+      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+      balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
+      cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
     });
 
     set({
@@ -924,7 +1383,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
   saveCurrentStep: () => {
     const state = get();
-    // Just mark the current step as complete (save progress)
+    
+    // Recalculate all values before saving to ensure data is up to date
+    // This ensures all formulas, subtotals, and totals are current
+    if (state.isInitialized) {
+      // Call recalculateAll from the store actions
+      // Since we're inside the store definition, we can access it via get()
+      const store = get();
+      if (store.recalculateAll) {
+        store.recalculateAll();
+      }
+    }
+    
+    // Mark the current step as complete (save progress)
     const completed = state.completedStepIds.includes(state.currentStepId)
       ? state.completedStepIds
       : [...state.completedStepIds, state.currentStepId];
@@ -1028,7 +1499,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
       
       let recalculatedRows = finalRows;
       allYears.forEach((year) => {
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows);
+        const allStatements = {
+          incomeStatement: state.incomeStatement,
+          balanceSheet: state.balanceSheet,
+          cashFlow: state.cashFlow,
+        };
+        const sbcBreakdowns = state.sbcBreakdowns;
+        const danaBreakdowns = state.danaBreakdowns;
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns);
       });
       
       // Final verification
@@ -1055,7 +1533,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
       
       let recalculatedRows = currentRows;
       allYears.forEach((year) => {
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows);
+        const allStatements = {
+          incomeStatement: state.incomeStatement,
+          balanceSheet: state.balanceSheet,
+          cashFlow: state.cashFlow,
+        };
+        const sbcBreakdowns = state.sbcBreakdowns;
+        const danaBreakdowns = state.danaBreakdowns;
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns);
       });
       
       return { [statement]: recalculatedRows };
@@ -1098,7 +1583,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
       
       let recalculatedRows = newRows;
       allYears.forEach((year) => {
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows);
+        const allStatements = {
+          incomeStatement: state.incomeStatement,
+          balanceSheet: state.balanceSheet,
+          cashFlow: state.cashFlow,
+        };
+        const sbcBreakdowns = state.sbcBreakdowns;
+        const danaBreakdowns = state.danaBreakdowns;
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns);
       });
       
       return { [statement]: recalculatedRows };
@@ -1142,9 +1634,30 @@ export const useModelStore = create<ModelState & ModelActions>()(
       
       // Recompute all calculated rows for this year
       // This will recalculate parent rows (like Revenue from children, COGS from children, Gross Profit from Revenue - COGS)
-      const recomputed = recomputeCalculations(updated, year, updated);
+      const allStatements = {
+        incomeStatement: state.incomeStatement,
+        balanceSheet: state.balanceSheet,
+        cashFlow: state.cashFlow,
+      };
+      const sbcBreakdowns = state.sbcBreakdowns;
+      const danaBreakdowns = state.danaBreakdowns;
+      const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns);
       
-      return { [statement]: recomputed };
+      // If Balance Sheet was updated, also recalculate Cash Flow (WC Change depends on BS)
+      let updatedCashFlow = state.cashFlow;
+      if (statement === "balanceSheet") {
+        const updatedAllStatements = {
+          incomeStatement: state.incomeStatement,
+          balanceSheet: recomputed,
+          cashFlow: state.cashFlow,
+        };
+        updatedCashFlow = recomputeCalculations(state.cashFlow, year, state.cashFlow, updatedAllStatements, sbcBreakdowns, danaBreakdowns);
+      }
+      
+      return { 
+        [statement]: recomputed,
+        ...(statement === "balanceSheet" ? { cashFlow: updatedCashFlow } : {})
+      };
     });
   },
 
@@ -1244,6 +1757,89 @@ export const useModelStore = create<ModelState & ModelActions>()(
       };
     });
   },
+  
+  updateYears: (newYears) => {
+    set((state) => {
+      const oldYears = {
+        historical: state.meta.years.historical || [],
+        projection: state.meta.years.projection || [],
+      };
+      const allOldYears = [...oldYears.historical, ...oldYears.projection];
+      const allNewYears = [...newYears.historical, ...newYears.projection];
+      
+      // Find years to add and remove
+      const yearsToAdd = allNewYears.filter(y => !allOldYears.includes(y));
+      const yearsToRemove = allOldYears.filter(y => !allNewYears.includes(y));
+      
+      // Helper function to update years in a row (recursively)
+      const updateYearsInRow = (row: Row): Row => {
+        const newValues = { ...(row.values || {}) };
+        
+        // Remove values for deleted years
+        yearsToRemove.forEach(year => {
+          delete newValues[year];
+        });
+        
+        // Add empty values for new years
+        yearsToAdd.forEach(year => {
+          newValues[year] = 0;
+        });
+        
+        // Recursively update children
+        const newChildren = row.children?.map(updateYearsInRow);
+        
+        return {
+          ...row,
+          values: newValues,
+          children: newChildren,
+        };
+      };
+      
+      // Update all statements
+      let incomeStatement = state.incomeStatement.map(updateYearsInRow);
+      let balanceSheet = state.balanceSheet.map(updateYearsInRow);
+      let cashFlow = state.cashFlow.map(updateYearsInRow);
+      
+      // Update SBC breakdowns
+      const newSbcBreakdowns: Record<string, Record<string, number>> = {};
+      Object.keys(state.sbcBreakdowns || {}).forEach(categoryId => {
+        const categoryBreakdowns = state.sbcBreakdowns[categoryId] || {};
+        const newCategoryBreakdowns: Record<string, number> = { ...categoryBreakdowns };
+        
+        // Remove deleted years
+        yearsToRemove.forEach(year => {
+          delete newCategoryBreakdowns[year];
+        });
+        
+        // Add empty values for new years
+        yearsToAdd.forEach(year => {
+          newCategoryBreakdowns[year] = 0;
+        });
+        
+        newSbcBreakdowns[categoryId] = newCategoryBreakdowns;
+      });
+      
+      // Recalculate all formulas for all new years
+      allNewYears.forEach((year) => {
+        const allStatements = { incomeStatement, balanceSheet, cashFlow };
+        const sbcBreakdowns = state.sbcBreakdowns;
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns);
+        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns);
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns);
+      });
+      
+      return {
+        meta: {
+          ...state.meta,
+          years: newYears,
+        },
+        incomeStatement,
+        balanceSheet,
+        cashFlow,
+        sbcBreakdowns: newSbcBreakdowns,
+      };
+    });
+  },
     }),
     {
       name: "financial-model-storage",
@@ -1335,14 +1931,24 @@ export const useModelStore = create<ModelState & ModelActions>()(
             }
           }
 
+          // Migration: Remove EBITDA and EBITDA Margin from IS (D&A is shown directly, then EBIT)
+          const ebitdaIndex = incomeStatement.findIndex((r) => r.id === "ebitda");
+          if (ebitdaIndex >= 0) {
+            incomeStatement.splice(ebitdaIndex, 1);
+          }
+          const ebitdaMarginIndex = incomeStatement.findIndex((r) => r.id === "ebitda_margin");
+          if (ebitdaMarginIndex >= 0) {
+            incomeStatement.splice(ebitdaMarginIndex, 1);
+          }
+
           // Migration: Ensure D&A exists (should be in template, but check anyway)
           const hasDana = incomeStatement.some((r) => r.id === "danda");
           if (!hasDana) {
-            // Find where to insert D&A - after EBITDA margin (or after EBITDA if margin doesn't exist)
-            const ebitdaMarginIndex = incomeStatement.findIndex((r) => r.id === "ebitda_margin");
-            const ebitdaIndex = incomeStatement.findIndex((r) => r.id === "ebitda");
-            const insertIndex = ebitdaMarginIndex >= 0 ? ebitdaMarginIndex + 1 : 
-                               ebitdaIndex >= 0 ? ebitdaIndex + 1 : 
+            // Find where to insert D&A - after Other Opex (or after SG&A if no Other Opex)
+            const otherOpexIndex = incomeStatement.findIndex((r) => r.id === "other_opex");
+            const rdIndex = incomeStatement.findIndex((r) => r.id === "rd");
+            const insertIndex = otherOpexIndex >= 0 ? otherOpexIndex + 1 : 
+                               rdIndex >= 0 ? rdIndex + 1 : 
                                incomeStatement.length;
             // Insert D&A
             incomeStatement.splice(insertIndex, 0, {
@@ -1372,11 +1978,31 @@ export const useModelStore = create<ModelState & ModelActions>()(
             });
           }
 
+          // Migration: Ensure EBIT Margin exists (should be in template, but check anyway)
+          const hasEbitMargin = incomeStatement.some((r) => r.id === "ebit_margin");
+          if (!hasEbitMargin) {
+            // Find where to insert EBIT Margin - after EBIT
+            const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
+            const insertIndex = ebitIndex >= 0 ? ebitIndex + 1 : incomeStatement.length;
+            // Insert EBIT Margin
+            incomeStatement.splice(insertIndex, 0, {
+              id: "ebit_margin",
+              label: "EBIT Margin %",
+              kind: "calc",
+              valueType: "percent",
+              values: {},
+              children: [],
+            });
+          }
+
           // Migration: Ensure Interest Expense exists (should be in template, but check anyway)
           const hasInterestExpense = incomeStatement.some((r) => r.id === "interest_expense");
           if (!hasInterestExpense) {
+            const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
             const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
-            const insertIndex = ebitIndex >= 0 ? ebitIndex + 1 : incomeStatement.length;
+            const insertIndex = ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : 
+                               ebitIndex >= 0 ? ebitIndex + 1 : 
+                               incomeStatement.length;
             incomeStatement.splice(insertIndex, 0, {
               id: "interest_expense",
               label: "Interest Expense",
@@ -1485,11 +2111,217 @@ export const useModelStore = create<ModelState & ModelActions>()(
             otherIncomeRow.label = "Other Income / (Expense), net";
           }
 
+          // Migration: Ensure D&A exists in CFS (should be in template, but check anyway)
+          const hasDandaInCFS = cashFlow.some((r) => r.id === "danda");
+          if (!hasDandaInCFS) {
+            // Find where to insert D&A - after net_income
+            const netIncomeIndex = cashFlow.findIndex((r) => r.id === "net_income");
+            const insertIndex = netIncomeIndex >= 0 ? netIncomeIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "danda",
+              label: "Depreciation & Amortization",
+              kind: "input", // Manual input in CFO
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          } else {
+            // Migration: Update D&A from "calc" to "input" (D&A is now manual input, not auto-populated)
+            const dandaRow = cashFlow.find((r) => r.id === "danda");
+            if (dandaRow && dandaRow.kind === "calc") {
+              dandaRow.kind = "input";
+            }
+          }
+
+          // Migration: Ensure SBC exists in CFS (added in later version)
+          const hasSbcInCFS = cashFlow.some((r) => r.id === "sbc");
+          if (!hasSbcInCFS) {
+            // Find where to insert SBC - after danda, before wc_change
+            const dandaIndex = cashFlow.findIndex((r) => r.id === "danda");
+            const wcChangeIndex = cashFlow.findIndex((r) => r.id === "wc_change");
+            const insertIndex = dandaIndex >= 0 ? dandaIndex + 1 : 
+                               wcChangeIndex >= 0 ? wcChangeIndex : 
+                               cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "sbc",
+              label: "Stock-Based Compensation",
+              kind: "calc",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          // Migration: Ensure WC Change exists in CFS (should be in template, but check anyway)
+          const hasWcChangeInCFS = cashFlow.some((r) => r.id === "wc_change");
+          if (!hasWcChangeInCFS) {
+            // Find where to insert WC Change - after sbc, before other_operating
+            const sbcIndex = cashFlow.findIndex((r) => r.id === "sbc");
+            const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
+            const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+            const insertIndex = sbcIndex >= 0 ? sbcIndex + 1 : 
+                               otherOperatingIndex >= 0 ? otherOperatingIndex : 
+                               operatingCfIndex >= 0 ? operatingCfIndex : 
+                               cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "wc_change",
+              label: "Change in Working Capital",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          // Migration: Ensure Operating CF total exists
+          const hasOperatingCf = cashFlow.some((r) => r.id === "operating_cf");
+          if (!hasOperatingCf) {
+            const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
+            const insertIndex = otherOperatingIndex >= 0 ? otherOperatingIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "operating_cf",
+              label: "Cash from Operating Activities",
+              kind: "calc",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          // Migration: Ensure Investing section items exist (capex, other_investing, investing_cf)
+          const hasCapex = cashFlow.some((r) => r.id === "capex");
+          if (!hasCapex) {
+            const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+            const insertIndex = operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "capex",
+              label: "Capital Expenditures (CapEx)",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          const hasOtherInvesting = cashFlow.some((r) => r.id === "other_investing");
+          if (!hasOtherInvesting) {
+            const capexIndex = cashFlow.findIndex((r) => r.id === "capex");
+            const insertIndex = capexIndex >= 0 ? capexIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "other_investing",
+              label: "Other Investing Activities",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          const hasInvestingCf = cashFlow.some((r) => r.id === "investing_cf");
+          if (!hasInvestingCf) {
+            const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
+            const insertIndex = otherInvestingIndex >= 0 ? otherInvestingIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "investing_cf",
+              label: "Cash from Investing Activities",
+              kind: "calc",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          // Migration: Ensure Financing Activities standard items exist
+          const hasDebtIssuance = cashFlow.some((r) => r.id === "debt_issuance");
+          const hasDebtRepayment = cashFlow.some((r) => r.id === "debt_repayment");
+          const hasEquityIssuance = cashFlow.some((r) => r.id === "equity_issuance");
+          const hasDividends = cashFlow.some((r) => r.id === "dividends");
+          const hasFinancingCf = cashFlow.some((r) => r.id === "financing_cf");
+
+          if (!hasDebtIssuance) {
+            const investingCfIndex = cashFlow.findIndex((r) => r.id === "investing_cf");
+            const insertIndex = investingCfIndex >= 0 ? investingCfIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "debt_issuance",
+              label: "Debt Issuance",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+          if (!hasDebtRepayment) {
+            const debtIssuanceIndex = cashFlow.findIndex((r) => r.id === "debt_issuance");
+            const insertIndex = debtIssuanceIndex >= 0 ? debtIssuanceIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "debt_repayment",
+              label: "Debt Repayment",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+          if (!hasEquityIssuance) {
+            const debtRepaymentIndex = cashFlow.findIndex((r) => r.id === "debt_repayment");
+            const insertIndex = debtRepaymentIndex >= 0 ? debtRepaymentIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "equity_issuance",
+              label: "Equity Issuance",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+          if (!hasDividends) {
+            const equityIssuanceIndex = cashFlow.findIndex((r) => r.id === "equity_issuance");
+            const insertIndex = equityIssuanceIndex >= 0 ? equityIssuanceIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "dividends",
+              label: "Dividends Paid",
+              kind: "input",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+          if (!hasFinancingCf) {
+            const dividendsIndex = cashFlow.findIndex((r) => r.id === "dividends");
+            const insertIndex = dividendsIndex >= 0 ? dividendsIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "financing_cf",
+              label: "Cash from Financing Activities",
+              kind: "calc",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
+          // Migration: Ensure net_change_cash exists
+          const hasNetChangeCash = cashFlow.some((r) => r.id === "net_change_cash");
+          if (!hasNetChangeCash) {
+            const financingCfIndex = cashFlow.findIndex((r) => r.id === "financing_cf");
+            const insertIndex = financingCfIndex >= 0 ? financingCfIndex + 1 : cashFlow.length;
+            cashFlow.splice(insertIndex, 0, {
+              id: "net_change_cash",
+              label: "Net Change in Cash",
+              kind: "calc",
+              valueType: "currency",
+              values: {},
+              children: [],
+            });
+          }
+
           // Recalculate all years for all statements
           allYears.forEach((year) => {
-            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement);
-            balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet);
-            cashFlow = recomputeCalculations(cashFlow, year, cashFlow);
+            const allStatements = { incomeStatement, balanceSheet, cashFlow };
+            const sbcBreakdowns = state.sbcBreakdowns;
+            const danaBreakdowns = state.danaBreakdowns || {};
+            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+            balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
+            cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
           });
 
           // Return updated state

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ModelState } from "@/store/useModelStore";
-import { exportStatementToExcel, exportSbcDisclosureToExcel } from "@/lib/excel-export";
+import { exportStatementToExcel, exportSbcDisclosureToExcel, exportBalanceCheckToExcel } from "@/lib/excel-export";
 
 // Force Node runtime (ExcelJS needs Node APIs)
 export const runtime = "nodejs";
@@ -49,6 +49,7 @@ export async function POST(request: Request) {
     
     // Balance Sheet (below SBC - add statement header)
     if (modelState.balanceSheet && modelState.balanceSheet.length > 0) {
+      const balanceSheetStartRow = currentRow;
       currentRow = exportStatementToExcel(
         ws, 
         modelState.balanceSheet, 
@@ -57,6 +58,23 @@ export async function POST(request: Request) {
         modelState.meta.currencyUnit,
         "Balance Sheet", // statement label
         false // not first statement
+      );
+      
+      // Calculate where Balance Sheet data actually starts:
+      // - balanceSheetStartRow: row before statement label
+      // - +2: spacing before statement label
+      // - +1: statement label row
+      // - +1: first data row (startRow + 1 in exportStatementToExcel)
+      const balanceSheetDataStartRow = balanceSheetStartRow + 2 + 1 + 1;
+      
+      // Add Balance Check section after Balance Sheet
+      currentRow = exportBalanceCheckToExcel(
+        ws,
+        modelState.balanceSheet,
+        years,
+        currentRow,
+        balanceSheetDataStartRow,
+        modelState.meta.currencyUnit
       );
     }
     

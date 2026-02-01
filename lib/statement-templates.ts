@@ -53,6 +53,22 @@ export function createIncomeStatementTemplate(): Row[] {
       children: [], // User can break this down into Sales & Marketing, G&A, etc.
     },
     {
+      id: "ebit",
+      label: "EBIT (Operating Income)",
+      kind: "calc",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "ebit_margin",
+      label: "EBIT Margin %",
+      kind: "calc",
+      valueType: "percent",
+      values: {},
+      children: [],
+    },
+    {
       id: "rd",
       label: "Research & Development (R&D)",
       kind: "input",
@@ -69,33 +85,9 @@ export function createIncomeStatementTemplate(): Row[] {
       children: [],
     },
     {
-      id: "ebitda",
-      label: "EBITDA",
-      kind: "calc",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
-    {
-      id: "ebitda_margin",
-      label: "EBITDA Margin %",
-      kind: "calc",
-      valueType: "percent",
-      values: {},
-      children: [],
-    },
-    {
       id: "danda",
       label: "Depreciation & Amortization (D&A)",
       kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
-    {
-      id: "ebit",
-      label: "EBIT (Operating Income)",
-      kind: "calc",
       valueType: "currency",
       values: {},
       children: [],
@@ -230,6 +222,14 @@ export function createBalanceSheetTemplate(): Row[] {
       children: [],
     },
     {
+      id: "total_fixed_assets",
+      label: "Total Fixed Assets",
+      kind: "subtotal",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
       id: "total_assets",
       label: "Total Assets",
       kind: "total",
@@ -282,6 +282,14 @@ export function createBalanceSheetTemplate(): Row[] {
       id: "other_liab",
       label: "Other Liabilities",
       kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "total_non_current_liabilities",
+      label: "Total Non-Current Liabilities",
+      kind: "subtotal",
       valueType: "currency",
       values: {},
       children: [],
@@ -380,7 +388,15 @@ export function createCashFlowTemplate(): Row[] {
     {
       id: "danda",
       label: "Depreciation & Amortization",
-      kind: "calc", // Usually links to IS D&A
+      kind: "input", // Manual input in CFO
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "sbc",
+      label: "Stock-Based Compensation",
+      kind: "calc", // Calculated from SBC breakdowns
       valueType: "currency",
       values: {},
       children: [],
@@ -388,7 +404,7 @@ export function createCashFlowTemplate(): Row[] {
     {
       id: "wc_change",
       label: "Change in Working Capital",
-      kind: "calc", // Calculated from WC schedule
+      kind: "input", // Input for first historical year, calculated for subsequent years
       valueType: "currency",
       values: {},
       children: [],

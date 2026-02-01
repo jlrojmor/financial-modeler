@@ -146,31 +146,14 @@ export function generateExcelFormula(
   }
 
   if (rowId === "ebit") {
-    // EBIT = Gross Profit - SG&A - R&D - Other Opex - D&A
+    // EBIT = Gross Profit - SG&A
+    // SG&A already includes all operating expenses
     const gpRow = findExcelRowNumber(flattenedRows, "gross_profit", startRow);
     const sgaRow = findExcelRowNumber(flattenedRows, "sga", startRow);
-    
-    // Check if R&D and Other Opex are children of SG&A
-    const sgaFlattenedRow = flattenedRows.find(r => r.row.id === "sga");
-    const rdIsChildOfSga = sgaFlattenedRow?.row.children?.some(c => c.id === "rd") ?? false;
-    const otherOpexIsChildOfSga = sgaFlattenedRow?.row.children?.some(c => c.id === "other_opex") ?? false;
     
     const parts: string[] = [];
     if (gpRow) parts.push(getCellAddress(gpRow, yearCol));
     if (sgaRow) parts.push(`-${getCellAddress(sgaRow, yearCol)}`);
-    
-    // Only subtract R&D and Other Opex separately if they're NOT children of SG&A
-    if (!rdIsChildOfSga) {
-      const rdRow = findExcelRowNumber(flattenedRows, "rd", startRow);
-      if (rdRow) parts.push(`-${getCellAddress(rdRow, yearCol)}`);
-    }
-    if (!otherOpexIsChildOfSga) {
-      const otherOpexRow = findExcelRowNumber(flattenedRows, "other_opex", startRow);
-      if (otherOpexRow) parts.push(`-${getCellAddress(otherOpexRow, yearCol)}`);
-    }
-    
-    const dandaRow = findExcelRowNumber(flattenedRows, "danda", startRow);
-    if (dandaRow) parts.push(`-${getCellAddress(dandaRow, yearCol)}`);
     
     if (parts.length > 0) return `=${parts.join("")}`;
   }
@@ -186,13 +169,35 @@ export function generateExcelFormula(
   }
 
   if (rowId === "ebt") {
+    // EBT = EBIT + all items between EBIT margin and EBT
+    // This dynamically includes all Interest & Other items
     const ebitRow = findExcelRowNumber(flattenedRows, "ebit", startRow);
+    const ebitMarginIndex = flattenedRows.findIndex(r => r.row.id === "ebit_margin");
+    const ebtIndex = flattenedRows.findIndex(r => r.row.id === "ebt");
+    
+    if (ebitMarginIndex >= 0 && ebtIndex > ebitMarginIndex && ebitRow) {
+      const parts: string[] = [getCellAddress(ebitRow, yearCol)];
+      // Sum all items between EBIT margin and EBT
+      for (let i = ebitMarginIndex + 1; i < ebtIndex; i++) {
+        const item = flattenedRows[i].row;
+        if (item.id === "ebt") continue; // Skip EBT itself
+        const rowNum = findExcelRowNumber(flattenedRows, item.id, startRow);
+        if (!rowNum) continue;
+        const cellAddress = getCellAddress(rowNum, yearCol);
+        // Use the actual stored value (which should have correct sign)
+        // For interest expense, values are typically stored as negative, so we add them as-is
+        parts.push(`+${cellAddress}`);
+      }
+      if (parts.length > 0) return `=${parts.join("")}`;
+    }
+    
+    // Fallback to hardcoded calculation if structure is unexpected
     const intExpRow = findExcelRowNumber(flattenedRows, "interest_expense", startRow);
     const intIncRow = findExcelRowNumber(flattenedRows, "interest_income", startRow);
     const otherIncRow = findExcelRowNumber(flattenedRows, "other_income", startRow);
     const parts: string[] = [];
     if (ebitRow) parts.push(getCellAddress(ebitRow, yearCol));
-    if (intExpRow) parts.push(`-${getCellAddress(intExpRow, yearCol)}`);
+    if (intExpRow) parts.push(`+${getCellAddress(intExpRow, yearCol)}`); // Values stored with correct sign
     if (intIncRow) parts.push(`+${getCellAddress(intIncRow, yearCol)}`);
     if (otherIncRow) parts.push(`+${getCellAddress(otherIncRow, yearCol)}`);
     if (parts.length > 0) return `=${parts.join("")}`;

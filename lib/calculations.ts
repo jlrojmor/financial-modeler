@@ -388,20 +388,12 @@ function computeFormula(
   }
 
   if (rowId === "ebit") {
-    // EBIT = Gross Profit - SG&A - D&A
-    // Check if R&D and Other Opex are children of SG&A (in which case they're already included in SG&A)
+    // EBIT = Gross Profit - SG&A
+    // SG&A already includes all operating expenses (R&D, Sales & Marketing, G&A, etc.)
     const grossProfit = findRowValue(statementRows, "gross_profit", year);
     const sga = findRowValue(statementRows, "sga", year); // This will sum all SG&A breakdowns if they exist
-    const sgaRow = statementRows.find(r => r.id === "sga");
-    const rdIsChildOfSga = sgaRow?.children?.some(c => c.id === "rd") ?? false;
-    const otherOpexIsChildOfSga = sgaRow?.children?.some(c => c.id === "other_opex") ?? false;
     
-    // Only subtract R&D and Other Opex separately if they're NOT children of SG&A
-    const rd = rdIsChildOfSga ? 0 : findRowValue(statementRows, "rd", year);
-    const otherOpEx = otherOpexIsChildOfSga ? 0 : findRowValue(statementRows, "other_opex", year);
-    const danda = findRowValue(statementRows, "danda", year);
-    
-    return grossProfit - sga - rd - otherOpEx - danda;
+    return grossProfit - sga;
   }
 
   if (rowId === "ebit_margin") {
@@ -412,7 +404,31 @@ function computeFormula(
   }
 
   if (rowId === "ebt") {
+    // EBT = EBIT + all items between EBIT margin and EBT
+    // This dynamically includes all Interest & Other items (interest_expense, interest_income, other_income, 
+    // and any user-added items like "Gains (losses) on strategic investments")
     const ebit = findRowValue(statementRows, "ebit", year);
+    
+    // Find the position of EBIT margin and EBT to get all items between them
+    const ebitMarginIndex = statementRows.findIndex(r => r.id === "ebit_margin");
+    const ebtIndex = statementRows.findIndex(r => r.id === "ebt");
+    
+    if (ebitMarginIndex >= 0 && ebtIndex > ebitMarginIndex) {
+      // Sum all items between EBIT margin and EBT
+      // Interest expense is subtracted (negative), others are added (positive)
+      let total = ebit;
+      for (let i = ebitMarginIndex + 1; i < ebtIndex; i++) {
+        const item = statementRows[i];
+        if (item.id === "ebt") continue; // Skip EBT itself
+        const value = findRowValue(statementRows, item.id, year);
+        // Interest expense is typically negative (subtracted), others are positive (added)
+        // But we use the actual stored value, which should already have the correct sign
+        total += value;
+      }
+      return total;
+    }
+    
+    // Fallback to hardcoded calculation if structure is unexpected
     const interestExpense = findRowValue(statementRows, "interest_expense", year);
     const interestIncome = findRowValue(statementRows, "interest_income", year);
     const otherIncome = findRowValue(statementRows, "other_income", year);

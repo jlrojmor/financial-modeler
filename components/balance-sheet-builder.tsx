@@ -106,16 +106,18 @@ function AddBSItemDialog({
   isOpen,
   onClose,
   onAdd,
+  companyType,
 }: {
   category: BalanceSheetCategory;
   isOpen: boolean;
   onClose: () => void;
   onAdd: (label: string, itemId?: string) => void;
+  companyType?: "public" | "private";
 }) {
   const [label, setLabel] = useState("");
   const [selectedSuggestion, setSelectedSuggestion] = useState<string | null>(null);
   
-  const suggestions = getBSCategorySuggestions(category);
+  const suggestions = getBSCategorySuggestions(category, companyType);
   const [impact, setImpact] = useState<ReturnType<typeof getBSItemImpacts> | null>(null);
   const [termKnowledge, setTermKnowledge] = useState<ReturnType<typeof findTermKnowledge> | null>(null);
   const [suggestedCategory, setSuggestedCategory] = useState<BalanceSheetCategory | null>(null);
@@ -442,6 +444,7 @@ function BSCategorySection({
   moveRow,
   removeRow,
   isLocked,
+  companyType,
 }: {
   category: BalanceSheetCategory;
   categoryLabel: string;
@@ -455,12 +458,15 @@ function BSCategorySection({
   moveRow: (statement: "balanceSheet", rowId: string, direction: "up" | "down") => void;
   removeRow: (statement: "balanceSheet", rowId: string) => void;
   isLocked: boolean;
+  companyType?: "public" | "private";
 }) {
   const [showAddDialog, setShowAddDialog] = useState(false);
   
-  // Get fresh rows from store to ensure we have the latest data
+  // Get fresh rows and meta from store to ensure we have the latest data
   const balanceSheet = useModelStore((s) => s.balanceSheet);
+  const storeMeta = useModelStore((s) => s.meta);
   const currentRows = balanceSheet.length > 0 ? balanceSheet : rows;
+  const effectiveCompanyType = companyType || storeMeta?.companyType;
   
   const totalRow = totalRowId ? currentRows.find(r => r.id === totalRowId) : null;
   const categoryRows = getRowsForCategory(currentRows, category);
@@ -652,15 +658,31 @@ function BSCategorySection({
                     )}
                     <div className={`text-xs font-semibold ${colors.text}`}>{row.label}</div>
                   </div>
-                  {!isLocked && (
-                    <button
-                      type="button"
-                      onClick={() => removeRow("balanceSheet", row.id)}
-                      className={`text-xs ${colors.textLight} ${colors.hoverText}`}
-                    >
-                      Remove
-                    </button>
-                  )}
+                  {(() => {
+                    // Protect critical totals and subtotals
+                    const protectedRows = [
+                      "total_current_assets",
+                      "total_fixed_assets",
+                      "total_assets",
+                      "total_current_liabilities",
+                      "total_non_current_liabilities",
+                      "total_liabilities",
+                      "total_equity",
+                      "total_liab_and_equity",
+                    ];
+                    const isProtected = protectedRows.includes(row.id);
+                    
+                    // Show Remove button for all items except protected ones, and only when not locked
+                    return !isProtected && !isLocked ? (
+                      <button
+                        type="button"
+                        onClick={() => removeRow("balanceSheet", row.id)}
+                        className={`text-xs ${colors.textLight} ${colors.hoverText}`}
+                      >
+                        Remove
+                      </button>
+                    ) : null;
+                  })()}
                 </div>
                 <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-5">
                   {years.map((y) => {
@@ -712,6 +734,7 @@ function BSCategorySection({
         isOpen={showAddDialog}
         onClose={() => setShowAddDialog(false)}
         onAdd={handleAddItem}
+        companyType={effectiveCompanyType}
       />
     </>
   );
@@ -741,109 +764,132 @@ export default function BalanceSheetBuilder() {
   const isEquityLocked = useModelStore((s) => s.sectionLocks["bs_equity"] ?? false);
   
   return (
-    <div className="space-y-6">
-      <div className="rounded-lg border border-blue-800/40 bg-blue-950/20 p-4">
-        <h3 className="text-sm font-semibold text-blue-200 mb-2">
-          Build Your Balance Sheet
-        </h3>
-        <p className="text-xs text-blue-300/80">
-          Add line items for each category. The system automatically determines Cash Flow impacts based on accounting rules.
-        </p>
-      </div>
-      
-      {/* Current Assets */}
-      <BSCategorySection
-        category="current_assets"
-        categoryLabel="Current Assets"
-        colorClass="blue"
-        rows={balanceSheet}
-        totalRowId="total_current_assets"
-        years={years}
-        meta={meta}
-        updateRowValue={updateRowValue}
-        insertRow={insertRow}
-        moveRow={moveRow}
-        removeRow={removeRow}
-        isLocked={isCALocked}
-      />
-      
-      {/* Fixed Assets */}
-      <BSCategorySection
-        category="fixed_assets"
-        categoryLabel="Fixed / Non-Current Assets"
-        colorClass="green"
-        rows={balanceSheet}
-        totalRowId="total_assets"
-        years={years}
-        meta={meta}
-        updateRowValue={updateRowValue}
-        insertRow={insertRow}
-        moveRow={moveRow}
-        removeRow={removeRow}
-        isLocked={isFALocked}
-      />
-      
-      {/* Current Liabilities */}
-      <BSCategorySection
-        category="current_liabilities"
-        categoryLabel="Current Liabilities"
-        colorClass="orange"
-        rows={balanceSheet}
-        totalRowId="total_current_liabilities"
-        years={years}
-        meta={meta}
-        updateRowValue={updateRowValue}
-        insertRow={insertRow}
-        moveRow={moveRow}
-        removeRow={removeRow}
-        isLocked={isCLLocked}
-      />
-      
-      {/* Non-Current Liabilities */}
-      <BSCategorySection
-        category="non_current_liabilities"
-        categoryLabel="Non-Current Liabilities"
-        colorClass="red"
-        rows={balanceSheet}
-        totalRowId="total_liabilities"
-        years={years}
-        meta={meta}
-        updateRowValue={updateRowValue}
-        insertRow={insertRow}
-        moveRow={moveRow}
-        removeRow={removeRow}
-        isLocked={isNCLLocked}
-      />
-      
-      {/* Shareholders' Equity */}
-      <div className="space-y-4">
-        <div className="rounded-lg border border-purple-800/40 bg-purple-950/20 p-3">
-          <h4 className="text-xs font-semibold text-purple-200 mb-2">
-            📋 10-K Equity Structure Guidance
-          </h4>
-          <div className="text-xs text-purple-300/90 space-y-1">
-            <p><strong>Common Stock (Par Value):</strong> Enter only the par value (typically $0.001-$0.01 per share × shares outstanding). This is usually a very small amount.</p>
-            <p><strong>Additional Paid-in Capital (APIC):</strong> Enter the amount paid above par value when shares were issued. This is typically the bulk of equity issuance.</p>
-            <p><strong>Treasury Stock:</strong> Enter as a <strong>negative value</strong> (contra-equity account). Represents shares repurchased by the company.</p>
-            <p><strong>AOCI:</strong> Can be positive or negative. Represents unrealized gains/losses not in net income.</p>
-            <p><strong>Retained Earnings:</strong> Cumulative net income - dividends paid. Links to Income Statement Net Income.</p>
-          </div>
-        </div>
+    <CollapsibleSection
+      sectionId="balance_sheet_all"
+      title="Balance Sheet Builder"
+      description="Add line items for each category. The system automatically determines Cash Flow impacts based on accounting rules."
+      colorClass="blue"
+      defaultExpanded={true}
+    >
+      <div className="space-y-6">
+        {/* Current Assets */}
         <BSCategorySection
-          category="equity"
-          categoryLabel="Shareholders' Equity"
-          colorClass="purple"
+          category="current_assets"
+          categoryLabel="Current Assets"
+          colorClass="blue"
           rows={balanceSheet}
-          totalRowId="total_equity"
+          totalRowId="total_current_assets"
           years={years}
           meta={meta}
           updateRowValue={updateRowValue}
           insertRow={insertRow}
           moveRow={moveRow}
           removeRow={removeRow}
-          isLocked={isEquityLocked}
+          isLocked={isCALocked}
+          companyType={meta?.companyType}
         />
+        
+        {/* Fixed Assets */}
+        <BSCategorySection
+          category="fixed_assets"
+          categoryLabel="Fixed / Non-Current Assets"
+          colorClass="green"
+          rows={balanceSheet}
+          totalRowId="total_assets"
+          years={years}
+          meta={meta}
+          updateRowValue={updateRowValue}
+          insertRow={insertRow}
+          moveRow={moveRow}
+          removeRow={removeRow}
+          isLocked={isFALocked}
+          companyType={meta?.companyType}
+        />
+        
+        {/* Current Liabilities */}
+        <BSCategorySection
+          category="current_liabilities"
+          categoryLabel="Current Liabilities"
+          colorClass="orange"
+          rows={balanceSheet}
+          totalRowId="total_current_liabilities"
+          years={years}
+          meta={meta}
+          updateRowValue={updateRowValue}
+          insertRow={insertRow}
+          moveRow={moveRow}
+          removeRow={removeRow}
+          isLocked={isCLLocked}
+          companyType={meta?.companyType}
+        />
+        
+        {/* Non-Current Liabilities */}
+        <BSCategorySection
+          category="non_current_liabilities"
+          categoryLabel="Non-Current Liabilities"
+          colorClass="red"
+          rows={balanceSheet}
+          totalRowId="total_liabilities"
+          years={years}
+          meta={meta}
+          updateRowValue={updateRowValue}
+          insertRow={insertRow}
+          moveRow={moveRow}
+          removeRow={removeRow}
+          isLocked={isNCLLocked}
+          companyType={meta?.companyType}
+        />
+        
+        {/* Shareholders' Equity */}
+        <div className="space-y-4">
+          {meta?.companyType === "public" ? (
+            <div className="rounded-lg border border-purple-800/40 bg-purple-950/20 p-3">
+              <h4 className="text-xs font-semibold text-purple-200 mb-2">
+                📋 10-K Equity Structure Guidance (Public Company)
+              </h4>
+              <div className="text-xs text-purple-300/90 space-y-1">
+                <p><strong>Common Stock (Par Value):</strong> Enter only the par value (typically $0.001-$0.01 per share × shares outstanding). This is usually a very small amount.</p>
+                <p><strong>Additional Paid-in Capital (APIC):</strong> Enter the amount paid above par value when shares were issued. This is typically the bulk of equity issuance.</p>
+                <p><strong>Treasury Stock:</strong> Enter as a <strong>negative value</strong> (contra-equity account). Represents shares repurchased by the company.</p>
+                <p><strong>AOCI:</strong> Can be positive or negative. Represents unrealized gains/losses not in net income.</p>
+                <p><strong>Retained Earnings:</strong> Cumulative net income - dividends paid. Links to Income Statement Net Income.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-purple-800/40 bg-purple-950/20 p-3">
+              <h4 className="text-xs font-semibold text-purple-200 mb-2">
+                📋 Equity Structure Guidance (Private Company)
+              </h4>
+              <div className="text-xs text-purple-300/90 space-y-1">
+                <p><strong>Flexible Structure:</strong> Private companies can have simpler equity structures. Add only the items that apply to your company.</p>
+                <p><strong>Common Options:</strong></p>
+                <ul className="list-disc list-inside ml-2 space-y-0.5">
+                  <li><strong>Members' Equity</strong> (for LLCs)</li>
+                  <li><strong>Partners' Capital</strong> (for partnerships)</li>
+                  <li><strong>Owner's Equity</strong> or <strong>Shareholders' Equity</strong> (for corporations)</li>
+                  <li><strong>Retained Earnings</strong> (if applicable)</li>
+                </ul>
+                <p className="mt-2"><strong>Note:</strong> You don't need Common Stock (par value) or APIC unless your company actually has them. The balance check will work with any equity structure.</p>
+              </div>
+            </div>
+          )}
+          <BSCategorySection
+            category="equity"
+            categoryLabel={meta?.companyType === "public" ? "Shareholders' Equity" : "Equity"}
+            colorClass="purple"
+            rows={balanceSheet}
+            totalRowId="total_equity"
+            years={years}
+            meta={meta}
+            updateRowValue={updateRowValue}
+            insertRow={insertRow}
+            moveRow={moveRow}
+            removeRow={removeRow}
+            isLocked={isEquityLocked}
+            companyType={meta?.companyType}
+          />
+        </div>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }

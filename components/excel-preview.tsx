@@ -1,10 +1,99 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { formatCurrencyDisplay, storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
-import { checkBalanceSheetBalance } from "@/lib/calculations";
+import { checkBalanceSheetBalance, computeRowValue } from "@/lib/calculations";
+import { findCFIItem } from "@/lib/cfi-intelligence";
+import { findCFFItem } from "@/lib/cff-intelligence";
+
+// Helper function to get CFO/CFI sign indicator
+function getCFOSign(rowId: string, row?: Row, section?: "operating" | "investing" | "financing"): string | null {
+  // CFO items (operating section)
+  if (section === "operating") {
+    // Standard CFO items with known signs
+    if (rowId === "net_income" || rowId === "danda" || rowId === "sbc") {
+      return "+";
+    }
+    if (rowId === "wc_change") {
+      return "-";
+    }
+    if (rowId === "other_operating") {
+      return "+"; // Can be negative, but shown as + (value itself can be negative)
+    }
+    
+    // CFO intelligence items - check the impact
+    if (rowId.startsWith("cfo_") && row?.cfsLink) {
+      if (row.cfsLink.impact === "positive") {
+        return "+";
+      } else if (row.cfsLink.impact === "negative") {
+        return "-";
+      } else {
+        return "+"; // Neutral defaults to +
+      }
+    }
+  }
+  
+  // CFI items (investing section)
+  if (section === "investing") {
+    // Standard CFI items by ID
+    if (rowId === "capex") {
+      return "-"; // CapEx is cash outflow
+    }
+    if (rowId === "other_investing") {
+      return "+"; // Can be positive or negative, but shown as + (value itself can be negative)
+    }
+    
+    // CFI items with cfsLink - check the impact
+    if (row?.cfsLink && row.cfsLink.section === "investing") {
+      if (row.cfsLink.impact === "positive") {
+        return "+";
+      } else if (row.cfsLink.impact === "negative") {
+        return "-";
+      }
+    }
+    
+    // Try to match by label using CFI intelligence
+    if (row?.label) {
+      const cfiItem = findCFIItem(row.label);
+      if (cfiItem) {
+        return cfiItem.impact === "positive" ? "+" : "-";
+      }
+    }
+  }
+  
+  // CFF items (financing section)
+  if (section === "financing") {
+    // Standard CFF items
+    if (rowId === "debt_issuance" || rowId === "equity_issuance") {
+      return "+"; // Issuances are cash inflows
+    }
+    if (rowId === "debt_repayment" || rowId === "dividends") {
+      return "-"; // Repayments and dividends are cash outflows
+    }
+    
+    // CFF items with cfsLink - check the impact
+    if (row?.cfsLink && row.cfsLink.section === "financing") {
+      if (row.cfsLink.impact === "positive") {
+        return "+";
+      } else if (row.cfsLink.impact === "negative") {
+        return "-";
+      }
+    }
+    
+    // Try to match by label using CFF intelligence
+    if (row?.label) {
+      const cffItem = findCFFItem(row.label);
+      if (cffItem) {
+        return cffItem.impact === "positive" ? "+" : "-";
+      }
+    }
+  }
+  
+  // Default: no sign for unknown items
+  return null;
+}
 
 function flattenRows(
   rows: Row[], 
@@ -13,11 +102,37 @@ function flattenRows(
 ): Array<{ row: Row; depth: number; parentId?: string }> {
   const out: Array<{ row: Row; depth: number; parentId?: string }> = [];
   for (const r of rows) {
+    // Skip EBITDA, EBITDA Margin, and SBC rows (removed from IS - SBC is shown as disclosure only)
+    const labelLower = r.label.toLowerCase();
+    if (
+      r.id === "ebitda" || 
+      r.id === "ebitda_margin" || 
+      r.id === "sbc" ||
+      labelLower.includes("stock-based compensation") ||
+      labelLower.includes("stock based compensation") ||
+      (labelLower.includes("sbc") && !labelLower.includes("sub"))
+    ) {
+      continue;
+    }
     out.push({ row: r, depth });
     // Only include children if this row is expanded (null means all expanded by default)
     // Check both that children exists and is an array with length > 0
+    // Also filter out EBITDA/EBITDA Margin and SBC from children
     if (Array.isArray(r.children) && r.children.length > 0 && (expandedRows === null || expandedRows.has(r.id))) {
-      out.push(...flattenRows(r.children, depth + 1, expandedRows).map(item => ({ ...item, parentId: r.id })));
+      const filteredChildren = r.children.filter(child => {
+        const childLabelLower = child.label.toLowerCase();
+        return (
+          child.id !== "ebitda" && 
+          child.id !== "ebitda_margin" && 
+          child.id !== "sbc" &&
+          !childLabelLower.includes("stock-based compensation") &&
+          !childLabelLower.includes("stock based compensation") &&
+          !(childLabelLower.includes("sbc") && !childLabelLower.includes("sub"))
+        );
+      });
+      if (filteredChildren.length > 0) {
+        out.push(...flattenRows(filteredChildren, depth + 1, expandedRows).map(item => ({ ...item, parentId: r.id })));
+      }
     }
   }
   return out;
@@ -79,7 +194,10 @@ function StatementTable({
   meta, 
   showDecimals, 
   expandedRows, 
-  toggleRow 
+  toggleRow,
+  allStatements,
+  sbcBreakdowns,
+  danaBreakdowns
 }: { 
   rows: Row[]; 
   label: string; 
@@ -88,17 +206,82 @@ function StatementTable({
   showDecimals: boolean; 
   expandedRows: Set<string> | null; 
   toggleRow: (rowId: string) => void;
+  allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
+  sbcBreakdowns?: Record<string, Record<string, number>>;
+  danaBreakdowns?: Record<string, number>;
 }) {
   const flat = useMemo(() => flattenRows(rows ?? [], 0, expandedRows), [rows, expandedRows]);
   const isBalanceSheet = label === "Balance Sheet";
+  const isCashFlow = label === "Cash Flow Statement";
   
-  // Track category changes for Balance Sheet
+  // For Cash Flow Statement, detect section changes (Operating, Investing, Financing)
+  const getCFSSection = (rowId: string, rows: Row[]): "operating" | "investing" | "financing" | null => {
+    // First, check if the row has a cfsLink that specifies the section
+    const row = rows.find(r => r.id === rowId);
+    if (row?.cfsLink?.section) {
+      return row.cfsLink.section as "operating" | "investing" | "financing";
+    }
+    
+    // Check by row ID directly - more reliable than position
+    const operatingItems = ["net_income", "danda", "sbc", "wc_change", "other_operating", "operating_cf"];
+    const investingItems = ["capex", "other_investing", "investing_cf"];
+    const financingItems = ["debt_issuance", "debt_repayment", "equity_issuance", "dividends", "financing_cf", "net_change_cash"];
+    
+    if (operatingItems.includes(rowId)) {
+      return "operating";
+    }
+    if (investingItems.includes(rowId)) {
+      return "investing";
+    }
+    if (financingItems.includes(rowId)) {
+      return "financing";
+    }
+    
+    // Fallback: check position relative to section markers
+    const operatingEndIndex = rows.findIndex(r => r.id === "operating_cf");
+    const investingEndIndex = rows.findIndex(r => r.id === "investing_cf");
+    const financingEndIndex = rows.findIndex(r => r.id === "financing_cf");
+    const rowIndex = rows.findIndex(r => r.id === rowId);
+    
+    if (rowIndex === -1) return null;
+    
+    if (operatingEndIndex >= 0 && rowIndex <= operatingEndIndex) {
+      return "operating";
+    }
+    if (investingEndIndex >= 0 && rowIndex > (operatingEndIndex >= 0 ? operatingEndIndex : -1) && rowIndex <= investingEndIndex) {
+      return "investing";
+    }
+    if (financingEndIndex >= 0 && rowIndex > (investingEndIndex >= 0 ? investingEndIndex : -1) && rowIndex <= financingEndIndex) {
+      return "financing";
+    }
+    // Net Change in Cash is after financing
+    return "financing";
+  };
+  
+  // For Balance Sheet, detect section changes (Assets, Liabilities, Equity)
+  const getBSSection = (rowId: string, rows: Row[]): "assets" | "liabilities" | "equity" | null => {
+    const totalAssetsIndex = rows.findIndex(r => r.id === "total_assets");
+    const totalLiabIndex = rows.findIndex(r => r.id === "total_liabilities");
+    const rowIndex = rows.findIndex(r => r.id === rowId);
+    
+    if (rowIndex === -1) return null;
+    
+    if (totalAssetsIndex >= 0 && rowIndex <= totalAssetsIndex) {
+      return "assets";
+    }
+    if (totalLiabIndex >= 0 && rowIndex <= totalLiabIndex) {
+      return "liabilities";
+    }
+    return "equity";
+  };
+  
+  // Track section and category changes for Balance Sheet
   const categoryLabels: Record<string, string> = {
-    current_assets: "Current Assets",
-    fixed_assets: "Fixed / Non-Current Assets",
-    current_liabilities: "Current Liabilities",
-    non_current_liabilities: "Non-Current Liabilities",
-    equity: "Shareholders' Equity",
+    current_assets: "Current assets",
+    fixed_assets: "Fixed assets",
+    current_liabilities: "Current liabilities",
+    non_current_liabilities: "Non-current liabilities",
+    equity: "Shareholders' equity",
   };
 
   return (
@@ -112,17 +295,23 @@ function StatementTable({
       
       {/* Statement Rows */}
       {flat.map(({ row, depth }, flatIndex) => {
-        // For Balance Sheet, detect category changes
+        // For Balance Sheet, detect section and category changes
+        const currentSection = isBalanceSheet ? getBSSection(row.id, rows) : isCashFlow ? getCFSSection(row.id, rows) : null;
         const currentCategory = isBalanceSheet ? getBSCategory(row.id, rows) : null;
         const prevRow = flatIndex > 0 ? flat[flatIndex - 1] : null;
+        const prevSection = (isBalanceSheet || isCashFlow) && prevRow 
+          ? (isBalanceSheet ? getBSSection(prevRow.row.id, rows) : getCFSSection(prevRow.row.id, rows))
+          : null;
         const prevCategory = isBalanceSheet && prevRow ? getBSCategory(prevRow.row.id, rows) : null;
-        const isCategoryStart = isBalanceSheet && currentCategory && currentCategory !== prevCategory;
+        const isSectionStart = (isBalanceSheet || isCashFlow) && currentSection && currentSection !== prevSection;
+        // Show category subtitle if: (1) category changed, or (2) it's the first category in a new section
+        const isCategoryStart = isBalanceSheet && currentCategory && (currentCategory !== prevCategory || isSectionStart);
         
         const isInput = row.kind === "input";
         const isGrossMargin = row.id === "gross_margin";
-        const isEbitdaMargin = row.id === "ebitda_margin";
+        const isEbitMargin = row.id === "ebit_margin";
         const isNetIncomeMargin = row.id === "net_income_margin";
-        const isMargin = isGrossMargin || isEbitdaMargin || isNetIncomeMargin;
+        const isMargin = isGrossMargin || isEbitMargin || isNetIncomeMargin;
         const isLink = row.excelFormula?.includes("!") || false;
         const hasChildren = Array.isArray(row.children) && row.children.length > 0;
         const isExpanded = expandedRows === null || expandedRows.has(row.id);
@@ -130,18 +319,30 @@ function StatementTable({
         const isSubtotal = row.kind === "subtotal" || row.kind === "total";
         const isCalculatedWithChildren = row.kind === "calc" && hasChildren;
         const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
-        const isBalanceSheetSubtotal = ["total_current_assets", "total_assets", "total_current_liabilities", "total_liabilities", "total_equity", "total_liab_and_equity"].includes(row.id);
+        const isBalanceSheetSubtotal = ["total_current_assets", "total_fixed_assets", "total_assets", "total_current_liabilities", "total_non_current_liabilities", "total_liabilities", "total_equity", "total_liab_and_equity"].includes(row.id);
+        const isCFSSubtotal = ["operating_cf", "investing_cf", "financing_cf", "net_change_cash"].includes(row.id);
         const isParentSubtotal = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
-        const hasTopBorder = isSubtotal || isCalculatedWithChildren || isKeyCalculation || isParentSubtotal || isBalanceSheetSubtotal;
-        const shouldBeBold = isSubtotal || isKeyCalculation || isParentSubtotal || isCalculatedWithChildren || isBalanceSheetSubtotal;
+        const hasTopBorder = isSubtotal || isCalculatedWithChildren || isKeyCalculation || isParentSubtotal || isBalanceSheetSubtotal || isCFSSubtotal;
+        const shouldBeBold = isSubtotal || isKeyCalculation || isParentSubtotal || isCalculatedWithChildren || isBalanceSheetSubtotal || isCFSSubtotal;
         
-        // Category header colors for Balance Sheet
+        // Section colors for Balance Sheet (Assets = green, Liabilities = orange, Equity = purple)
+        // Section colors for Cash Flow (Operating = blue, Investing = green, Financing = orange)
+        const sectionColors: Record<string, { bg: string; text: string; border: string }> = {
+          assets: { bg: "bg-green-950/20", text: "text-green-300", border: "border-green-700/30" },
+          liabilities: { bg: "bg-orange-950/20", text: "text-orange-300", border: "border-orange-700/30" },
+          equity: { bg: "bg-purple-950/20", text: "text-purple-300", border: "border-purple-700/30" },
+          operating: { bg: "bg-blue-950/20", text: "text-blue-300", border: "border-blue-700/30" },
+          investing: { bg: "bg-green-950/20", text: "text-green-300", border: "border-green-700/30" },
+          financing: { bg: "bg-orange-950/20", text: "text-orange-300", border: "border-orange-700/30" },
+        };
+        
+        // Category subtitle colors (same as section but lighter)
         const categoryColors: Record<string, { bg: string; text: string; border: string }> = {
-          current_assets: { bg: "bg-green-950/30", text: "text-green-300", border: "border-green-700/50" },
-          fixed_assets: { bg: "bg-blue-950/30", text: "text-blue-300", border: "border-blue-700/50" },
-          current_liabilities: { bg: "bg-orange-950/30", text: "text-orange-300", border: "border-orange-700/50" },
-          non_current_liabilities: { bg: "bg-red-950/30", text: "text-red-300", border: "border-red-700/50" },
-          equity: { bg: "bg-purple-950/30", text: "text-purple-300", border: "border-purple-700/50" },
+          current_assets: { bg: "bg-green-950/10", text: "text-green-400", border: "border-green-700/20" },
+          fixed_assets: { bg: "bg-green-950/10", text: "text-green-400", border: "border-green-700/20" },
+          current_liabilities: { bg: "bg-orange-950/10", text: "text-orange-400", border: "border-orange-700/20" },
+          non_current_liabilities: { bg: "bg-orange-950/10", text: "text-orange-400", border: "border-orange-700/20" },
+          equity: { bg: "bg-purple-950/10", text: "text-purple-400", border: "border-purple-700/20" },
         };
         
         const labelClass = isMargin
@@ -150,36 +351,45 @@ function StatementTable({
           ? "text-slate-200 font-bold"
           : "text-slate-200";
         
-        // Enhanced spacing for Balance Sheet subtotals
+        // Enhanced spacing for Balance Sheet subtotals (removed - Excel format doesn't need extra spacing)
         const isBSCategorySubtotal = isBalanceSheet && isBalanceSheetSubtotal && !["total_assets", "total_liabilities", "total_liab_and_equity"].includes(row.id);
-        const spacingAfterSubtotal = isBSCategorySubtotal ? "mb-2" : "";
         
         return (
-          <>
-            {/* Category Header for Balance Sheet */}
+          <React.Fragment key={`fragment-${row.id}-${flatIndex}`}>
+            {/* Section Header for Balance Sheet (Assets, Liabilities, Shareholders' Equity) */}
+            {/* Section Header for Cash Flow Statement (Operating, Investing, Financing) */}
+            {isSectionStart && currentSection && (
+              <tr key={`section-${currentSection}-${flatIndex}`} className="border-t-2 border-slate-600">
+                <td colSpan={1 + years.length} className={`px-3 py-2.5 ${sectionColors[currentSection]?.bg || "bg-slate-900/50"}`}>
+                  <div className={`text-sm font-semibold ${sectionColors[currentSection]?.text || "text-slate-300"} underline`}>
+                    {currentSection === "assets" && "Assets"}
+                    {currentSection === "liabilities" && "Liabilities"}
+                    {currentSection === "equity" && "Shareholders' Equity"}
+                    {currentSection === "operating" && "Operating Activities"}
+                    {currentSection === "investing" && "Investing Activities"}
+                    {currentSection === "financing" && "Financing Activities"}
+                  </div>
+                </td>
+              </tr>
+            )}
+            
+            {/* Category Subtitle for Balance Sheet (Current assets, Fixed assets, etc.) */}
             {isCategoryStart && currentCategory && (
-              <tr className="border-t-2 border-slate-600">
-                <td colSpan={1 + years.length} className={`px-3 py-2 ${categoryColors[currentCategory]?.bg || "bg-slate-900/50"} ${categoryColors[currentCategory]?.border || "border-slate-700"} border-b`}>
-                  <div className={`text-xs font-bold ${categoryColors[currentCategory]?.text || "text-slate-300"} uppercase tracking-wider`}>
+              <tr key={`category-${currentCategory}-${flatIndex}`}>
+                <td colSpan={1 + years.length} className={`px-3 py-1.5 ${categoryColors[currentCategory]?.bg || "bg-transparent"}`}>
+                  <div className={`text-xs font-medium ${categoryColors[currentCategory]?.text || "text-slate-400"}`}>
                     {categoryLabels[currentCategory]}
                   </div>
                 </td>
               </tr>
             )}
             
-            {/* Spacing row after category header */}
-            {isCategoryStart && (
-              <tr>
-                <td colSpan={1 + years.length} className="h-1 bg-transparent"></td>
-              </tr>
-            )}
-            
             {/* Main row */}
-            <tr 
-            key={row.id} 
-            className={`border-b border-slate-900 hover:bg-slate-900/40 ${hasTopBorder ? "border-t-2 border-slate-300" : ""} ${spacingAfterSubtotal}`}
+            <tr
+            key={`${row.id}-${flatIndex}`} 
+            className={`border-b border-slate-900 hover:bg-slate-900/40 ${hasTopBorder ? "border-t-2 border-slate-300" : ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/30" : ""}`}
           >
-            <td className={`px-3 py-2 ${labelClass}`}>
+            <td className={`px-3 py-2 ${labelClass} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
               <div style={{ paddingLeft: depth * 14 }} className="flex items-center gap-1">
                 {hasChildren ? (
                   <button
@@ -192,6 +402,21 @@ function StatementTable({
                 ) : (
                   <span className="w-4" />
                 )}
+                {/* Show CFO/CFI/CFF sign indicator for operating, investing, and financing section items */}
+                {isCashFlow && (() => {
+                  const cfsSection = getCFSSection(row.id, rows);
+                  const sign = getCFOSign(row.id, row, cfsSection || undefined);
+                  // Show signs for all operating, investing, and financing items (but not totals - totals are sums)
+                  const isTotal = row.id === "operating_cf" || row.id === "investing_cf" || row.id === "financing_cf" || row.id === "net_change_cash";
+                  if (sign && (cfsSection === "operating" || cfsSection === "investing" || cfsSection === "financing") && !isTotal) {
+                    return (
+                      <span className={`text-sm font-semibold ${sign === "+" ? "text-green-400" : "text-red-400"}`}>
+                        ({sign})
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
                 <span className="inline-block">
                   {row.label}
                 </span>
@@ -199,7 +424,84 @@ function StatementTable({
             </td>
 
             {years.map((y) => {
-              const storedValue = row.values?.[y] ?? 0;
+              // For calculated CFS items, use stored values (computed by recomputeCalculations)
+              // Don't recompute here to avoid recursion - values should already be stored
+              let storedValue = row.values?.[y] ?? 0;
+              
+              // For CFS items that pull from IS/BS, the values should already be computed and stored
+              // Only recompute if absolutely necessary and we can do it safely
+              if (isCashFlow && allStatements) {
+                const isCalculatedCFSItem = row.kind === "calc" || 
+                  ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_income", "danda", "sbc", "wc_change"].includes(row.id) ||
+                  row.id.startsWith("cfo_");
+                
+                if (isCalculatedCFSItem) {
+                  // For WC Change, historical years are input, projection years are calculated
+                  if (row.id === "wc_change") {
+                    const isHistorical = y.endsWith("A");
+                    const isProjection = y.endsWith("E");
+                    
+                    if (isHistorical) {
+                      // Historical year - use stored input value
+                      storedValue = row.values?.[y] ?? 0;
+                    } else if (isProjection) {
+                      // Projection year - calculate from BS changes
+                      // First try stored value (from recomputeCalculations), then compute if needed
+                      if (row.values?.[y] !== undefined) {
+                        storedValue = row.values[y];
+                      } else {
+                        try {
+                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                        } catch (e) {
+                          storedValue = 0;
+                        }
+                      }
+                    } else {
+                      // Year format unclear - treat as input
+                      storedValue = row.values?.[y] ?? 0;
+                    }
+                  } else {
+                    // Use stored value first (should be there after recomputeCalculations)
+                    // But also compute if value is 0 or undefined to ensure we show calculated values
+                    if (row.values?.[y] !== undefined && row.values[y] !== 0) {
+                      storedValue = row.values[y];
+                    } else {
+                      // Only compute if no stored value exists, but be very careful to avoid recursion
+                      // For net_income, danda, sbc - these pull from IS/SBC/D&A breakdowns
+                      if (row.id === "net_income") {
+                        // Get from IS directly
+                        const isRow = allStatements.incomeStatement.find(r => r.id === row.id);
+                        if (isRow && isRow.values?.[y] !== undefined) {
+                          storedValue = isRow.values[y];
+                        }
+                      } else if (row.id === "danda") {
+                        // D&A is now a manual input in CFO - use stored value
+                        storedValue = row.values?.[y] ?? 0;
+                      } else if (row.id === "sbc" && sbcBreakdowns) {
+                        // Calculate SBC from breakdowns (safe, no recursion)
+                        let total = 0;
+                        Object.keys(sbcBreakdowns).forEach(categoryId => {
+                          total += sbcBreakdowns[categoryId]?.[y] ?? 0;
+                        });
+                        storedValue = total;
+                      } else {
+                        // For other calculated items, try to compute (but this might cause recursion)
+                        // Only do this as last resort
+                        try {
+                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                        } catch (e) {
+                          // If recursion error, just use 0
+                          storedValue = 0;
+                        }
+                      }
+                    }
+                  }
+                } else if (row.kind === "input") {
+                  // For input items, use stored value
+                  storedValue = row.values?.[y] ?? 0;
+                }
+              }
+              
               const isCurrency = row.valueType === "currency";
               const isPercent = row.valueType === "percent";
               
@@ -247,31 +549,27 @@ function StatementTable({
               
               const isZero = typeof storedValue === "number" && storedValue === 0;
               // For subtotals and totals, always show the value (even if 0) to make them visible
-              const isSubtotalOrTotal = row.kind === "subtotal" || row.kind === "total" || isBalanceSheetSubtotal;
-              if (isZero && !isSubtotalOrTotal) {
+              const isSubtotalOrTotal = row.kind === "subtotal" || row.kind === "total" || isBalanceSheetSubtotal || isCFSSubtotal;
+              // For calculated CFS items, always show the value (even if 0) since they're auto-populated
+              // WC Change is calculated for subsequent years, so include it
+              const isCalculatedCFS = isCashFlow && (row.kind === "calc" || ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_income", "danda", "sbc", "wc_change"].includes(row.id));
+              if (isZero && !isSubtotalOrTotal && !isCalculatedCFS) {
                 cellClass += " text-slate-500";
               }
               
-              // For subtotals/totals, show "0" or the calculated value, not "—"
-              const displayValue = isSubtotalOrTotal && storedValue === 0 
+              // For subtotals/totals and calculated CFS items, show "0" or the calculated value, not "—"
+              const displayValue = (isSubtotalOrTotal || isCalculatedCFS) && storedValue === 0 
                 ? "0" 
                 : (display || (isInput ? "" : "—"));
               
               return (
-                <td key={`${row.id}-${y}`} className={`px-3 py-2 ${cellClass}`}>
+                <td key={`${row.id}-${y}`} className={`px-3 py-2 ${cellClass} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
                   {displayValue}
                 </td>
               );
             })}
           </tr>
-          
-          {/* Spacing row after Balance Sheet category subtotals */}
-          {isBSCategorySubtotal && (
-            <tr>
-              <td colSpan={1 + years.length} className="h-2 bg-transparent"></td>
-            </tr>
-          )}
-          </>
+          </React.Fragment>
         );
       })}
 
@@ -292,6 +590,7 @@ export default function ExcelPreview() {
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const cashFlow = useModelStore((s) => s.cashFlow);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
+  const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -407,13 +706,23 @@ export default function ExcelPreview() {
           <tbody>
             {/* Income Statement */}
             <StatementTable
-              rows={incomeStatement}
+              rows={incomeStatement.filter(r => 
+                r.id !== "ebitda" && 
+                r.id !== "ebitda_margin" && 
+                r.id !== "sbc" &&
+                !r.label.toLowerCase().includes("stock-based compensation") &&
+                !r.label.toLowerCase().includes("stock based compensation") &&
+                !r.label.toLowerCase().includes("sbc")
+              )}
               label="Income Statement"
               years={years}
               meta={meta}
               showDecimals={showDecimals}
               expandedRows={expandedRows}
               toggleRow={toggleRow}
+              allStatements={{ incomeStatement, balanceSheet, cashFlow }}
+              sbcBreakdowns={sbcBreakdowns}
+              danaBreakdowns={danaBreakdowns}
             />
 
             {/* Stock-Based Compensation Disclosure */}
@@ -628,6 +937,9 @@ export default function ExcelPreview() {
                   showDecimals={showDecimals}
                   expandedRows={expandedRows}
                   toggleRow={toggleRow}
+                  allStatements={{ incomeStatement, balanceSheet, cashFlow }}
+                  sbcBreakdowns={sbcBreakdowns}
+                  danaBreakdowns={danaBreakdowns}
                 />
                 
                 {/* Balance Check */}
@@ -743,6 +1055,9 @@ export default function ExcelPreview() {
                 showDecimals={showDecimals}
                 expandedRows={expandedRows}
                 toggleRow={toggleRow}
+                allStatements={{ incomeStatement, balanceSheet, cashFlow }}
+                sbcBreakdowns={sbcBreakdowns}
+                danaBreakdowns={danaBreakdowns}
               />
             )}
 

@@ -1,15 +1,14 @@
 "use client";
 
+import { useMemo, useState, useEffect } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import StatementBuilder from "@/components/statement-builder";
-import RevenueCogsBuilder from "@/components/revenue-cogs-builder";
-import SgaBuilder from "@/components/sga-builder";
-import DanaBuilder from "@/components/dana-builder";
-import InterestOtherBuilder from "@/components/interest-other-builder";
-import TaxBuilder from "@/components/tax-builder";
-import SbcAnnotation from "@/components/sbc-annotation";
-import BalanceSheetBuilder from "@/components/balance-sheet-builder";
+import IncomeStatementBuilder from "@/components/income-statement-builder";
+import BalanceSheetBuilder from "@/components/balance-sheet-builder-unified";
+import CashFlowBuilder from "@/components/cash-flow-builder";
 import CollapsibleSection from "@/components/collapsible-section";
+import YearsEditor from "@/components/years-editor";
+import { checkBalanceSheetBalance } from "@/lib/calculations";
 
 export default function BuilderPanel() {
   const currentStepId = useModelStore((s) => s.currentStepId);
@@ -18,8 +17,44 @@ export default function BuilderPanel() {
   const saveCurrentStep = useModelStore((s) => s.saveCurrentStep);
   const continueToNextStep = useModelStore((s) => s.continueToNextStep);
   const meta = useModelStore((s) => s.meta);
+  const balanceSheet = useModelStore((s) => s.balanceSheet);
   
   const isCurrentStepComplete = completedStepIds.includes(currentStepId);
+
+  // Check if balance sheet balances for historical years (only in historicals step)
+  const balanceCheck = useMemo(() => {
+    if (currentStepId !== "historicals" || !balanceSheet || balanceSheet.length === 0) {
+      return { isBalanced: true, hasData: false };
+    }
+    
+    const historicalYears = meta?.years?.historical ?? [];
+    if (historicalYears.length === 0) {
+      return { isBalanced: true, hasData: false };
+    }
+    
+    const checkResults = checkBalanceSheetBalance(balanceSheet, historicalYears);
+    const hasData = checkResults.some(b => b.totalAssets !== 0 || b.totalLiabAndEquity !== 0);
+    const allBalanced = checkResults.every(b => b.balances);
+    
+    return { isBalanced: allBalanced, hasData, checkResults };
+  }, [currentStepId, balanceSheet, meta?.years?.historical]);
+
+  // Disable Continue if balance doesn't check in historicals step
+  const canContinue = isCurrentStepComplete && (currentStepId !== "historicals" || balanceCheck.isBalanced || !balanceCheck.hasData);
+
+  // Save button feedback state
+  const [saveFeedback, setSaveFeedback] = useState<"idle" | "saving" | "saved">("idle");
+
+  // Handle save with feedback
+  const handleSave = () => {
+    setSaveFeedback("saving");
+    saveCurrentStep();
+    setSaveFeedback("saved");
+    // Reset feedback after 2 seconds
+    setTimeout(() => {
+      setSaveFeedback("idle");
+    }, 2000);
+  };
 
   // Allow download even if model not complete (for testing)
   const canDownload = true; // isModelComplete;
@@ -77,30 +112,78 @@ export default function BuilderPanel() {
             </button>
 
             <button
-              className="rounded-md bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500"
-              onClick={saveCurrentStep}
+              className={[
+                "rounded-md px-4 py-2 text-xs font-semibold transition-colors",
+                saveFeedback === "saved"
+                  ? "bg-emerald-600 text-white"
+                  : saveFeedback === "saving"
+                  ? "bg-blue-500 text-white cursor-wait"
+                  : "bg-blue-600 text-white hover:bg-blue-500"
+              ].join(" ")}
+              onClick={handleSave}
+              disabled={saveFeedback === "saving"}
             >
-              Save
+              {saveFeedback === "saved" ? "✓ Saved" : saveFeedback === "saving" ? "Saving..." : "Save"}
             </button>
 
             <button
               className={[
                 "rounded-md px-4 py-2 text-xs font-semibold",
-                isCurrentStepComplete
+                canContinue
                   ? "bg-slate-100 text-slate-950 hover:bg-white"
                   : "bg-slate-800 text-slate-400 cursor-not-allowed",
               ].join(" ")}
               onClick={continueToNextStep}
-              disabled={!isCurrentStepComplete}
+              disabled={!canContinue}
+              title={
+                !isCurrentStepComplete
+                  ? "Please save the current step first"
+                  : currentStepId === "historicals" && !balanceCheck.isBalanced && balanceCheck.hasData
+                  ? "Balance sheet must balance for all historical years before continuing"
+                  : undefined
+              }
             >
               Continue →
             </button>
           </div>
         </div>
+
+        {/* Balance Check Warning for Historicals Step */}
+        {currentStepId === "historicals" && balanceCheck.hasData && !balanceCheck.isBalanced && (
+          <div className="mt-3 rounded-md border border-red-600/50 bg-red-950/30 p-3">
+            <div className="flex items-start gap-2">
+              <span className="text-red-400 text-sm">⚠️</span>
+              <div className="flex-1">
+                <p className="text-xs font-semibold text-red-200">
+                  Balance Sheet Out of Balance
+                </p>
+                <p className="text-xs text-red-300/80 mt-1">
+                  The balance sheet must balance (Total Assets = Total Liabilities + Equity) for all historical years before you can continue. Please review your inputs in the Balance Sheet section.
+                </p>
+                {balanceCheck.checkResults && (
+                  <div className="mt-2 text-xs text-red-300/70">
+                    {balanceCheck.checkResults
+                      .filter(b => !b.balances)
+                      .map(b => {
+                        const diff = Math.abs(b.difference);
+                        return `• ${b.year}: Difference of ${diff.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                      })
+                      .join(" | ")}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Step-specific content - Scrollable */}
       <div className="flex-1 overflow-y-auto p-4">
+        {/* Years Editor - Available in all steps */}
+        <div className="mb-6">
+          <YearsEditor />
+        </div>
+        
         {currentStepId === "historicals" && (
           <div className="space-y-6">
             <div className="rounded-lg border border-blue-800/40 bg-blue-950/20 p-4">
@@ -113,70 +196,17 @@ export default function BuilderPanel() {
               </p>
             </div>
             
-            {/* Income Statement Section - Collapsed by default */}
-            <CollapsibleSection
-              sectionId="historicals_is"
-              title="Income Statement (Historicals)"
-              description="Enter historical Income Statement data. All IS inputs are here."
-              colorClass="blue"
-              defaultExpanded={false}
-            >
-              <div className="space-y-6">
-                {/* Guided Revenue & COGS Builder */}
-                <RevenueCogsBuilder />
-
-                {/* Guided SG&A Builder */}
-                <SgaBuilder />
-
-                {/* Guided D&A Builder */}
-                <DanaBuilder />
-
-                {/* Guided Interest & Other Income Builder */}
-                <InterestOtherBuilder />
-
-                {/* Guided Tax Builder */}
-                <TaxBuilder />
-
-                {/* Rest of Income Statement (R&D, etc.) */}
-                <StatementBuilder
-                  statement="incomeStatement"
-                  statementLabel="Other Income Statement Items"
-                  description="Enter other income statement line items."
-                />
-
-                {/* Stock-Based Compensation Annotation */}
-                <SbcAnnotation />
-              </div>
-            </CollapsibleSection>
+            {/* Income Statement Section - Using Unified Builder */}
+            <IncomeStatementBuilder />
 
             {/* Balance Sheet Section */}
             <div className="mt-6">
-              <div className="mb-4 rounded-lg border border-green-800/40 bg-green-950/20 p-4">
-                <h3 className="text-sm font-semibold text-green-200 mb-2">
-                  Balance Sheet (Historicals)
-                </h3>
-                <p className="text-xs text-green-300/80">
-                  Enter historical Balance Sheet data. The system automatically determines Cash Flow impacts based on accounting rules.
-                </p>
-              </div>
               <BalanceSheetBuilder />
             </div>
 
             {/* Cash Flow Statement Section */}
             <div className="mt-6">
-              <div className="mb-4 rounded-lg border border-purple-800/40 bg-purple-950/20 p-4">
-                <h3 className="text-sm font-semibold text-purple-200 mb-2">
-                  Cash Flow Statement (Historicals)
-                </h3>
-                <p className="text-xs text-purple-300/80">
-                  Enter historical Cash Flow Statement data. Many items link to other statements automatically.
-                </p>
-              </div>
-              <StatementBuilder
-                statement="cashFlow"
-                statementLabel="Cash Flow Statement"
-                description="Enter historical cash flow data. Operating, Investing, and Financing activities."
-              />
+              <CashFlowBuilder />
             </div>
           </div>
         )}
@@ -194,11 +224,7 @@ export default function BuilderPanel() {
         )}
 
         {currentStepId === "cfs_build" && (
-          <StatementBuilder
-            statement="cashFlow"
-            statementLabel="Cash Flow Statement"
-            description="Build your Cash Flow Statement structure. Many items will link to other statements."
-          />
+          <CashFlowBuilder />
         )}
 
         {!["historicals", "is_build", "bs_build", "cfs_build"].includes(currentStepId) && (

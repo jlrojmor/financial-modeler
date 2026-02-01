@@ -282,6 +282,52 @@ export const useModelStore = create<ModelState & ModelActions>()(
         ? state.cashFlow 
         : createCashFlowTemplate();
 
+      // Migration: Ensure core Income Statement skeleton items always exist
+      // These are the fundamental structure of an IS and cannot be removed
+      const coreISItems = [
+        { id: "rev", label: "Revenue", kind: "input", valueType: "currency", after: null },
+        { id: "cogs", label: "Cost of Goods Sold (COGS)", kind: "input", valueType: "currency", after: "rev" },
+        { id: "gross_profit", label: "Gross Profit", kind: "calc", valueType: "currency", after: "cogs" },
+        { id: "gross_margin", label: "Gross Margin %", kind: "calc", valueType: "percent", after: "gross_profit" },
+        { id: "sga", label: "Selling, General & Administrative (SG&A)", kind: "input", valueType: "currency", after: "gross_margin" },
+        { id: "ebit", label: "EBIT (Operating Income)", kind: "calc", valueType: "currency", after: "sga" },
+        { id: "ebit_margin", label: "EBIT Margin %", kind: "calc", valueType: "percent", after: "ebit" },
+        { id: "danda", label: "Depreciation & Amortization (D&A)", kind: "input", valueType: "currency", after: "ebit_margin" },
+        { id: "interest_expense", label: "Interest Expense", kind: "input", valueType: "currency", after: "danda" },
+        { id: "interest_income", label: "Interest Income", kind: "input", valueType: "currency", after: "interest_expense" },
+        { id: "other_income", label: "Other Income / (Expense), net", kind: "input", valueType: "currency", after: "interest_income" },
+        { id: "ebt", label: "EBT (Earnings Before Tax)", kind: "calc", valueType: "currency", after: "other_income" },
+        { id: "tax", label: "Income Tax Expense", kind: "input", valueType: "currency", after: "ebt" },
+        { id: "net_income", label: "Net Income", kind: "calc", valueType: "currency", after: "tax" },
+        { id: "net_income_margin", label: "Net Income Margin %", kind: "calc", valueType: "percent", after: "net_income" },
+      ];
+      
+      // Ensure each core item exists, and if not, add it in the correct position
+      coreISItems.forEach((coreItem) => {
+        const exists = incomeStatement.some((r) => r.id === coreItem.id);
+        if (!exists) {
+          // Find the correct position based on the "after" reference
+          let insertIndex = incomeStatement.length;
+          if (coreItem.after) {
+            const afterIndex = incomeStatement.findIndex((r) => r.id === coreItem.after);
+            if (afterIndex >= 0) {
+              insertIndex = afterIndex + 1;
+            }
+          } else {
+            // First item (rev) - insert at beginning
+            insertIndex = 0;
+          }
+          incomeStatement.splice(insertIndex, 0, {
+            id: coreItem.id,
+            label: coreItem.label,
+            kind: coreItem.kind as any,
+            valueType: coreItem.valueType as any,
+            values: {},
+            children: [],
+          });
+        }
+      });
+
       // Migration: Ensure gross_margin exists (added in later version)
       const hasGrossMargin = incomeStatement.some((r) => r.id === "gross_margin");
       if (!hasGrossMargin) {
@@ -362,13 +408,25 @@ export const useModelStore = create<ModelState & ModelActions>()(
         incomeStatement.splice(ebitdaMarginIndex, 1);
       }
 
-      // Migration: Ensure EBIT exists (should be in template, but check anyway)
+      // Migration: Ensure EBIT exists and is in the correct position (after SG&A)
       const hasEbit = incomeStatement.some((r) => r.id === "ebit");
+      const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
+      const sgaIndex = incomeStatement.findIndex((r) => r.id === "sga");
+      
+      // #region agent log
+      if (typeof window !== 'undefined') {
+        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:365',message:'EBIT Position Check',data:{hasEbit,ebitIndex,sgaIndex,incomeStatementLength:incomeStatement.length,incomeStatementIds:incomeStatement.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      }
+      // #endregion
+      
       if (!hasEbit) {
-        // Find where to insert EBIT - after D&A
-        const danaIndex = incomeStatement.findIndex((r) => r.id === "danda");
-        const insertIndex = danaIndex >= 0 ? danaIndex + 1 : incomeStatement.length;
-        // Insert EBIT
+        // Insert EBIT after SG&A
+        const insertIndex = sgaIndex >= 0 ? sgaIndex + 1 : incomeStatement.length;
+        // #region agent log
+        if (typeof window !== 'undefined') {
+          fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:373',message:'Inserting EBIT (not exists)',data:{insertIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        }
+        // #endregion
         incomeStatement.splice(insertIndex, 0, {
           id: "ebit",
           label: "EBIT (Operating Income)",
@@ -377,6 +435,59 @@ export const useModelStore = create<ModelState & ModelActions>()(
           values: {},
           children: [],
         });
+      } else if (ebitIndex >= 0 && sgaIndex >= 0) {
+        // EBIT exists - check if it needs to be moved
+        if (ebitIndex < sgaIndex) {
+          // #region agent log
+          if (typeof window !== 'undefined') {
+            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:387',message:'Moving EBIT (before SG&A)',data:{ebitIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          }
+          // #endregion
+          // EBIT exists but is before SG&A - move it after SG&A
+          const ebitRow = incomeStatement[ebitIndex];
+          incomeStatement.splice(ebitIndex, 1);
+          const newIndex = sgaIndex; // sgaIndex is now correct since we removed EBIT
+          incomeStatement.splice(newIndex + 1, 0, ebitRow);
+        } else if (ebitIndex > sgaIndex + 3) {
+          // #region agent log
+          if (typeof window !== 'undefined') {
+            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:395',message:'Moving EBIT (too far after SG&A)',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          }
+          // #endregion
+          // EBIT exists but is too far after SG&A (likely at the end) - move it right after SG&A
+          const ebitRow = incomeStatement[ebitIndex];
+          incomeStatement.splice(ebitIndex, 1);
+          const newIndex = sgaIndex;
+          incomeStatement.splice(newIndex + 1, 0, ebitRow);
+        } else {
+          // #region agent log
+          if (typeof window !== 'undefined') {
+            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:403',message:'EBIT position OK',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+          }
+          // #endregion
+        }
+      }
+      
+      // Also ensure EBIT margin is right after EBIT
+      const hasEbitMargin = incomeStatement.some((r) => r.id === "ebit_margin");
+      const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
+      const currentEbitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
+      
+      if (!hasEbitMargin && currentEbitIndex >= 0) {
+        incomeStatement.splice(currentEbitIndex + 1, 0, {
+          id: "ebit_margin",
+          label: "EBIT Margin %",
+          kind: "calc",
+          valueType: "percent",
+          values: {},
+          children: [],
+        });
+      } else if (ebitMarginIndex >= 0 && currentEbitIndex >= 0 && ebitMarginIndex !== currentEbitIndex + 1) {
+        // EBIT margin exists but is not right after EBIT - move it
+        const ebitMarginRow = incomeStatement[ebitMarginIndex];
+        incomeStatement.splice(ebitMarginIndex, 1);
+        const newIndex = currentEbitIndex;
+        incomeStatement.splice(newIndex + 1, 0, ebitMarginRow);
       }
 
       // Migration: Update "Other Income / (Expense)" label to "Other Income / (Expense), net"
@@ -696,6 +807,52 @@ export const useModelStore = create<ModelState & ModelActions>()(
       fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:692',message:'recalculateAll - Before migrations',data:{cashFlowIds:cashFlow.map(r=>r.id),cashFlowCount:cashFlow.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'O'})}).catch(()=>{});
     }
     // #endregion
+
+    // Migration: Ensure core Income Statement skeleton items always exist
+    // These are the fundamental structure of an IS and cannot be removed
+    const coreISItems = [
+      { id: "rev", label: "Revenue", kind: "input", valueType: "currency", after: null },
+      { id: "cogs", label: "Cost of Goods Sold (COGS)", kind: "input", valueType: "currency", after: "rev" },
+      { id: "gross_profit", label: "Gross Profit", kind: "calc", valueType: "currency", after: "cogs" },
+      { id: "gross_margin", label: "Gross Margin %", kind: "calc", valueType: "percent", after: "gross_profit" },
+      { id: "sga", label: "Selling, General & Administrative (SG&A)", kind: "input", valueType: "currency", after: "gross_margin" },
+      { id: "ebit", label: "EBIT (Operating Income)", kind: "calc", valueType: "currency", after: "sga" },
+      { id: "ebit_margin", label: "EBIT Margin %", kind: "calc", valueType: "percent", after: "ebit" },
+      { id: "danda", label: "Depreciation & Amortization (D&A)", kind: "input", valueType: "currency", after: "ebit_margin" },
+      { id: "interest_expense", label: "Interest Expense", kind: "input", valueType: "currency", after: "danda" },
+      { id: "interest_income", label: "Interest Income", kind: "input", valueType: "currency", after: "interest_expense" },
+      { id: "other_income", label: "Other Income / (Expense), net", kind: "input", valueType: "currency", after: "interest_income" },
+      { id: "ebt", label: "EBT (Earnings Before Tax)", kind: "calc", valueType: "currency", after: "other_income" },
+      { id: "tax", label: "Income Tax Expense", kind: "input", valueType: "currency", after: "ebt" },
+      { id: "net_income", label: "Net Income", kind: "calc", valueType: "currency", after: "tax" },
+      { id: "net_income_margin", label: "Net Income Margin %", kind: "calc", valueType: "percent", after: "net_income" },
+    ];
+    
+    // Ensure each core item exists, and if not, add it in the correct position
+    coreISItems.forEach((coreItem) => {
+      const exists = incomeStatement.some((r) => r.id === coreItem.id);
+      if (!exists) {
+        // Find the correct position based on the "after" reference
+        let insertIndex = incomeStatement.length;
+        if (coreItem.after) {
+          const afterIndex = incomeStatement.findIndex((r) => r.id === coreItem.after);
+          if (afterIndex >= 0) {
+            insertIndex = afterIndex + 1;
+          }
+        } else {
+          // First item (rev) - insert at beginning
+          insertIndex = 0;
+        }
+        incomeStatement.splice(insertIndex, 0, {
+          id: coreItem.id,
+          label: coreItem.label,
+          kind: coreItem.kind as any,
+          valueType: coreItem.valueType as any,
+          values: {},
+          children: [],
+        });
+      }
+    });
 
     // Migration: Ensure D&A exists in CFS (should be in template, but check anyway)
     const hasDandaInCFS = cashFlow.some((r) => r.id === "danda");
@@ -1598,6 +1755,46 @@ export const useModelStore = create<ModelState & ModelActions>()(
   },
 
   removeRow: (statement, rowId) => {
+    // Core Income Statement items that form the skeleton - cannot be removed
+    const coreISItems = [
+      "rev", "cogs", "gross_profit", "gross_margin", 
+      "sga", "danda", "ebit", "ebit_margin",
+      "interest_expense", "interest_income", "other_income",
+      "ebt", "tax", "net_income", "net_income_margin"
+    ];
+    
+    // Core Balance Sheet items that form the skeleton - cannot be removed
+    const coreBSItems = [
+      "cash", "ar", "inventory", "other_ca", "total_current_assets",
+      "ppe", "intangible_assets", "goodwill", "other_assets", "total_assets",
+      "ap", "st_debt", "other_cl", "total_current_liabilities",
+      "lt_debt", "other_liab", "total_liabilities",
+      "common_stock", "retained_earnings", "other_equity", "total_equity",
+      "total_liab_and_equity"
+    ];
+    
+    // Core Cash Flow items that form the skeleton - cannot be removed
+    const coreCFSItems = [
+      "net_income", "danda", "sbc", "wc_change", "other_operating", "operating_cf",
+      "capex", "other_investing", "investing_cf",
+      "debt_issuance", "debt_repayment", "equity_issuance", "dividends", "financing_cf",
+      "net_change_cash"
+    ];
+    
+    // Prevent removal of core skeleton items
+    if (statement === "incomeStatement" && coreISItems.includes(rowId)) {
+      console.warn(`Cannot remove core Income Statement item: ${rowId}. This item is required for the financial model structure.`);
+      return; // Don't remove core items
+    }
+    if (statement === "balanceSheet" && coreBSItems.includes(rowId)) {
+      console.warn(`Cannot remove core Balance Sheet item: ${rowId}. This item is required for the financial model structure.`);
+      return; // Don't remove core items
+    }
+    if (statement === "cashFlow" && coreCFSItems.includes(rowId)) {
+      console.warn(`Cannot remove core Cash Flow item: ${rowId}. This item is required for the financial model structure.`);
+      return; // Don't remove core items
+    }
+    
     set((state) => {
       const currentRows = state[statement];
       const updated = removeRowDeep(currentRows, rowId);
@@ -1961,13 +2158,25 @@ export const useModelStore = create<ModelState & ModelActions>()(
             });
           }
 
-          // Migration: Ensure EBIT exists (should be in template, but check anyway)
+          // Migration: Ensure EBIT exists and is in the correct position (after SG&A)
           const hasEbit = incomeStatement.some((r) => r.id === "ebit");
+          const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
+          const sgaIndex = incomeStatement.findIndex((r) => r.id === "sga");
+          
+          // #region agent log
+          if (typeof window !== 'undefined') {
+            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:1999',message:'EBIT Position Check (recalculateAll)',data:{hasEbit,ebitIndex,sgaIndex,incomeStatementLength:incomeStatement.length,incomeStatementIds:incomeStatement.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+          }
+          // #endregion
+          
           if (!hasEbit) {
-            // Find where to insert EBIT - after D&A
-            const danaIndex = incomeStatement.findIndex((r) => r.id === "danda");
-            const insertIndex = danaIndex >= 0 ? danaIndex + 1 : incomeStatement.length;
-            // Insert EBIT
+            // Insert EBIT after SG&A
+            const insertIndex = sgaIndex >= 0 ? sgaIndex + 1 : incomeStatement.length;
+            // #region agent log
+            if (typeof window !== 'undefined') {
+              fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2007',message:'Inserting EBIT (not exists, recalculateAll)',data:{insertIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+            }
+            // #endregion
             incomeStatement.splice(insertIndex, 0, {
               id: "ebit",
               label: "EBIT (Operating Income)",
@@ -1976,16 +2185,46 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+          } else if (ebitIndex >= 0 && sgaIndex >= 0) {
+            // EBIT exists - check if it needs to be moved
+            if (ebitIndex < sgaIndex) {
+              // #region agent log
+              if (typeof window !== 'undefined') {
+                fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2021',message:'Moving EBIT (before SG&A, recalculateAll)',data:{ebitIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+              }
+              // #endregion
+              // EBIT exists but is before SG&A - move it after SG&A
+              const ebitRow = incomeStatement[ebitIndex];
+              incomeStatement.splice(ebitIndex, 1);
+              const newIndex = sgaIndex; // sgaIndex is now correct since we removed EBIT
+              incomeStatement.splice(newIndex + 1, 0, ebitRow);
+            } else if (ebitIndex > sgaIndex + 3) {
+              // #region agent log
+              if (typeof window !== 'undefined') {
+                fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2029',message:'Moving EBIT (too far after SG&A, recalculateAll)',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+              }
+              // #endregion
+              // EBIT exists but is too far after SG&A (likely at the end) - move it right after SG&A
+              const ebitRow = incomeStatement[ebitIndex];
+              incomeStatement.splice(ebitIndex, 1);
+              const newIndex = sgaIndex;
+              incomeStatement.splice(newIndex + 1, 0, ebitRow);
+            } else {
+              // #region agent log
+              if (typeof window !== 'undefined') {
+                fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2037',message:'EBIT position OK (recalculateAll)',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+              }
+              // #endregion
+            }
           }
-
-          // Migration: Ensure EBIT Margin exists (should be in template, but check anyway)
+          
+          // Also ensure EBIT margin is right after EBIT
           const hasEbitMargin = incomeStatement.some((r) => r.id === "ebit_margin");
-          if (!hasEbitMargin) {
-            // Find where to insert EBIT Margin - after EBIT
-            const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
-            const insertIndex = ebitIndex >= 0 ? ebitIndex + 1 : incomeStatement.length;
-            // Insert EBIT Margin
-            incomeStatement.splice(insertIndex, 0, {
+          const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
+          const currentEbitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
+          
+          if (!hasEbitMargin && currentEbitIndex >= 0) {
+            incomeStatement.splice(currentEbitIndex + 1, 0, {
               id: "ebit_margin",
               label: "EBIT Margin %",
               kind: "calc",
@@ -1993,6 +2232,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+          } else if (ebitMarginIndex >= 0 && currentEbitIndex >= 0 && ebitMarginIndex !== currentEbitIndex + 1) {
+            // EBIT margin exists but is not right after EBIT - move it
+            const ebitMarginRow = incomeStatement[ebitMarginIndex];
+            incomeStatement.splice(ebitMarginIndex, 1);
+            const newIndex = currentEbitIndex;
+            incomeStatement.splice(newIndex + 1, 0, ebitMarginRow);
           }
 
           // Migration: Ensure Interest Expense exists (should be in template, but check anyway)

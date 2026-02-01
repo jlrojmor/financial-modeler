@@ -1,0 +1,334 @@
+"use client";
+
+import { useState } from "react";
+import type { Row } from "@/types/finance";
+import { storedToDisplay, displayToStored, getUnitLabel } from "@/lib/currency-utils";
+import type { GlossaryItem } from "@/lib/financial-glossary";
+
+interface UnifiedItemCardProps {
+  row: Row;
+  years: string[];
+  meta: any;
+  glossaryItem?: GlossaryItem; // Optional glossary reference for description
+  isLocked?: boolean;
+  isCalculated?: boolean;
+  autoValue?: number | null; // For auto-populated values
+  linkInfo?: { text: string; isAutoPopulated: boolean } | null;
+  signIndicator?: "+" | "-" | null; // For CFS items (+ or -)
+  colorClass?: "blue" | "green" | "orange" | "purple" | "amber" | "slate" | "red";
+  onUpdateValue: (rowId: string, year: string, value: number) => void;
+  onRemove: (rowId: string) => void;
+  onConfirm?: (rowId: string) => void; // Optional confirm callback
+  showRemove?: boolean;
+  showConfirm?: boolean;
+  protectedRows?: string[]; // Rows that cannot be removed
+  customDescription?: string; // Override description from glossary
+}
+
+/**
+ * Unified Item Card Component
+ * 
+ * Used across all financial statement builders (IS, BS, CFS)
+ * Features:
+ * - Expand/collapse functionality
+ * - Edit mode (expanded) vs confirmed mode (collapsed)
+ * - Description display from glossary
+ * - Input fields for historical years
+ * - Remove and Confirm buttons
+ */
+export default function UnifiedItemCard({
+  row,
+  years,
+  meta,
+  glossaryItem,
+  isLocked = false,
+  isCalculated = false,
+  autoValue = null,
+  linkInfo = null,
+  signIndicator = null,
+  colorClass = "slate",
+  onUpdateValue,
+  onRemove,
+  onConfirm,
+  showRemove = true,
+  showConfirm = true,
+  protectedRows = [],
+  customDescription,
+}: UnifiedItemCardProps) {
+  const [isExpanded, setIsExpanded] = useState(true); // Start expanded so users can edit immediately
+  const [isConfirmed, setIsConfirmed] = useState(false);
+
+  const colorMap = {
+    blue: {
+      border: "border-blue-800/40",
+      bg: "bg-blue-950/20",
+      text: "text-blue-200",
+      textLight: "text-blue-300/80",
+    },
+    green: {
+      border: "border-green-800/40",
+      bg: "bg-green-950/20",
+      text: "text-green-200",
+      textLight: "text-green-300/80",
+    },
+    orange: {
+      border: "border-orange-800/40",
+      bg: "bg-orange-950/20",
+      text: "text-orange-200",
+      textLight: "text-orange-300/80",
+    },
+    purple: {
+      border: "border-purple-800/40",
+      bg: "bg-purple-950/20",
+      text: "text-purple-200",
+      textLight: "text-purple-300/80",
+    },
+    amber: {
+      border: "border-amber-800/40",
+      bg: "bg-amber-950/20",
+      text: "text-amber-200",
+      textLight: "text-amber-300/80",
+    },
+    slate: {
+      border: "border-slate-800/40",
+      bg: "bg-slate-950/20",
+      text: "text-slate-200",
+      textLight: "text-slate-300/80",
+    },
+    red: {
+      border: "border-red-800/40",
+      bg: "bg-red-950/20",
+      text: "text-red-200",
+      textLight: "text-red-300/80",
+    },
+  };
+  
+  const colors = colorMap[colorClass] || colorMap.slate;
+
+  const isProtected = protectedRows.includes(row.id);
+  const canRemove = showRemove && !isProtected && !isLocked;
+  const canEdit = !isLocked && !isCalculated;
+  const description = customDescription || glossaryItem?.description || linkInfo?.text || "";
+
+  const handleToggleExpand = () => {
+    if (!isLocked) {
+      setIsExpanded(!isExpanded);
+    }
+  };
+
+  const handleConfirm = () => {
+    setIsConfirmed(true);
+    setIsExpanded(false);
+    if (onConfirm) {
+      onConfirm(row.id);
+    }
+  };
+
+  const handleEdit = () => {
+    setIsConfirmed(false);
+    setIsExpanded(true);
+  };
+
+  // Collapsed state - just show name
+  if (!isExpanded && isConfirmed) {
+    return (
+      <div
+        className={`rounded-lg border ${colors.border} ${colors.bg} p-3 cursor-pointer hover:opacity-80 transition-opacity`}
+        onClick={handleToggleExpand}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`text-sm font-medium ${colors.text}`}>
+              {row.label}
+            </span>
+            {isCalculated && (
+              <span className="text-xs text-slate-400 italic">(Calculated)</span>
+            )}
+            {linkInfo && (
+              <span className={`text-xs ${linkInfo.isAutoPopulated ? "text-emerald-400" : "text-slate-400"}`}>
+                {linkInfo.isAutoPopulated ? "✨" : "🔗"}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleEdit();
+              }}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              Edit
+            </button>
+            {canRemove && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(row.id);
+                }}
+                className="text-xs text-red-400 hover:text-red-300"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Expanded state - show full details and inputs
+  return (
+    <div className={`rounded-lg border ${colors.border} ${colors.bg} p-3`}>
+      {/* Header */}
+      <div className="flex items-start justify-between mb-2">
+        <div className="flex-1">
+          <div className="flex items-center gap-2 mb-1">
+            <button
+              type="button"
+              onClick={handleToggleExpand}
+              className="text-xs text-slate-400 hover:text-slate-300"
+            >
+              {isExpanded ? "▼" : "▶"}
+            </button>
+            {signIndicator && (
+              <span className={`text-sm font-semibold ${signIndicator === "+" ? "text-green-400" : "text-red-400"}`}>
+                ({signIndicator})
+              </span>
+            )}
+            <span className={`text-sm font-medium ${colors.text}`}>
+              {row.label}
+            </span>
+            {isCalculated && (
+              <span className="text-xs text-slate-400 italic">(Calculated)</span>
+            )}
+            {linkInfo && (
+              <span className={`text-xs ${linkInfo.isAutoPopulated ? "text-emerald-400" : "text-slate-400"}`}>
+                {linkInfo.isAutoPopulated ? "✨ " : "🔗 "}{linkInfo.text}
+              </span>
+            )}
+          </div>
+          
+          {/* Description */}
+          {description && (
+            <p className={`text-xs ${colors.textLight} ml-5 mb-2`}>
+              {description}
+            </p>
+          )}
+          
+          {/* Auto-populated value notice */}
+          {autoValue !== null && autoValue !== undefined && linkInfo?.isAutoPopulated && (
+            <div className="ml-5 mb-2 rounded-md border border-emerald-700/40 bg-emerald-950/20 p-2">
+              <div className="text-xs text-emerald-300">
+                ✨ Auto-populated: {storedToDisplay(autoValue, meta?.currencyUnit)} {getUnitLabel(meta?.currencyUnit)}
+              </div>
+            </div>
+          )}
+        </div>
+        
+        {/* Action buttons */}
+        <div className="flex gap-2">
+          {showConfirm && !isConfirmed && canEdit && !isCalculated && (
+            <button
+              type="button"
+              onClick={handleConfirm}
+              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 transition"
+            >
+              Confirm
+            </button>
+          )}
+          {canRemove && (
+            <button
+              type="button"
+              onClick={() => onRemove(row.id)}
+              className="text-xs text-red-400 hover:text-red-300"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Input fields - only show if expanded and not calculated */}
+      {isExpanded && !isCalculated && (
+        <div className="ml-5">
+          {/* Show read-only for auto-populated items */}
+          {linkInfo?.isAutoPopulated && autoValue !== null ? (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              {years.map((year) => {
+                const value = autoValue; // Use auto-populated value
+                const displayValue = storedToDisplay(value, meta?.currencyUnit);
+                const unitLabel = getUnitLabel(meta?.currencyUnit);
+                
+                return (
+                  <div key={year} className="flex flex-col">
+                    <label className={`text-xs ${colors.textLight} mb-1`}>
+                      {year}
+                    </label>
+                    <div className="rounded-md border border-emerald-700/40 bg-emerald-950/40 px-2 py-1.5 text-sm font-semibold text-emerald-200">
+                      {displayValue} {unitLabel}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            /* Regular input fields */
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              {years.map((year) => {
+                let storedValue = row.values?.[year] ?? 0;
+                const displayValue = storedToDisplay(storedValue, meta?.currencyUnit);
+                const unitLabel = getUnitLabel(meta?.currencyUnit);
+                
+                return (
+                  <div key={year} className="flex flex-col">
+                    <label className={`text-xs ${colors.textLight} mb-1`}>
+                      {year}
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={displayValue === 0 ? "" : String(displayValue)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === "" || val === "-") {
+                          onUpdateValue(row.id, year, 0);
+                          return;
+                        }
+                        const displayNum = Number(val);
+                        if (!isNaN(displayNum)) {
+                          const storedNum = displayToStored(displayNum, meta?.currencyUnit);
+                          onUpdateValue(row.id, year, storedNum);
+                        }
+                      }}
+                      onBlur={(e) => {
+                        if (e.target.value === "") {
+                          onUpdateValue(row.id, year, 0);
+                        }
+                      }}
+                      placeholder="0"
+                      disabled={isLocked}
+                      className={`w-full rounded border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-blue-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed`}
+                    />
+                    {unitLabel && (
+                      <span className="text-xs text-slate-500 mt-0.5">{unitLabel}</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Calculated value display */}
+      {isCalculated && (
+        <div className="ml-5 mt-2 text-xs text-slate-400 italic">
+          Value calculated automatically from linked statements
+        </div>
+      )}
+    </div>
+  );
+}

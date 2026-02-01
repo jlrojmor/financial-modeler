@@ -80,6 +80,8 @@ export default function CollapsibleSection({
       onConfirm();
     }
     lockSection(sectionId);
+    // Collapse the section when "Done" is clicked
+    setSectionExpanded(sectionId, false);
   };
 
   const handleUnlock = () => {

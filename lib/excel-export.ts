@@ -15,8 +15,20 @@ import { storedToDisplay } from "./currency-utils";
 function flattenRows(rows: Row[], depth = 0): Array<{ row: Row; depth: number }> {
   const out: Array<{ row: Row; depth: number }> = [];
   for (const r of rows) {
+    // Skip EBITDA, EBITDA Margin, and SBC rows (removed from IS - SBC is shown as disclosure only)
+    if (r.id === "ebitda" || r.id === "ebitda_margin" || r.id === "sbc") {
+      continue;
+    }
     out.push({ row: r, depth });
-    if (r.children?.length) out.push(...flattenRows(r.children, depth + 1));
+    if (r.children?.length) {
+      // Also filter out EBITDA/EBITDA Margin and SBC from children
+      const filteredChildren = r.children.filter(child => 
+        child.id !== "ebitda" && child.id !== "ebitda_margin" && child.id !== "sbc"
+      );
+      if (filteredChildren.length > 0) {
+        out.push(...flattenRows(filteredChildren, depth + 1));
+      }
+    }
   }
   return out;
 }
@@ -88,9 +100,9 @@ export function exportStatementToExcel(
     const excelRow = startRow + 1 + idx;
     const isInput = row.kind === "input";
     const isGrossMargin = row.id === "gross_margin";
-    const isEbitdaMargin = row.id === "ebitda_margin";
+    const isEbitMargin = row.id === "ebit_margin";
     const isNetIncomeMargin = row.id === "net_income_margin";
-    const isMargin = isGrossMargin || isEbitdaMargin || isNetIncomeMargin;
+    const isMargin = isGrossMargin || isEbitMargin || isNetIncomeMargin;
     const isPercent = row.valueType === "percent";
     const isCurrency = row.valueType === "currency";
     
@@ -107,7 +119,7 @@ export function exportStatementToExcel(
     // - Margins: italic, smaller font, grey text
     // - Bold for totals and key calculations
     const isSubtotal = row.kind === "subtotal" || row.kind === "total";
-    const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
+    const isKeyCalculation = ["gross_profit", "ebit", "ebt", "net_income"].includes(row.id);
     const isParentWithChildren = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
     const shouldBeBold = isSubtotal || isKeyCalculation || isParentWithChildren;
     
@@ -171,7 +183,7 @@ export function exportStatementToExcel(
               // - Currency outputs: black text (readable on white)
               // - Bold for totals and key calculations
               const isSubtotal = row.kind === "subtotal" || row.kind === "total";
-              const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
+              const isKeyCalculation = ["gross_profit", "ebit", "ebt", "net_income"].includes(row.id);
               const isParentWithChildren = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
               const shouldBeBold = isSubtotal || isKeyCalculation || isParentWithChildren;
               
@@ -237,7 +249,7 @@ export function exportStatementToExcel(
         
         // Apply same color rules (with white background)
         const isSubtotal = row.kind === "subtotal" || row.kind === "total";
-        const isKeyCalculation = ["gross_profit", "ebitda", "ebit", "ebt", "net_income"].includes(row.id);
+        const isKeyCalculation = ["gross_profit", "ebit", "ebt", "net_income"].includes(row.id);
         const isParentWithChildren = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
         const shouldBeBold = isSubtotal || isKeyCalculation || isParentWithChildren;
         
@@ -489,5 +501,160 @@ export function exportSbcDisclosureToExcel(
     startRow += 1;
   }
   
+  return startRow;
+}
+
+/**
+ * Export Balance Check to Excel worksheet
+ * Shows Total Assets, Total Liabilities + Equity, Difference, and Balance Status
+ * @param bsStartRow The Excel row number where the Balance Sheet data starts (after headers)
+ */
+export function exportBalanceCheckToExcel(
+  ws: any,
+  balanceSheet: Row[],
+  years: string[],
+  startRow: number,
+  bsStartRow: number, // Balance Sheet data start row
+  currencyUnit?: string
+): number {
+  if (!balanceSheet || balanceSheet.length === 0) {
+    return startRow;
+  }
+  if (!years || years.length === 0) {
+    return startRow;
+  }
+
+  // Import checkBalanceSheetBalance dynamically to avoid circular dependency
+  const { checkBalanceSheetBalance } = require("./calculations");
+  const balanceCheck = checkBalanceSheetBalance(balanceSheet, years);
+  
+  const hasAnyData = balanceCheck.some(b => b.totalAssets !== 0 || b.totalLiabAndEquity !== 0);
+  if (!hasAnyData) {
+    return startRow;
+  }
+
+  // Helper to get column letter
+  const getColumnLetter = (col: number): string => {
+    let result = "";
+    let temp = col;
+    while (temp > 0) {
+      temp--;
+      result = String.fromCharCode(65 + (temp % 26)) + result;
+      temp = Math.floor(temp / 26);
+    }
+    return result;
+  };
+
+  // Find the row numbers for total_assets and total_liab_and_equity in the balance sheet
+  function flattenRows(rows: Row[], depth = 0): Array<{ row: Row; depth: number }> {
+    const out: Array<{ row: Row; depth: number }> = [];
+    for (const r of rows) {
+      out.push({ row: r, depth });
+      if (r.children?.length) out.push(...flattenRows(r.children, depth + 1));
+    }
+    return out;
+  }
+  
+  const flattened = flattenRows(balanceSheet);
+  const findBSRowNumber = (targetId: string): number | null => {
+    for (let i = 0; i < flattened.length; i++) {
+      if (flattened[i].row.id === targetId) {
+        // bsStartRow is already the first data row, so just add the index
+        return bsStartRow + i;
+      }
+    }
+    return null;
+  };
+
+  const totalAssetsBSRow = findBSRowNumber("total_assets");
+  const totalLiabEquityBSRow = findBSRowNumber("total_liab_and_equity");
+  
+  if (!totalAssetsBSRow || !totalLiabEquityBSRow) {
+    // If we can't find the rows, skip balance check
+    return startRow;
+  }
+
+  // Add spacing
+  startRow += 2;
+  
+  // Balance Check Header
+  ws.getCell(startRow, 1).value = "Balance Check";
+  ws.getCell(startRow, 1).font = { bold: true, size: 12, color: { argb: "FF000000" } };
+  ws.getRow(startRow).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFFFFFFF" },
+  };
+  startRow += 1;
+
+  // Note
+  ws.getCell(startRow, 1).value = "Total Assets must equal Total Liabilities + Total Equity";
+  ws.getCell(startRow, 1).font = { italic: true, size: 10, color: { argb: "FF666666" } };
+  startRow += 1;
+
+  // Total Assets row (with formula referencing balance sheet)
+  const totalAssetsCheckRow = startRow;
+  ws.getCell(startRow, 1).value = "Total Assets";
+  ws.getCell(startRow, 1).font = { bold: true, color: { argb: "FF000000" } };
+  
+  years.forEach((y, idx) => {
+    const col = 2 + idx;
+    const colLetter = getColumnLetter(col);
+    // Formula references the total_assets row in the balance sheet
+    const formula = `=${colLetter}${totalAssetsBSRow}`;
+    ws.getCell(startRow, col).value = { formula: formula };
+    ws.getCell(startRow, col).numFmt = '"$"#,##0';
+    ws.getCell(startRow, col).font = { bold: true, color: { argb: "FF000000" } };
+  });
+  startRow += 1;
+
+  // Total Liabilities + Equity row (with formula)
+  const totalLiabEquityCheckRow = startRow;
+  ws.getCell(startRow, 1).value = "Total Liabilities + Equity";
+  ws.getCell(startRow, 1).font = { bold: true, color: { argb: "FF000000" } };
+  
+  years.forEach((y, idx) => {
+    const col = 2 + idx;
+    const colLetter = getColumnLetter(col);
+    // Formula references the total_liab_and_equity row in the balance sheet
+    const formula = `=${colLetter}${totalLiabEquityBSRow}`;
+    ws.getCell(startRow, col).value = { formula: formula };
+    ws.getCell(startRow, col).numFmt = '"$"#,##0';
+    ws.getCell(startRow, col).font = { bold: true, color: { argb: "FF000000" } };
+  });
+  startRow += 1;
+
+  // Difference row (only show if not balanced)
+  const allBalanced = balanceCheck.every(b => b.balances);
+  if (!allBalanced) {
+    ws.getCell(startRow, 1).value = "Difference (Out of Balance)";
+    ws.getCell(startRow, 1).font = { bold: true, color: { argb: "FFFF0000" } };
+    
+    years.forEach((y, idx) => {
+      const col = 2 + idx;
+      const colLetter = getColumnLetter(col);
+      // Formula: =Total Assets - Total Liabilities + Equity
+      const formula = `=${colLetter}${totalAssetsCheckRow}-${colLetter}${totalLiabEquityCheckRow}`;
+      ws.getCell(startRow, col).value = { formula: formula };
+      ws.getCell(startRow, col).numFmt = '"$"#,##0';
+      ws.getCell(startRow, col).font = { bold: true, color: { argb: "FFFF0000" } };
+    });
+    startRow += 1;
+  }
+
+  // Balance Status row
+  ws.getCell(startRow, 1).value = "Balance Status";
+  ws.getCell(startRow, 1).font = { bold: true, color: { argb: "FF000000" } };
+  
+  years.forEach((y, idx) => {
+    const col = 2 + idx;
+    const colLetter = getColumnLetter(col);
+    // Formula: =IF(ABS(Total Assets - Total Liabilities + Equity) < 0.01, "BALANCED", "OUT OF BALANCE")
+    const formula = `=IF(ABS(${colLetter}${totalAssetsCheckRow}-${colLetter}${totalLiabEquityCheckRow})<0.01,"BALANCED","OUT OF BALANCE")`;
+    ws.getCell(startRow, col).value = { formula: formula };
+    ws.getCell(startRow, col).font = { bold: true };
+  });
+  startRow += 1;
+
   return startRow;
 }

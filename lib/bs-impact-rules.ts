@@ -190,8 +190,13 @@ export function getBSItemImpacts(
 
 /**
  * Get standard suggestions for a Balance Sheet category
+ * @param category - The Balance Sheet category
+ * @param companyType - Optional company type to customize suggestions (public vs private)
  */
-export function getBSCategorySuggestions(category: BalanceSheetCategory): Array<{ id: string; label: string; description?: string }> {
+export function getBSCategorySuggestions(
+  category: BalanceSheetCategory,
+  companyType?: "public" | "private"
+): Array<{ id: string; label: string; description?: string }> {
   switch (category) {
     case "current_assets":
       return [
@@ -230,12 +235,31 @@ export function getBSCategorySuggestions(category: BalanceSheetCategory): Array<
       ];
       
     case "equity":
-      // Use standard equity items from 10-K filings
-      return getStandardEquityItems().map(item => ({
-        id: item.id,
-        label: item.label,
-        description: item.description,
-      }));
+      // For public companies, show full 10-K equity structure
+      // For private companies, show simplified options + standard items
+      if (companyType === "public") {
+        return getStandardEquityItems().map(item => ({
+          id: item.id,
+          label: item.label,
+          description: item.description,
+        }));
+      } else {
+        // Private company: simplified equity options
+        return [
+          { id: "members_equity", label: "Members' Equity", description: "For LLCs - total equity of members" },
+          { id: "partners_capital", label: "Partners' Capital", description: "For partnerships - total capital contributions" },
+          { id: "owners_equity", label: "Owner's Equity", description: "Simple equity structure for private corporations" },
+          { id: "retained_earnings", label: "Retained Earnings", description: "Cumulative net income - dividends paid" },
+          // Also include standard items in case they apply
+          ...getStandardEquityItems()
+            .filter(item => ["retained_earnings", "aoci"].includes(item.id))
+            .map(item => ({
+              id: item.id,
+              label: item.label,
+              description: item.description,
+            })),
+        ];
+      }
       
     default:
       return [];

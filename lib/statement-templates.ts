@@ -435,14 +435,6 @@ export function createCashFlowTemplate(): Row[] {
       children: [],
     },
     {
-      id: "other_investing",
-      label: "Other Investing Activities",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
-    {
       id: "investing_cf",
       label: "Cash from Investing Activities",
       kind: "calc",
@@ -451,38 +443,7 @@ export function createCashFlowTemplate(): Row[] {
       children: [],
     },
     // Financing Activities
-    {
-      id: "debt_issuance",
-      label: "Debt Issuance",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
-    {
-      id: "debt_repayment",
-      label: "Debt Repayment",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
-    {
-      id: "equity_issuance",
-      label: "Equity Issuance",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
-    {
-      id: "dividends",
-      label: "Dividends Paid",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
+    // No default items - user chooses from suggestions or adds manually
     {
       id: "financing_cf",
       label: "Cash from Financing Activities",

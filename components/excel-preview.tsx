@@ -277,6 +277,7 @@ function StatementTable({
   const isCashFlow = label === "Cash Flow Statement";
 
   // For Cash Flow Statement, detect section (use parent's section for child rows to avoid duplicate headers)
+  // Section = by position only (and cfsLink), so preview exactly mirrors builder: CFI = capex..investing_cf only
   const getCFSSection = (
     rowId: string,
     rows: Row[],
@@ -287,20 +288,24 @@ function StatementTable({
     if (row?.cfsLink?.section) {
       return row.cfsLink.section as "operating" | "investing" | "financing";
     }
-    const operatingItems = ["net_income", "danda", "sbc", "wc_change", "other_operating", "operating_cf"];
-    const investingItems = ["capex", "other_investing", "investing_cf"];
-    const financingItems = ["debt_issuance", "debt_repayment", "equity_issuance", "dividends", "financing_cf", "net_change_cash"];
-    if (operatingItems.includes(rowId)) return "operating";
-    if (investingItems.includes(rowId)) return "investing";
-    if (financingItems.includes(rowId)) return "financing";
+    // Only assign section by ID for the section total rows; everything else by position
+    if (rowId === "operating_cf") return "operating";
+    if (rowId === "investing_cf") return "investing";
+    if (rowId === "financing_cf" || rowId === "net_change_cash") return "financing";
     const operatingEndIndex = rows.findIndex((r) => r.id === "operating_cf");
+    const investingStartIndex = rows.findIndex((r) => r.id === "capex");
     const investingEndIndex = rows.findIndex((r) => r.id === "investing_cf");
+    const financingStartIndex = rows.findIndex((r) => r.id === "debt_issuance");
     const financingEndIndex = rows.findIndex((r) => r.id === "financing_cf");
     const rowIndex = rows.findIndex((r) => r.id === rowId);
     if (rowIndex === -1) return null;
     if (operatingEndIndex >= 0 && rowIndex <= operatingEndIndex) return "operating";
-    if (investingEndIndex >= 0 && rowIndex > (operatingEndIndex >= 0 ? operatingEndIndex : -1) && rowIndex <= investingEndIndex) return "investing";
-    if (financingEndIndex >= 0 && rowIndex > (investingEndIndex >= 0 ? investingEndIndex : -1) && rowIndex <= financingEndIndex) return "financing";
+    // Rows between operating_cf and capex → operating
+    if (operatingEndIndex >= 0 && investingStartIndex >= 0 && rowIndex > operatingEndIndex && rowIndex < investingStartIndex) return "operating";
+    const investingStart = investingStartIndex >= 0 ? investingStartIndex : operatingEndIndex + 1;
+    if (investingEndIndex >= 0 && rowIndex >= investingStart && rowIndex <= investingEndIndex) return "investing";
+    const financingStart = financingStartIndex >= 0 ? financingStartIndex : investingEndIndex + 1;
+    if (financingEndIndex >= 0 && rowIndex >= financingStart && rowIndex <= financingEndIndex) return "financing";
     return "financing";
   };
   

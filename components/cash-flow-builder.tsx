@@ -49,6 +49,34 @@ function inferOperatingSignFromLabel(label: string): "positive" | "negative" {
   return "positive";
 }
 
+/**
+ * Infer CFF sign for an unrecognized financing item from its label.
+ * Cash inflow (proceeds, issuance, borrowing) → positive; outflow (repayment, repurchase, dividends) → negative.
+ */
+function inferFinancingSignFromLabel(label: string): "positive" | "negative" {
+  const L = label.toLowerCase();
+  const negativePatterns = [
+    "repayment", "repayments", "repay", "repurchases", "repurchase", "buyback", "buy-back",
+    "dividend", "dividends", "payment", "payments", "paid", "outflow", "outflows",
+    "retirement", "retirements", "redemption", "redemptions", "settlement", "settlements",
+    "principal repayment", "principal repayments", "debt repayment", "debt repayments",
+  ];
+  const positivePatterns = [
+    "issuance", "issuances", "issue", "proceeds", "borrowing", "borrowings", "loan", "loans",
+    "inflow", "inflows", "receipt", "receipts", "received", "raise", "raised",
+    "debt issuance", "equity issuance", "stock issuance", "bond issuance",
+    "exercise", "exercised", "warrant", "warrants", "option", "options",
+  ];
+  for (const p of negativePatterns) {
+    if (L.includes(p)) return "negative";
+  }
+  for (const p of positivePatterns) {
+    if (L.includes(p)) return "positive";
+  }
+  // Default: treat as positive (most financing items are cash inflows)
+  return "positive";
+}
+
 type CFSSection = "operating" | "investing" | "financing";
 
 interface CFSSectionConfig {
@@ -78,7 +106,7 @@ const CFS_SECTIONS: CFSSectionConfig[] = [
     colorClass: "green",
     sectionId: "cfs_investing",
     totalRowId: "investing_cf",
-    standardItems: ["capex", "other_investing"],
+    standardItems: ["capex"],
   },
   {
     id: "financing",
@@ -87,7 +115,7 @@ const CFS_SECTIONS: CFSSectionConfig[] = [
     colorClass: "orange",
     sectionId: "cfs_financing",
     totalRowId: "financing_cf",
-    standardItems: ["debt_issuance", "debt_repayment", "equity_issuance", "dividends"],
+    standardItems: [],
   },
 ];
 
@@ -133,24 +161,21 @@ function CFSSectionComponent({
   const reorderWcChildren = useModelStore((s) => s.reorderWcChildren);
   const moveCashFlowRowIntoWc = useModelStore((s) => s.moveCashFlowRowIntoWc);
   const moveCashFlowRowOutOfWc = useModelStore((s) => s.moveCashFlowRowOutOfWc);
+  const confirmedRowIds = useModelStore((s) => s.confirmedRowIds);
+  const toggleConfirmedRow = useModelStore((s) => s.toggleConfirmedRow);
   // Always use currentCashFlow from store as the source of truth
   const currentRows = currentCashFlow;
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newItemLabel, setNewItemLabel] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [termKnowledge, setTermKnowledge] = useState<any>(null);
-  /** Row ids in "confirmed" state: card shows only name + Remove + Edit (collapsed to save space) */
-  const [confirmedRowIds, setConfirmedRowIds] = useState<Set<string>>(new Set());
   const [wcSectionExpanded, setWcSectionExpanded] = useState(true);
+  const [suggestedCFIExpanded, setSuggestedCFIExpanded] = useState(false);
+  const [suggestedCFFExpanded, setSuggestedCFFExpanded] = useState(false);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
 
   const toggleConfirmed = (rowId: string) => {
-    setConfirmedRowIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(rowId)) next.delete(rowId);
-      else next.add(rowId);
-      return next;
-    });
+    toggleConfirmedRow(rowId);
   };
 
   const sectionStartIndex = currentRows.findIndex((r) => {
@@ -204,8 +229,11 @@ function CFSSectionComponent({
       } else {
         const fromIndex = fromTopLevelIndex ?? currentRows.findIndex((r) => r.id === rowId);
         if (fromIndex === -1) return;
-        const toIndexAdj = fromIndex < toIndex ? toIndex - 1 : toIndex;
-        if (fromIndex !== toIndexAdj) reorderCashFlowTopLevel(fromIndex, toIndexAdj);
+        // Calculate insert index: when dragging down (fromIndex < toIndex), insert after drop target.
+        // When dragging up (fromIndex > toIndex), insert before drop target (at toIndex).
+        // After removal, array shrinks, so adjust: drag down = toIndex (insert after), drag up = toIndex (insert before).
+        const insertIndex = fromIndex < toIndex ? toIndex : toIndex;
+        if (fromIndex !== insertIndex) reorderCashFlowTopLevel(fromIndex, insertIndex);
       }
     } else if (target.type === "wc-container") {
       if (!isWcChild) moveCashFlowRowIntoWc(rowId);
@@ -257,8 +285,9 @@ function CFSSectionComponent({
           setTermKnowledge({ cffItem: null, validation });
           setValidationError(null);
         } else {
+          // Allow unrecognized items - we'll infer sign from label
           setTermKnowledge(null);
-          setValidationError(validation.suggestion || validation.reason || "⚠️ This term may not be appropriate for Financing Activities.");
+          setValidationError("This term is not recognized. You can still add it; we'll infer the sign from the label.");
         }
       } else {
         // Use financial terms knowledge for operating and others
@@ -308,21 +337,31 @@ function CFSSectionComponent({
         : currentRows.slice(sectionStartIndex, sectionEndIndex + 1);
     }
     
-    // For investing and financing sections, also include any items with matching cfsLink.section
+    // For all sections, also include any items with matching cfsLink.section
     // This handles cases where start marker doesn't exist or items are inserted outside normal range
-    if (section.id === "investing" || section.id === "financing") {
+    // Keep items in store order (don't reorder) so preview matches builder
+    if (section.id === "operating" || section.id === "investing" || section.id === "financing") {
       const itemsWithCfsLink = currentRows.filter(r => r.cfsLink?.section === section.id);
       
       const additionalItems = itemsWithCfsLink.filter(r => 
-        !result.some(existing => existing.id === r.id)
+        !result.some(existing => existing.id === r.id) &&
+        r.id !== section.totalRowId // Don't include the total row here
       );
       if (additionalItems.length > 0) {
-        // Insert additional items before the total row if it exists, otherwise append
+        // For preview to match builder: show items in store order only.
+        // Additional items outside slice should be moved into slice in store, not reordered here.
+        // For now, append them at end (before total) to maintain relative store order.
         const totalIndexInResult = result.findIndex(r => r.id === section.totalRowId);
         if (totalIndexInResult >= 0) {
+          // Sort additional items by their store index to maintain order
+          const sortedAdditional = [...additionalItems].sort((a, b) => {
+            const aIdx = currentRows.findIndex(r => r.id === a.id);
+            const bIdx = currentRows.findIndex(r => r.id === b.id);
+            return aIdx - bIdx;
+          });
           result = [
             ...result.slice(0, totalIndexInResult),
-            ...additionalItems,
+            ...sortedAdditional,
             ...result.slice(totalIndexInResult)
           ];
         } else {
@@ -339,6 +378,33 @@ function CFSSectionComponent({
           const totalRow = currentRows.find(r => r.id === section.totalRowId);
           if (totalRow) {
             result.push(totalRow);
+          }
+        }
+      }
+      
+      // CRITICAL: For operating section, also include any custom items that might be positioned
+      // between operating_cf and capex (they should have cfsLink.section === "operating" but double-check)
+      if (section.id === "operating") {
+        const operatingCfIndex = currentRows.findIndex(r => r.id === "operating_cf");
+        const capexIndex = currentRows.findIndex(r => r.id === "capex");
+        if (operatingCfIndex >= 0 && capexIndex > operatingCfIndex) {
+          const itemsBetween = currentRows.slice(operatingCfIndex + 1, capexIndex);
+          const missingCustomItems = itemsBetween.filter(r => 
+            !result.some(existing => existing.id === r.id) &&
+            r.id !== section.totalRowId &&
+            (r.cfsLink?.section === "operating" || !r.cfsLink) // Include items with operating cfsLink or no cfsLink (custom items)
+          );
+          if (missingCustomItems.length > 0) {
+            const totalIndexInResult = result.findIndex(r => r.id === section.totalRowId);
+            if (totalIndexInResult >= 0) {
+              result = [
+                ...result.slice(0, totalIndexInResult),
+                ...missingCustomItems,
+                ...result.slice(totalIndexInResult)
+              ];
+            } else {
+              result = [...result, ...missingCustomItems];
+            }
           }
         }
       }
@@ -533,8 +599,9 @@ function CFSSectionComponent({
   const handleAddCustomItem = () => {
     if (!newItemLabel.trim()) return;
     
-    // For investing/financing, require recognized term; for operating, allow add even when unrecognized
-    if (section.id !== "operating" && validationError && !termKnowledge) {
+    // For investing/financing, allow add even when unrecognized (we'll infer sign from label)
+    // Only block if there's a validation error that explicitly says not to add
+    if (section.id !== "operating" && validationError && validationError.includes("may not be appropriate") && !termKnowledge) {
       return;
     }
 
@@ -602,6 +669,17 @@ function CFSSectionComponent({
           description: termKnowledge.cfsTreatment.description,
         };
       }
+    }
+    
+    // Financing: if no cfsLink set yet, infer sign from label (like operating)
+    if (section.id === "financing" && !newRow.cfsLink) {
+      const impact = inferFinancingSignFromLabel(newItemLabel.trim());
+      newRow.cfsLink = {
+        section: "financing",
+        cfsItemId: newRow.id,
+        impact,
+        description: "Custom financing item (sign inferred from label)",
+      };
       if (termKnowledge.isLink) {
         newRow.isLink = {
           isItemId: termKnowledge.isLink.isItemId,
@@ -680,10 +758,14 @@ function CFSSectionComponent({
 
             const globalIndex = currentRows.findIndex((r) => r.id === row.id);
             const isTotalRow = row.id === section.totalRowId;
-            const canDrag = !isLocked && !isTotalRow && sectionStartIndex !== -1;
+            const displayableCount = sectionItems.filter((r) => r.id !== section.totalRowId).length;
+            const canDrag = !isLocked && !isTotalRow && (
+              sectionStartIndex !== -1 ||
+              ((section.id === "investing" || section.id === "financing") && displayableCount >= 2)
+            );
             const protectedRows = ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_income"];
             const isProtected = protectedRows.includes(row.id) || row.id === section.totalRowId;
-            const isTopConfirmed = confirmedRowIds.has(row.id);
+            const isTopConfirmed = confirmedRowIds[row.id] === true;
 
             return row.id === "wc_change" && row.children && row.children.length > 0 ? (
               <div
@@ -748,7 +830,7 @@ function CFSSectionComponent({
                     <div className="text-[10px] font-medium text-slate-400 uppercase tracking-wide mb-2">Components</div>
                     <div className="space-y-2">
                       {row.children.map((child, wcChildIndex) => {
-                        const isConfirmed = confirmedRowIds.has(child.id);
+                        const isConfirmed = confirmedRowIds[child.id] === true;
                         return (
                           <div
                             key={child.id}
@@ -1052,186 +1134,158 @@ function CFSSectionComponent({
           })
         ) : null}
 
-        {/* CFI Suggestions (only for Investing Activities) */}
+        {/* CFI Suggestions (only for Investing Activities) – grouped in one collapsible card */}
         {section.id === "investing" && (() => {
           const existingItemIds = sectionItems.map(r => r.id);
           const suggestedCFI = getSuggestedCFIItems(existingItemIds);
-          return suggestedCFI.length > 0 && (
-            <div className="mt-4 space-y-2">
-              <div className="text-xs text-slate-400 italic mb-2">
-                💡 Suggested CFI Items:
-              </div>
-              {suggestedCFI.map((item, idx) => {
-                const alreadyAdded = currentRows.some(r => 
-                  r.label.toLowerCase() === item.label.toLowerCase() ||
-                  item.commonNames.some(name => r.label.toLowerCase() === name.toLowerCase())
-                );
-                
-                if (alreadyAdded) return null;
-                
-                return (
-                  <div
-                    key={idx}
-                    className="rounded-lg border border-green-700/40 bg-green-950/20 p-3"
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-sm font-semibold ${item.impact === "positive" ? "text-green-400" : "text-red-400"}`}>
-                            ({item.impact === "positive" ? "+" : "-"})
-                          </span>
-                          <span className="text-sm font-medium text-green-200">
-                            {item.label}
-                          </span>
+          const availableSuggestions = suggestedCFI.filter((item) => {
+            const alreadyAdded = currentRows.some(r =>
+              r.label.toLowerCase() === item.label.toLowerCase() ||
+              item.commonNames.some(name => r.label.toLowerCase() === name.toLowerCase())
+            );
+            return !alreadyAdded;
+          });
+          return availableSuggestions.length > 0 ? (
+            <div className="mt-4 rounded-lg border-2 border-green-700/40 bg-green-950/20 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setSuggestedCFIExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-green-900/30 transition-colors"
+                aria-expanded={suggestedCFIExpanded}
+              >
+                <span className="text-sm font-medium text-green-200 flex items-center gap-2">
+                  <span className="text-slate-400">{suggestedCFIExpanded ? "▼" : "▶"}</span>
+                  💡 Suggested CFI Items
+                  <span className="text-xs text-slate-400 font-normal">({availableSuggestions.length})</span>
+                </span>
+              </button>
+              {suggestedCFIExpanded && (
+                <div className="border-t border-green-700/40 px-3 py-2 space-y-2">
+                  {availableSuggestions.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded-lg border border-green-700/30 bg-green-950/30 p-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-sm font-semibold shrink-0 ${item.impact === "positive" ? "text-green-400" : "text-red-400"}`}>
+                              ({item.impact === "positive" ? "+" : "-"})
+                            </span>
+                            <span className="text-sm font-medium text-green-200">{item.label}</span>
+                          </div>
+                          <p className="text-xs text-green-300/70 mt-1">{item.description}</p>
                         </div>
-                        <p className="text-xs text-green-300/70 mt-1">
-                          {item.description}
-                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const totalIndex = currentRows.findIndex(r => r.id === section.totalRowId);
+                            const insertIndex = totalIndex >= 0 ? totalIndex : currentRows.length;
+                            const newRowId = uuid();
+                            const newRow: Row = {
+                              id: newRowId,
+                              label: item.label,
+                              kind: "input",
+                              valueType: "currency",
+                              values: {},
+                              children: [],
+                              cfsLink: {
+                                section: "investing",
+                                cfsItemId: newRowId,
+                                impact: item.impact,
+                                description: item.description,
+                              },
+                            };
+                            insertRow("cashFlow", insertIndex, newRow);
+                          }}
+                          className="rounded-md bg-green-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-600 transition shrink-0"
+                        >
+                          Add
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          // Use currentRows to get the latest state
-                          const totalIndex = currentRows.findIndex(r => r.id === section.totalRowId);
-                          const insertIndex = totalIndex >= 0 ? totalIndex : currentRows.length;
-                          
-                          // Generate ID first to avoid temporal dead zone error
-                          const newRowId = uuid();
-                          
-                          const newRow: Row = {
-                            id: newRowId,
-                            label: item.label,
-                            kind: "input",
-                            valueType: "currency",
-                            values: {},
-                            children: [],
-                            cfsLink: {
-                              section: "investing",
-                              cfsItemId: newRowId,
-                              impact: item.impact,
-                              description: item.description,
-                            },
-                          };
-                          
-                          insertRow("cashFlow", insertIndex, newRow);
-                        }}
-                        className="rounded-md bg-green-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-600 transition"
-                      >
-                        Add
-                      </button>
                     </div>
-                  </div>
-                );
-              })}
+                  ))}
+                </div>
+              )}
             </div>
-          );
+          ) : null;
         })()}
 
-        {/* CFF Suggestions (only for Financing Activities) */}
+        {/* CFF Suggestions (only for Financing Activities) – grouped in one collapsible card */}
         {section.id === "financing" && (() => {
           const existingItemIds = sectionItems.map(r => r.id);
           const suggestedCFF = getSuggestedCFFItems(existingItemIds);
-          return suggestedCFF.length > 0 && (
-            <div className="mt-4 space-y-2">
-              <div className="text-xs text-slate-400 italic mb-2">
-                💡 Suggested CFF Items:
-              </div>
-              {suggestedCFF.map((item, idx) => {
-                const alreadyAdded = currentRows.some(r => 
-                  r.label.toLowerCase() === item.label.toLowerCase() ||
-                  item.commonNames.some(name => r.label.toLowerCase() === name.toLowerCase())
-                );
-                
-                if (alreadyAdded) return null;
-                
-                return (
-                  <div
-                    key={idx}
-                    className="rounded-lg border border-orange-700/40 bg-orange-950/20 p-3"
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-sm font-semibold ${item.impact === "positive" ? "text-green-400" : "text-red-400"}`}>
-                            ({item.impact === "positive" ? "+" : "-"})
-                          </span>
-                          <span className="text-sm font-medium text-orange-200">
-                            {item.label}
-                          </span>
+          const availableSuggestions = suggestedCFF.filter((item) => {
+            const alreadyAdded = currentRows.some(r =>
+              r.label.toLowerCase() === item.label.toLowerCase() ||
+              item.commonNames.some(name => r.label.toLowerCase() === name.toLowerCase())
+            );
+            return !alreadyAdded;
+          });
+          return availableSuggestions.length > 0 ? (
+            <div className="mt-4 rounded-lg border-2 border-orange-700/40 bg-orange-950/20 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setSuggestedCFFExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-orange-900/30 transition-colors"
+                aria-expanded={suggestedCFFExpanded}
+              >
+                <span className="text-sm font-medium text-orange-200 flex items-center gap-2">
+                  <span className="text-slate-400">{suggestedCFFExpanded ? "▼" : "▶"}</span>
+                  💡 Suggested CFF Items
+                  <span className="text-xs text-slate-400 font-normal">({availableSuggestions.length})</span>
+                </span>
+              </button>
+              {suggestedCFFExpanded && (
+                <div className="border-t border-orange-700/40 px-3 py-2 space-y-2">
+                  {availableSuggestions.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded-lg border border-orange-700/30 bg-orange-950/30 p-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-sm font-semibold shrink-0 ${item.impact === "positive" ? "text-green-400" : "text-red-400"}`}>
+                              ({item.impact === "positive" ? "+" : "-"})
+                            </span>
+                            <span className="text-sm font-medium text-orange-200">{item.label}</span>
+                          </div>
+                          <p className="text-xs text-orange-300/70 mt-1">{item.description}</p>
                         </div>
-                        <p className="text-xs text-orange-300/70 mt-1">
-                          {item.description}
-                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const totalIndex = currentRows.findIndex(r => r.id === section.totalRowId);
+                            const insertIndex = totalIndex >= 0 ? totalIndex : currentRows.length;
+                            const newRowId = uuid();
+                            const newRow: Row = {
+                              id: newRowId,
+                              label: item.label,
+                              kind: "input",
+                              valueType: "currency",
+                              values: {},
+                              children: [],
+                              cfsLink: {
+                                section: "financing",
+                                cfsItemId: newRowId,
+                                impact: item.impact,
+                                description: item.description,
+                              },
+                            };
+                            insertRow("cashFlow", insertIndex, newRow);
+                          }}
+                          className="rounded-md bg-orange-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-600 transition shrink-0"
+                        >
+                          Add
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          // Get the latest state from the store to ensure we have the most up-to-date cashFlow array
-                          const store = useModelStore.getState();
-                          const latestCashFlow = store.cashFlow;
-                          
-                          // Find the index of financing_cf (the total row for financing section)
-                          const totalIndex = latestCashFlow.findIndex(r => r.id === section.totalRowId);
-                          
-                          // Always insert BEFORE financing_cf (the total row)
-                          // If financing_cf doesn't exist, find the last financing item or insert after investing_cf
-                          let insertIndex: number;
-                          if (totalIndex >= 0) {
-                            // Insert right before financing_cf
-                            insertIndex = totalIndex;
-                          } else {
-                            // financing_cf doesn't exist, find the last financing item or insert after investing_cf
-                            const dividendsIndex = latestCashFlow.findIndex(r => r.id === "dividends");
-                            const equityIssuanceIndex = latestCashFlow.findIndex(r => r.id === "equity_issuance");
-                            const debtRepaymentIndex = latestCashFlow.findIndex(r => r.id === "debt_repayment");
-                            const debtIssuanceIndex = latestCashFlow.findIndex(r => r.id === "debt_issuance");
-                            const investingCfIndex = latestCashFlow.findIndex(r => r.id === "investing_cf");
-                            
-                            // Find the last financing item
-                            const lastFinancingIndex = Math.max(
-                              dividendsIndex,
-                              equityIssuanceIndex,
-                              debtRepaymentIndex,
-                              debtIssuanceIndex
-                            );
-                            
-                            insertIndex = lastFinancingIndex >= 0 
-                              ? lastFinancingIndex + 1 
-                              : investingCfIndex >= 0 
-                              ? investingCfIndex + 1 
-                              : latestCashFlow.length;
-                          }
-                          
-                          // Generate ID first to avoid temporal dead zone error
-                          const newRowId = uuid();
-                          
-                          const newRow: Row = {
-                            id: newRowId,
-                            label: item.label,
-                            kind: "input",
-                            valueType: "currency",
-                            values: {},
-                            children: [],
-                            cfsLink: {
-                              section: "financing",
-                              cfsItemId: newRowId,
-                              impact: item.impact,
-                              description: item.description,
-                            },
-                          };
-                          
-                          insertRow("cashFlow", insertIndex, newRow);
-                        }}
-                        className="rounded-md bg-orange-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-600 transition"
-                      >
-                        Add
-                      </button>
                     </div>
-                  </div>
-                );
-              })}
+                  ))}
+                </div>
+              )}
             </div>
-          );
+          ) : null;
         })()}
 
         {/* Total Row Display */}
@@ -1275,14 +1329,19 @@ function CFSSectionComponent({
                   }}
                   autoFocus
                 />
-                {/* Validation: red error for investing/financing when unrecognized; amber warning for operating (still allow add) */}
+                {/* Validation: amber warning for operating/financing when unrecognized (still allow add); red error for investing when unrecognized */}
                 {validationError && (
-                  <div className={`mb-2 rounded-md border p-2 ${section.id === "operating" && !termKnowledge ? "border-amber-700/40 bg-amber-950/20" : "border-red-700/40 bg-red-950/20"}`}>
-                    <div className={`text-xs ${section.id === "operating" && !termKnowledge ? "text-amber-300" : "text-red-300"}`}>
+                  <div className={`mb-2 rounded-md border p-2 ${(section.id === "operating" || section.id === "financing") && !termKnowledge ? "border-amber-700/40 bg-amber-950/20" : "border-red-700/40 bg-red-950/20"}`}>
+                    <div className={`text-xs ${(section.id === "operating" || section.id === "financing") && !termKnowledge ? "text-amber-300" : "text-red-300"}`}>
                       ⚠️ {validationError}
                       {section.id === "operating" && !termKnowledge && newItemLabel.trim() && (
                         <span className="block mt-1 font-medium">
                           Inferred sign: ({inferOperatingSignFromLabel(newItemLabel.trim()) === "negative" ? "−" : "+"}) — you can still add it.
+                        </span>
+                      )}
+                      {section.id === "financing" && !termKnowledge && newItemLabel.trim() && (
+                        <span className="block mt-1 font-medium">
+                          Inferred sign: ({inferFinancingSignFromLabel(newItemLabel.trim()) === "negative" ? "−" : "+"}) — you can still add it.
                         </span>
                       )}
                     </div>

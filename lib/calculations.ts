@@ -324,40 +324,38 @@ function computeFormula(
   }
 
   if (rowId === "investing_cf") {
-    // Dynamically sum all investing items (between capex and investing_cf)
-    // Find the start and end indices
+    // Sum ALL investing items: items between capex and investing_cf, plus any with cfsLink.section === "investing"
     const capexIndex = statementRows.findIndex(r => r.id === "capex");
     const investingCfIndex = statementRows.findIndex(r => r.id === "investing_cf");
     
+    let total = 0;
+    
+    // Sum items between capex and investing_cf (main investing section)
     if (capexIndex >= 0 && investingCfIndex > capexIndex) {
-      let total = 0;
-      // Sum all items between capex and investing_cf
       for (let i = capexIndex; i < investingCfIndex; i++) {
         const item = statementRows[i];
-        // Skip the investing_cf row itself
-        if (item.id === "investing_cf") continue;
-        
+        if (item.id === "investing_cf") continue; // Skip the total row
         const value = findRowValue(statementRows, item.id, year);
-        
-        // Apply sign based on cfsLink.impact or default behavior
-        // Note: Values may already be stored with their signs (negative for outflows, positive for inflows)
-        // So we just add them directly - the sign is already in the value
-        if (item.cfsLink && item.cfsLink.section === "investing") {
-          // Values are stored with their correct signs, so just add them
-          total += value;
-        } else {
-          // Default behavior: values are stored with their signs
-          // CapEx is typically stored as negative, others can be positive or negative
+        total += value; // Values are already stored with correct signs
+      }
+    }
+    
+    // Also include any items with cfsLink.section === "investing" that are outside the slice
+    // (e.g., items added after investing_cf or before capex)
+    for (const item of statementRows) {
+      if (item.id === "investing_cf") continue; // Skip the total row
+      if (item.cfsLink?.section === "investing") {
+        const itemIndex = statementRows.findIndex(r => r.id === item.id);
+        const alreadyCounted = capexIndex >= 0 && investingCfIndex > capexIndex && 
+                              itemIndex >= capexIndex && itemIndex < investingCfIndex;
+        if (!alreadyCounted) {
+          const value = findRowValue(statementRows, item.id, year);
           total += value;
         }
       }
-      return total;
     }
     
-    // Fallback to hardcoded calculation if structure is unexpected
-    const capex = findRowValue(statementRows, "capex", year);
-    const otherInvesting = findRowValue(statementRows, "other_investing", year);
-    return -capex + otherInvesting;
+    return total;
   }
 
   if (rowId === "financing_cf") {

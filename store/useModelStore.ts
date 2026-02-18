@@ -147,16 +147,22 @@ function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[]): Row[]
     }
     const existingChildren = r.children ?? [];
     const existingById = new Map(existingChildren.map((c) => [c.id, c]));
-    // Build exactly one child per desired id (dedupe); use existing if present (keep values), else add new
+    const desiredIds = new Set(desiredList.map((bs) => bs.id));
+    
+    // Build children array: include all desired items from BS, PLUS any custom items not in BS
     const newChildren: Row[] = [];
     const seen = new Set<string>();
+    
+    // First, add all desired items from Balance Sheet (preserve order from desiredList)
     for (const bs of desiredList) {
       if (seen.has(bs.id)) continue;
       seen.add(bs.id);
       const existing = existingById.get(bs.id);
       if (existing) {
+        // Use existing child to preserve values and any custom properties
         newChildren.push(existing);
       } else {
+        // Add new child from Balance Sheet
         newChildren.push({
           id: bs.id,
           label: bs.label,
@@ -166,6 +172,17 @@ function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[]): Row[]
         });
       }
     }
+    
+    // Then, preserve any custom WC children that aren't in the Balance Sheet
+    // These are user-added items like "Operating Lease Liabilities" that should persist
+    for (const existingChild of existingChildren) {
+      if (!seen.has(existingChild.id) && !desiredIds.has(existingChild.id)) {
+        // This is a custom item not in BS - preserve it
+        newChildren.push(existingChild);
+        seen.add(existingChild.id);
+      }
+    }
+    
     return { ...r, children: newChildren };
   });
 }
@@ -220,6 +237,9 @@ export type ModelState = {
   // Section lock and expand state for Builder Panel
   sectionLocks: Record<string, boolean>; // { [sectionId]: isLocked }
   sectionExpanded: Record<string, boolean>; // { [sectionId]: isExpanded }
+  
+  // Confirmed row IDs for Cash Flow Builder (collapsed cards)
+  confirmedRowIds: Record<string, boolean>; // { [rowId]: isConfirmed }
 };
 
 export type ModelActions = {
@@ -258,6 +278,9 @@ export type ModelActions = {
   unlockSection: (sectionId: string) => void;
   toggleSectionExpanded: (sectionId: string) => void;
   setSectionExpanded: (sectionId: string, expanded: boolean) => void;
+  
+  // Confirmed row management for Cash Flow Builder
+  toggleConfirmedRow: (rowId: string) => void;
   
   // Years management
   updateYears: (years: { historical: string[]; projection: string[] }) => void;
@@ -361,6 +384,9 @@ const defaultState: ModelState = {
   // Section lock and expand state - default all sections unlocked and expanded
   sectionLocks: {},
   sectionExpanded: {},
+  
+  // Confirmed row IDs - default empty (no rows confirmed/collapsed)
+  confirmedRowIds: {},
 };
 
 /**
@@ -911,6 +937,22 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
     // #endregion
 
+    // Helper function to find section boundaries in cashFlow for order-preserving migrations
+    const findSectionBoundaries = () => {
+      const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+      const investingCfIndex = cashFlow.findIndex((r) => r.id === "investing_cf");
+      const financingCfIndex = cashFlow.findIndex((r) => r.id === "financing_cf");
+      return {
+        operatingEnd: operatingCfIndex >= 0 ? operatingCfIndex : cashFlow.length,
+        investingStart: operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length,
+        investingEnd: investingCfIndex >= 0 ? investingCfIndex : cashFlow.length,
+        financingStart: investingCfIndex >= 0 ? investingCfIndex + 1 : cashFlow.length,
+        financingEnd: financingCfIndex >= 0 ? financingCfIndex : cashFlow.length,
+      };
+    };
+    
+    const boundaries = findSectionBoundaries();
+
     // Migration: Ensure core Income Statement skeleton items always exist
     // These are the fundamental structure of an IS and cannot be removed
     const coreISItems = [
@@ -960,10 +1002,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // Migration: Ensure D&A exists in CFS (should be in template, but check anyway)
     const hasDandaInCFS = cashFlow.some((r) => r.id === "danda");
     if (!hasDandaInCFS) {
-      // Find where to insert D&A - after net_income
-      const netIncomeIndex = cashFlow.findIndex((r) => r.id === "net_income");
-      const insertIndex = netIncomeIndex >= 0 ? netIncomeIndex + 1 : cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at end of operating section (before operating_cf total) to preserve user order
+      cashFlow.splice(boundaries.operatingEnd, 0, {
         id: "danda",
         label: "Depreciation & Amortization",
         kind: "input", // Manual input in CFO
@@ -971,6 +1011,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
         values: {},
         children: [],
       });
+      // Update boundaries after insertion
+      boundaries.operatingEnd++;
+      boundaries.investingStart++;
+      boundaries.investingEnd++;
+      boundaries.financingStart++;
+      boundaries.financingEnd++;
     } else {
       // Migration: Update D&A from "calc" to "input" (D&A is now manual input, not auto-populated)
       const dandaRow = cashFlow.find((r) => r.id === "danda");
@@ -982,13 +1028,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // Migration: Ensure SBC exists in CFS (added in later version)
     const hasSbcInCFS = cashFlow.some((r) => r.id === "sbc");
     if (!hasSbcInCFS) {
-      // Find where to insert SBC - after danda, before wc_change
-      const dandaIndex = cashFlow.findIndex((r) => r.id === "danda");
-      const wcChangeIndex = cashFlow.findIndex((r) => r.id === "wc_change");
-      const insertIndex = dandaIndex >= 0 ? dandaIndex + 1 : 
-                         wcChangeIndex >= 0 ? wcChangeIndex : 
-                         cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at end of operating section (before operating_cf total) to preserve user order
+      cashFlow.splice(boundaries.operatingEnd, 0, {
         id: "sbc",
         label: "Stock-Based Compensation",
         kind: "calc",
@@ -996,20 +1037,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
         values: {},
         children: [],
       });
+      // Update boundaries after insertion
+      boundaries.operatingEnd++;
+      boundaries.investingStart++;
+      boundaries.investingEnd++;
+      boundaries.financingStart++;
+      boundaries.financingEnd++;
     }
 
     // Migration: Ensure WC Change exists in CFS (should be in template, but check anyway)
     const hasWcChangeInCFS = cashFlow.some((r) => r.id === "wc_change");
     if (!hasWcChangeInCFS) {
-      // Find where to insert WC Change - after sbc, before other_operating
-      const sbcIndex = cashFlow.findIndex((r) => r.id === "sbc");
-      const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
-      const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
-      const insertIndex = sbcIndex >= 0 ? sbcIndex + 1 : 
-                         otherOperatingIndex >= 0 ? otherOperatingIndex : 
-                         operatingCfIndex >= 0 ? operatingCfIndex : 
-                         cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at end of operating section (before operating_cf total) to preserve user order
+      cashFlow.splice(boundaries.operatingEnd, 0, {
         id: "wc_change",
         label: "Change in Working Capital",
         kind: "input",
@@ -1017,6 +1057,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
         values: {},
         children: [],
       });
+      // Update boundaries after insertion
+      boundaries.operatingEnd++;
+      boundaries.investingStart++;
+      boundaries.investingEnd++;
+      boundaries.financingStart++;
+      boundaries.financingEnd++;
     }
 
     // Migration: Ensure Operating CF total exists
@@ -1027,15 +1073,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
     // #endregion
     if (!hasOperatingCf) {
-      // Insert after other_operating or at the end of operating section
-      const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
-      const insertIndex = otherOperatingIndex >= 0 ? otherOperatingIndex + 1 : cashFlow.length;
-      // #region agent log
-      if (typeof window !== 'undefined') {
-        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:650',message:'Adding Operating CF',data:{insertIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'G'})}).catch(()=>{});
-      }
-      // #endregion
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at end of operating section
+      cashFlow.splice(boundaries.operatingEnd, 0, {
         id: "operating_cf",
         label: "Cash from Operating Activities",
         kind: "calc",
@@ -1043,9 +1082,27 @@ export const useModelStore = create<ModelState & ModelActions>()(
         values: {},
         children: [],
       });
+      // Update boundaries after insertion
+      boundaries.operatingEnd++;
+      boundaries.investingStart++;
+      boundaries.investingEnd++;
+      boundaries.financingStart++;
+      boundaries.financingEnd++;
     }
 
-    // Migration: Ensure Investing section items exist (capex, other_investing, investing_cf)
+    // Migration: Remove other_investing if it exists (no longer a default item)
+    const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
+    if (otherInvestingIndex >= 0) {
+      cashFlow.splice(otherInvestingIndex, 1);
+      // Update boundaries after removal
+      if (otherInvestingIndex < boundaries.investingEnd) {
+        boundaries.investingEnd--;
+        boundaries.financingStart--;
+        boundaries.financingEnd--;
+      }
+    }
+
+    // Migration: Ensure Investing section items exist (capex, investing_cf)
     const hasCapex = cashFlow.some((r) => r.id === "capex");
     // #region agent log
     if (typeof window !== 'undefined') {
@@ -1053,15 +1110,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
     // #endregion
     if (!hasCapex) {
-      // Find where to insert - after operating_cf
-      const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
-      const insertIndex = operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length;
-      // #region agent log
-      if (typeof window !== 'undefined') {
-        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:670',message:'Adding Capex',data:{insertIndex,operatingCfIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'I'})}).catch(()=>{});
-      }
-      // #endregion
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at end of investing section (before investing_cf total) to preserve user order
+      cashFlow.splice(boundaries.investingEnd, 0, {
         id: "capex",
         label: "Capital Expenditures (CapEx)",
         kind: "input",
@@ -1069,31 +1119,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
         values: {},
         children: [],
       });
-    }
-
-    const hasOtherInvesting = cashFlow.some((r) => r.id === "other_investing");
-    // #region agent log
-    if (typeof window !== 'undefined') {
-      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:682',message:'Checking Other Investing',data:{hasOtherInvesting},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'J'})}).catch(()=>{});
-    }
-    // #endregion
-    if (!hasOtherInvesting) {
-      // Insert after capex
-      const capexIndex = cashFlow.findIndex((r) => r.id === "capex");
-      const insertIndex = capexIndex >= 0 ? capexIndex + 1 : cashFlow.length;
-      // #region agent log
-      if (typeof window !== 'undefined') {
-        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:687',message:'Adding Other Investing',data:{insertIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'K'})}).catch(()=>{});
-      }
-      // #endregion
-      cashFlow.splice(insertIndex, 0, {
-        id: "other_investing",
-        label: "Other Investing Activities",
-        kind: "input",
-        valueType: "currency",
-        values: {},
-        children: [],
-      });
+      // Update boundaries after insertion
+      boundaries.investingEnd++;
+      boundaries.financingStart++;
+      boundaries.financingEnd++;
     }
 
     const hasInvestingCf = cashFlow.some((r) => r.id === "investing_cf");
@@ -1103,15 +1132,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
     // #endregion
     if (!hasInvestingCf) {
-      // Insert after other_investing
-      const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
-      const insertIndex = otherInvestingIndex >= 0 ? otherInvestingIndex + 1 : cashFlow.length;
-      // #region agent log
-      if (typeof window !== 'undefined') {
-        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:704',message:'Adding Investing CF',data:{insertIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'M'})}).catch(()=>{});
-      }
-      // #endregion
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at end of investing section
+      cashFlow.splice(boundaries.investingEnd, 0, {
         id: "investing_cf",
         label: "Cash from Investing Activities",
         kind: "calc",
@@ -1119,6 +1141,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
         values: {},
         children: [],
       });
+      // Update boundaries after insertion
+      boundaries.investingEnd++;
+      boundaries.financingStart++;
+      boundaries.financingEnd++;
     }
     
     // #region agent log
@@ -1127,65 +1153,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
     // #endregion
 
-    // Migration: Ensure Financing Activities standard items exist
-    const hasDebtIssuance = cashFlow.some((r) => r.id === "debt_issuance");
-    const hasDebtRepayment = cashFlow.some((r) => r.id === "debt_repayment");
-    const hasEquityIssuance = cashFlow.some((r) => r.id === "equity_issuance");
-    const hasDividends = cashFlow.some((r) => r.id === "dividends");
+    // Migration: Ensure Financing CF total exists (no default items - user chooses from suggestions)
     const hasFinancingCf = cashFlow.some((r) => r.id === "financing_cf");
-
-    if (!hasDebtIssuance) {
-      const investingCfIndex = cashFlow.findIndex((r) => r.id === "investing_cf");
-      const insertIndex = investingCfIndex >= 0 ? investingCfIndex + 1 : cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
-        id: "debt_issuance",
-        label: "Debt Issuance",
-        kind: "input",
-        valueType: "currency",
-        values: {},
-        children: [],
-      });
-    }
-    if (!hasDebtRepayment) {
-      const debtIssuanceIndex = cashFlow.findIndex((r) => r.id === "debt_issuance");
-      const insertIndex = debtIssuanceIndex >= 0 ? debtIssuanceIndex + 1 : cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
-        id: "debt_repayment",
-        label: "Debt Repayment",
-        kind: "input",
-        valueType: "currency",
-        values: {},
-        children: [],
-      });
-    }
-    if (!hasEquityIssuance) {
-      const debtRepaymentIndex = cashFlow.findIndex((r) => r.id === "debt_repayment");
-      const insertIndex = debtRepaymentIndex >= 0 ? debtRepaymentIndex + 1 : cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
-        id: "equity_issuance",
-        label: "Equity Issuance",
-        kind: "input",
-        valueType: "currency",
-        values: {},
-        children: [],
-      });
-    }
-    if (!hasDividends) {
-      const equityIssuanceIndex = cashFlow.findIndex((r) => r.id === "equity_issuance");
-      const insertIndex = equityIssuanceIndex >= 0 ? equityIssuanceIndex + 1 : cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
-        id: "dividends",
-        label: "Dividends Paid",
-        kind: "input",
-        valueType: "currency",
-        values: {},
-        children: [],
-      });
-    }
     if (!hasFinancingCf) {
-      const dividendsIndex = cashFlow.findIndex((r) => r.id === "dividends");
-      const insertIndex = dividendsIndex >= 0 ? dividendsIndex + 1 : cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at end of financing section
+      cashFlow.splice(boundaries.financingEnd, 0, {
         id: "financing_cf",
         label: "Cash from Financing Activities",
         kind: "calc",
@@ -1193,14 +1165,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
         values: {},
         children: [],
       });
+      boundaries.financingEnd++;
     }
 
     // Migration: Ensure net_change_cash exists
     const hasNetChangeCash = cashFlow.some((r) => r.id === "net_change_cash");
     if (!hasNetChangeCash) {
-      const financingCfIndex = cashFlow.findIndex((r) => r.id === "financing_cf");
-      const insertIndex = financingCfIndex >= 0 ? financingCfIndex + 1 : cashFlow.length;
-      cashFlow.splice(insertIndex, 0, {
+      // Insert at the very end (after financing_cf)
+      cashFlow.push({
         id: "net_change_cash",
         label: "Net Change in Cash",
         kind: "calc",
@@ -1879,8 +1851,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // Core Cash Flow items that form the skeleton - cannot be removed
     const coreCFSItems = [
       "net_income", "danda", "sbc", "wc_change", "other_operating", "operating_cf",
-      "capex", "other_investing", "investing_cf",
-      "debt_issuance", "debt_repayment", "equity_issuance", "dividends", "financing_cf",
+      "capex", "investing_cf",
+      "financing_cf",
       "net_change_cash"
     ];
     
@@ -1985,7 +1957,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const rows = [...state.cashFlow];
       if (fromIndex < 0 || fromIndex >= rows.length || toIndex < 0 || toIndex >= rows.length) return state;
       const [removed] = rows.splice(fromIndex, 1);
-      rows.splice(toIndex, 0, removed);
+      // After removal, array length is rows.length - 1.
+      // When dragging down (fromIndex < toIndex): insert at toIndex (after drop target in original array).
+      // When dragging up (fromIndex > toIndex): insert at toIndex (before drop target).
+      // Clamp toIndex to valid range after removal
+      const insertIndex = Math.min(toIndex, rows.length);
+      rows.splice(insertIndex, 0, removed);
       const allYears = [
         ...(state.meta.years.historical || []),
         ...(state.meta.years.projection || []),
@@ -2115,6 +2092,15 @@ export const useModelStore = create<ModelState & ModelActions>()(
       sectionExpanded: {
         ...state.sectionExpanded,
         [sectionId]: expanded,
+      },
+    }));
+  },
+
+  toggleConfirmedRow: (rowId) => {
+    set((state) => ({
+      confirmedRowIds: {
+        ...state.confirmedRowIds,
+        [rowId]: !state.confirmedRowIds[rowId],
       },
     }));
   },
@@ -2254,6 +2240,20 @@ export const useModelStore = create<ModelState & ModelActions>()(
           let incomeStatement = state.incomeStatement;
           let balanceSheet = state.balanceSheet;
           let cashFlow = state.cashFlow;
+          
+          // Helper function to find section boundaries in cashFlow for order-preserving migrations
+          const findSectionBoundaries = () => {
+            const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+            const investingCfIndex = cashFlow.findIndex((r) => r.id === "investing_cf");
+            const financingCfIndex = cashFlow.findIndex((r) => r.id === "financing_cf");
+            return {
+              operatingEnd: operatingCfIndex >= 0 ? operatingCfIndex : cashFlow.length,
+              investingStart: operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length,
+              investingEnd: investingCfIndex >= 0 ? investingCfIndex : cashFlow.length,
+              financingStart: investingCfIndex >= 0 ? investingCfIndex + 1 : cashFlow.length,
+              financingEnd: financingCfIndex >= 0 ? financingCfIndex : cashFlow.length,
+            };
+          };
 
           // Migration: Ensure gross_margin exists (added in later version)
           const hasGrossMargin = incomeStatement.some((r) => r.id === "gross_margin");
@@ -2553,13 +2553,27 @@ export const useModelStore = create<ModelState & ModelActions>()(
             otherIncomeRow.label = "Other Income / (Expense), net";
           }
 
+          // Helper function to find section boundaries in cashFlow for order-preserving migrations
+          const findSectionBoundariesRehydrate = () => {
+            const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
+            const investingCfIndex = cashFlow.findIndex((r) => r.id === "investing_cf");
+            const financingCfIndex = cashFlow.findIndex((r) => r.id === "financing_cf");
+            return {
+              operatingEnd: operatingCfIndex >= 0 ? operatingCfIndex : cashFlow.length,
+              investingStart: operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length,
+              investingEnd: investingCfIndex >= 0 ? investingCfIndex : cashFlow.length,
+              financingStart: investingCfIndex >= 0 ? investingCfIndex + 1 : cashFlow.length,
+              financingEnd: financingCfIndex >= 0 ? financingCfIndex : cashFlow.length,
+            };
+          };
+          
+          const boundaries = findSectionBoundariesRehydrate();
+          
           // Migration: Ensure D&A exists in CFS (should be in template, but check anyway)
           const hasDandaInCFS = cashFlow.some((r) => r.id === "danda");
           if (!hasDandaInCFS) {
-            // Find where to insert D&A - after net_income
-            const netIncomeIndex = cashFlow.findIndex((r) => r.id === "net_income");
-            const insertIndex = netIncomeIndex >= 0 ? netIncomeIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at end of operating section (before operating_cf total) to preserve user order
+            cashFlow.splice(boundaries.operatingEnd, 0, {
               id: "danda",
               label: "Depreciation & Amortization",
               kind: "input", // Manual input in CFO
@@ -2567,6 +2581,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+            // Update boundaries after insertion
+            boundaries.operatingEnd++;
+            boundaries.investingStart++;
+            boundaries.investingEnd++;
+            boundaries.financingStart++;
+            boundaries.financingEnd++;
           } else {
             // Migration: Update D&A from "calc" to "input" (D&A is now manual input, not auto-populated)
             const dandaRow = cashFlow.find((r) => r.id === "danda");
@@ -2578,13 +2598,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
           // Migration: Ensure SBC exists in CFS (added in later version)
           const hasSbcInCFS = cashFlow.some((r) => r.id === "sbc");
           if (!hasSbcInCFS) {
-            // Find where to insert SBC - after danda, before wc_change
-            const dandaIndex = cashFlow.findIndex((r) => r.id === "danda");
-            const wcChangeIndex = cashFlow.findIndex((r) => r.id === "wc_change");
-            const insertIndex = dandaIndex >= 0 ? dandaIndex + 1 : 
-                               wcChangeIndex >= 0 ? wcChangeIndex : 
-                               cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at end of operating section (before operating_cf total) to preserve user order
+            cashFlow.splice(boundaries.operatingEnd, 0, {
               id: "sbc",
               label: "Stock-Based Compensation",
               kind: "calc",
@@ -2592,20 +2607,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+            // Update boundaries after insertion
+            boundaries.operatingEnd++;
+            boundaries.investingStart++;
+            boundaries.investingEnd++;
+            boundaries.financingStart++;
+            boundaries.financingEnd++;
           }
 
           // Migration: Ensure WC Change exists in CFS (should be in template, but check anyway)
           const hasWcChangeInCFS = cashFlow.some((r) => r.id === "wc_change");
           if (!hasWcChangeInCFS) {
-            // Find where to insert WC Change - after sbc, before other_operating
-            const sbcIndex = cashFlow.findIndex((r) => r.id === "sbc");
-            const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
-            const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
-            const insertIndex = sbcIndex >= 0 ? sbcIndex + 1 : 
-                               otherOperatingIndex >= 0 ? otherOperatingIndex : 
-                               operatingCfIndex >= 0 ? operatingCfIndex : 
-                               cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at end of operating section (before operating_cf total) to preserve user order
+            cashFlow.splice(boundaries.operatingEnd, 0, {
               id: "wc_change",
               label: "Change in Working Capital",
               kind: "input",
@@ -2613,14 +2627,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+            // Update boundaries after insertion
+            boundaries.operatingEnd++;
+            boundaries.investingStart++;
+            boundaries.investingEnd++;
+            boundaries.financingStart++;
+            boundaries.financingEnd++;
           }
 
           // Migration: Ensure Operating CF total exists
           const hasOperatingCf = cashFlow.some((r) => r.id === "operating_cf");
           if (!hasOperatingCf) {
-            const otherOperatingIndex = cashFlow.findIndex((r) => r.id === "other_operating");
-            const insertIndex = otherOperatingIndex >= 0 ? otherOperatingIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at end of operating section
+            cashFlow.splice(boundaries.operatingEnd, 0, {
               id: "operating_cf",
               label: "Cash from Operating Activities",
               kind: "calc",
@@ -2628,14 +2647,31 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+            // Update boundaries after insertion
+            boundaries.operatingEnd++;
+            boundaries.investingStart++;
+            boundaries.investingEnd++;
+            boundaries.financingStart++;
+            boundaries.financingEnd++;
           }
 
-          // Migration: Ensure Investing section items exist (capex, other_investing, investing_cf)
+          // Migration: Remove other_investing if it exists (no longer a default item)
+          const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
+          if (otherInvestingIndex >= 0) {
+            cashFlow.splice(otherInvestingIndex, 1);
+            // Update boundaries after removal
+            if (otherInvestingIndex < boundaries.investingEnd) {
+              boundaries.investingEnd--;
+              boundaries.financingStart--;
+              boundaries.financingEnd--;
+            }
+          }
+
+          // Migration: Ensure Investing section items exist (capex, investing_cf)
           const hasCapex = cashFlow.some((r) => r.id === "capex");
           if (!hasCapex) {
-            const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
-            const insertIndex = operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at end of investing section (before investing_cf total) to preserve user order
+            cashFlow.splice(boundaries.investingEnd, 0, {
               id: "capex",
               label: "Capital Expenditures (CapEx)",
               kind: "input",
@@ -2643,27 +2679,16 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
-          }
-
-          const hasOtherInvesting = cashFlow.some((r) => r.id === "other_investing");
-          if (!hasOtherInvesting) {
-            const capexIndex = cashFlow.findIndex((r) => r.id === "capex");
-            const insertIndex = capexIndex >= 0 ? capexIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
-              id: "other_investing",
-              label: "Other Investing Activities",
-              kind: "input",
-              valueType: "currency",
-              values: {},
-              children: [],
-            });
+            // Update boundaries after insertion
+            boundaries.investingEnd++;
+            boundaries.financingStart++;
+            boundaries.financingEnd++;
           }
 
           const hasInvestingCf = cashFlow.some((r) => r.id === "investing_cf");
           if (!hasInvestingCf) {
-            const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
-            const insertIndex = otherInvestingIndex >= 0 ? otherInvestingIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at end of investing section
+            cashFlow.splice(boundaries.investingEnd, 0, {
               id: "investing_cf",
               label: "Cash from Investing Activities",
               kind: "calc",
@@ -2671,67 +2696,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+            // Update boundaries after insertion
+            boundaries.investingEnd++;
+            boundaries.financingStart++;
+            boundaries.financingEnd++;
           }
 
-          // Migration: Ensure Financing Activities standard items exist
-          const hasDebtIssuance = cashFlow.some((r) => r.id === "debt_issuance");
-          const hasDebtRepayment = cashFlow.some((r) => r.id === "debt_repayment");
-          const hasEquityIssuance = cashFlow.some((r) => r.id === "equity_issuance");
-          const hasDividends = cashFlow.some((r) => r.id === "dividends");
+          // Migration: Ensure Financing CF total exists (no default items - user chooses from suggestions)
           const hasFinancingCf = cashFlow.some((r) => r.id === "financing_cf");
-
-          if (!hasDebtIssuance) {
-            const investingCfIndex = cashFlow.findIndex((r) => r.id === "investing_cf");
-            const insertIndex = investingCfIndex >= 0 ? investingCfIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
-              id: "debt_issuance",
-              label: "Debt Issuance",
-              kind: "input",
-              valueType: "currency",
-              values: {},
-              children: [],
-            });
-          }
-          if (!hasDebtRepayment) {
-            const debtIssuanceIndex = cashFlow.findIndex((r) => r.id === "debt_issuance");
-            const insertIndex = debtIssuanceIndex >= 0 ? debtIssuanceIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
-              id: "debt_repayment",
-              label: "Debt Repayment",
-              kind: "input",
-              valueType: "currency",
-              values: {},
-              children: [],
-            });
-          }
-          if (!hasEquityIssuance) {
-            const debtRepaymentIndex = cashFlow.findIndex((r) => r.id === "debt_repayment");
-            const insertIndex = debtRepaymentIndex >= 0 ? debtRepaymentIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
-              id: "equity_issuance",
-              label: "Equity Issuance",
-              kind: "input",
-              valueType: "currency",
-              values: {},
-              children: [],
-            });
-          }
-          if (!hasDividends) {
-            const equityIssuanceIndex = cashFlow.findIndex((r) => r.id === "equity_issuance");
-            const insertIndex = equityIssuanceIndex >= 0 ? equityIssuanceIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
-              id: "dividends",
-              label: "Dividends Paid",
-              kind: "input",
-              valueType: "currency",
-              values: {},
-              children: [],
-            });
-          }
           if (!hasFinancingCf) {
-            const dividendsIndex = cashFlow.findIndex((r) => r.id === "dividends");
-            const insertIndex = dividendsIndex >= 0 ? dividendsIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at end of financing section
+            cashFlow.splice(boundaries.financingEnd, 0, {
               id: "financing_cf",
               label: "Cash from Financing Activities",
               kind: "calc",
@@ -2739,14 +2714,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
+            boundaries.financingEnd++;
           }
 
           // Migration: Ensure net_change_cash exists
           const hasNetChangeCash = cashFlow.some((r) => r.id === "net_change_cash");
           if (!hasNetChangeCash) {
-            const financingCfIndex = cashFlow.findIndex((r) => r.id === "financing_cf");
-            const insertIndex = financingCfIndex >= 0 ? financingCfIndex + 1 : cashFlow.length;
-            cashFlow.splice(insertIndex, 0, {
+            // Insert at the very end (after financing_cf)
+            cashFlow.push({
               id: "net_change_cash",
               label: "Net Change in Cash",
               kind: "calc",

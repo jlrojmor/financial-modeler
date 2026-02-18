@@ -1,8 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { useModelStore, type ModelType, type CurrencyUnit } from "@/store/useModelStore";
+import { useModelStore, type ModelType, type CurrencyUnit, type ModelMeta } from "@/store/useModelStore";
 import type { CompanyType } from "@/types/finance";
+
+interface ModelSetupProps {
+  /** When provided (e.g. from landing), create project and redirect instead of only initializing */
+  onCreateProject?: (meta: ModelMeta) => void;
+}
 
 interface SetupFormData {
   modelType: ModelType;
@@ -15,7 +20,7 @@ interface SetupFormData {
   baseYear: number;
 }
 
-export default function ModelSetup() {
+export default function ModelSetup({ onCreateProject }: ModelSetupProps = {}) {
   const initializeModel = useModelStore((s) => s.initializeModel);
   
   const currentYear = new Date().getFullYear();
@@ -74,18 +79,20 @@ export default function ModelSetup() {
       projection.push(`${year}E`);
     }
 
-    // Initialize the model
-    initializeModel({
+    const meta: ModelMeta = {
       companyName: formData.companyName.trim(),
       companyType: formData.companyType,
       currency: formData.currency,
       currencyUnit: formData.currencyUnit,
-      years: {
-        historical,
-        projection,
-      },
+      years: { historical, projection },
       modelType: formData.modelType,
-    });
+    };
+
+    if (onCreateProject) {
+      onCreateProject(meta);
+    } else {
+      initializeModel(meta);
+    }
   };
 
   return (

@@ -15,6 +15,7 @@ export default function BuilderPanel() {
   const completedStepIds = useModelStore((s) => s.completedStepIds);
   const isModelComplete = useModelStore((s) => s.isModelComplete);
   const saveCurrentStep = useModelStore((s) => s.saveCurrentStep);
+  const saveCurrentProject = useModelStore((s) => s.saveCurrentProject);
   const continueToNextStep = useModelStore((s) => s.continueToNextStep);
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
@@ -45,10 +46,11 @@ export default function BuilderPanel() {
   // Save button feedback state
   const [saveFeedback, setSaveFeedback] = useState<"idle" | "saving" | "saved">("idle");
 
-  // Handle save with feedback
+  // Handle save with feedback (step completion + project state so no progress is lost)
   const handleSave = () => {
     setSaveFeedback("saving");
     saveCurrentStep();
+    saveCurrentProject();
     setSaveFeedback("saved");
     // Reset feedback after 2 seconds
     setTimeout(() => {

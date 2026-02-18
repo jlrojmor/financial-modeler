@@ -3,10 +3,40 @@
 import React, { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
-import { formatCurrencyDisplay, storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
+import { formatCurrencyDisplay, storedToDisplay, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
 import { checkBalanceSheetBalance, computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
 import { findCFIItem } from "@/lib/cfi-intelligence";
 import { findCFFItem } from "@/lib/cff-intelligence";
+
+/**
+ * Format a number for display in accounting format (negatives in parentheses)
+ * Only used in Excel Preview
+ */
+function formatAccountingNumber(
+  value: number,
+  unit: CurrencyUnit,
+  showDecimals: boolean = false
+): string {
+  if (value === 0) return "—";
+  
+  const displayValue = storedToDisplay(value, unit);
+  const unitLabel = getUnitLabel(unit);
+  const decimals = showDecimals ? 2 : 0;
+  
+  const formatted = Math.abs(displayValue).toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+  
+  const formattedWithUnit = `${formatted}${unitLabel ? ` ${unitLabel}` : ""}`;
+  
+  // If negative, wrap in parentheses
+  if (displayValue < 0) {
+    return `(${formattedWithUnit})`;
+  }
+  
+  return formattedWithUnit;
+}
 
 // Helper function to get CFO/CFI/CFF sign indicator — only line items get a sign; subtotals/totals get none
 function getCFOSign(
@@ -563,21 +593,20 @@ function StatementTable({
                 if (storedValue === 0) {
                   display = "—";
                 } else if (isCurrency && meta?.currencyUnit) {
-                  const displayValue = storedToDisplay(storedValue, meta.currencyUnit);
-                  const unitLabel = getUnitLabel(meta.currencyUnit);
-                  const decimals = showDecimals ? 2 : 0;
-                  display = `${displayValue.toLocaleString(undefined, {
-                    minimumFractionDigits: decimals,
-                    maximumFractionDigits: decimals,
-                  })}${unitLabel ? ` ${unitLabel}` : ""}`;
+                  display = formatAccountingNumber(storedValue, meta.currencyUnit, showDecimals);
                 } else if (isPercent) {
-                  display = `${storedValue.toFixed(2)}%`;
+                  // For percentages, show negatives in parentheses too
+                  const absValue = Math.abs(storedValue);
+                  display = storedValue < 0 ? `(${absValue.toFixed(2)}%)` : `${storedValue.toFixed(2)}%`;
                 } else {
+                  // For non-currency numbers, also use parentheses format
                   const decimals = showDecimals ? 2 : 0;
-                  display = storedValue.toLocaleString(undefined, {
+                  const absValue = Math.abs(storedValue);
+                  const formatted = absValue.toLocaleString(undefined, {
                     minimumFractionDigits: decimals,
                     maximumFractionDigits: decimals,
                   });
+                  display = storedValue < 0 ? `(${formatted})` : formatted;
                 }
               }
               
@@ -834,14 +863,9 @@ export default function ExcelPreview() {
                           </td>
                           {years.map((y) => {
                             const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
-                            const displayValue = storedToDisplay(value, meta.currencyUnit);
-                            const unitLabel = getUnitLabel(meta.currencyUnit);
                             return (
                               <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
-                                {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                  minimumFractionDigits: showDecimals ? 2 : 0,
-                                  maximumFractionDigits: showDecimals ? 2 : 0,
-                                })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                                {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                               </td>
                             );
                           })}
@@ -860,14 +884,9 @@ export default function ExcelPreview() {
                         </td>
                         {years.map((y) => {
                           const value = sbcBreakdowns["cogs"]?.[y] ?? 0;
-                          const displayValue = storedToDisplay(value, meta.currencyUnit);
-                          const unitLabel = getUnitLabel(meta.currencyUnit);
                           return (
                             <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
-                              {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                minimumFractionDigits: showDecimals ? 2 : 0,
-                                maximumFractionDigits: showDecimals ? 2 : 0,
-                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
@@ -889,14 +908,9 @@ export default function ExcelPreview() {
                           </td>
                           {years.map((y) => {
                             const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
-                            const displayValue = storedToDisplay(value, meta.currencyUnit);
-                            const unitLabel = getUnitLabel(meta.currencyUnit);
                             return (
                               <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
-                                {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                  minimumFractionDigits: showDecimals ? 2 : 0,
-                                  maximumFractionDigits: showDecimals ? 2 : 0,
-                                })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                                {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                               </td>
                             );
                           })}
@@ -915,14 +929,9 @@ export default function ExcelPreview() {
                         </td>
                         {years.map((y) => {
                           const value = sbcBreakdowns["sga"]?.[y] ?? 0;
-                          const displayValue = storedToDisplay(value, meta.currencyUnit);
-                          const unitLabel = getUnitLabel(meta.currencyUnit);
                           return (
                             <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
-                              {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                minimumFractionDigits: showDecimals ? 2 : 0,
-                                maximumFractionDigits: showDecimals ? 2 : 0,
-                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
@@ -961,14 +970,9 @@ export default function ExcelPreview() {
                         </td>
                         {years.map((y, idx) => {
                           const value = totalSbcByYear[idx];
-                          const displayValue = storedToDisplay(value, meta.currencyUnit);
-                          const unitLabel = getUnitLabel(meta.currencyUnit);
                           return (
                             <td key={y} className="px-3 py-2 text-right font-semibold text-amber-100">
-                              {value === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                minimumFractionDigits: showDecimals ? 2 : 0,
-                                maximumFractionDigits: showDecimals ? 2 : 0,
-                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
@@ -1037,14 +1041,9 @@ export default function ExcelPreview() {
                         {years.map((y) => {
                           const check = balanceCheck.find(b => b.year === y);
                           if (!check) return <td key={y} className="px-3 py-2"></td>;
-                          const displayValue = storedToDisplay(check.totalAssets, meta.currencyUnit);
-                          const unitLabel = getUnitLabel(meta.currencyUnit);
                           return (
                             <td key={y} className={`px-3 py-2 text-right font-semibold ${allBalanced ? "text-emerald-100" : "text-red-100"}`}>
-                              {check.totalAssets === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                minimumFractionDigits: showDecimals ? 2 : 0,
-                                maximumFractionDigits: showDecimals ? 2 : 0,
-                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              {formatAccountingNumber(check.totalAssets, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
@@ -1057,14 +1056,9 @@ export default function ExcelPreview() {
                         {years.map((y) => {
                           const check = balanceCheck.find(b => b.year === y);
                           if (!check) return <td key={y} className="px-3 py-2"></td>;
-                          const displayValue = storedToDisplay(check.totalLiabAndEquity, meta.currencyUnit);
-                          const unitLabel = getUnitLabel(meta.currencyUnit);
                           return (
                             <td key={y} className={`px-3 py-2 text-right font-semibold ${allBalanced ? "text-emerald-100" : "text-red-100"}`}>
-                              {check.totalLiabAndEquity === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                minimumFractionDigits: showDecimals ? 2 : 0,
-                                maximumFractionDigits: showDecimals ? 2 : 0,
-                              })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                              {formatAccountingNumber(check.totalLiabAndEquity, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
@@ -1079,14 +1073,9 @@ export default function ExcelPreview() {
                           {years.map((y) => {
                             const check = balanceCheck.find(b => b.year === y);
                             if (!check || check.balances) return <td key={y} className="px-3 py-2"></td>;
-                            const displayValue = storedToDisplay(Math.abs(check.difference), meta.currencyUnit);
-                            const unitLabel = getUnitLabel(meta.currencyUnit);
                             return (
                               <td key={y} className="px-3 py-2 text-right font-bold text-red-200">
-                                {check.difference === 0 ? "—" : `${displayValue.toLocaleString(undefined, {
-                                  minimumFractionDigits: showDecimals ? 2 : 0,
-                                  maximumFractionDigits: showDecimals ? 2 : 0,
-                                })}${unitLabel ? ` ${unitLabel}` : ""}`}
+                                {formatAccountingNumber(check.difference, meta.currencyUnit, showDecimals)}
                               </td>
                             );
                           })}

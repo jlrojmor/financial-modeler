@@ -207,7 +207,40 @@ export type ModelMeta = {
   };
 };
 
+/** Per-project snapshot (all model data for one project) */
+export type ProjectSnapshot = {
+  meta: ModelMeta;
+  isInitialized: boolean;
+  incomeStatement: Row[];
+  balanceSheet: Row[];
+  cashFlow: Row[];
+  schedules: { workingCapital: Row[]; debt: Row[]; capex: Row[] };
+  sbcBreakdowns: Record<string, Record<string, number>>;
+  danaLocation: "cogs" | "sga" | "both" | null;
+  danaBreakdowns: Record<string, number>;
+  currentStepId: WizardStepId;
+  completedStepIds: WizardStepId[];
+  isModelComplete: boolean;
+  sectionLocks: Record<string, boolean>;
+  sectionExpanded: Record<string, boolean>;
+  confirmedRowIds: Record<string, boolean>;
+};
+
+export type ProjectMeta = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type ModelState = {
+  /** Multi-project: current project id when in builder; null on landing */
+  currentProjectId: string | null;
+  /** List of saved projects (id, name, timestamps) */
+  projects: ProjectMeta[];
+  /** Full state per project; key = project id */
+  projectStates: Record<string, ProjectSnapshot>;
+
   meta: ModelMeta;
   isInitialized: boolean;
   _hasHydrated: boolean;
@@ -243,7 +276,7 @@ export type ModelState = {
 };
 
 export type ModelActions = {
-  initializeModel: (meta: ModelMeta) => void;
+  initializeModel: (meta: ModelMeta, options?: { force?: boolean }) => void;
   recalculateAll: () => void;
   goToStep: (stepId: WizardStepId) => void;
   completeCurrentStep: () => void;
@@ -284,6 +317,13 @@ export type ModelActions = {
   
   // Years management
   updateYears: (years: { historical: string[]; projection: string[] }) => void;
+
+  // Multi-project: create new project (from ModelSetup), load project, save current into cache
+  createProject: (projectName: string, meta: ModelMeta, options?: { fromCurrentState?: boolean }) => string;
+  loadProject: (projectId: string) => void;
+  saveCurrentProject: () => void;
+  renameProject: (projectId: string, name: string) => void;
+  deleteProject: (projectId: string) => void;
   
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => void;
@@ -295,6 +335,10 @@ export type ModelActions = {
  * CRITICAL: meta.years.historical + meta.years.projection must ALWAYS exist
  */
 const defaultState: ModelState = {
+  currentProjectId: null,
+  projects: [],
+  projectStates: {},
+
   meta: {
     companyName: "NewCo",
     companyType: "private",
@@ -389,6 +433,51 @@ const defaultState: ModelState = {
   confirmedRowIds: {},
 };
 
+/** Build a snapshot of current model state for storing per-project */
+function getProjectSnapshot(state: ModelState): ProjectSnapshot {
+  return {
+    meta: state.meta,
+    isInitialized: state.isInitialized,
+    incomeStatement: state.incomeStatement,
+    balanceSheet: state.balanceSheet,
+    cashFlow: state.cashFlow,
+    schedules: state.schedules,
+    sbcBreakdowns: state.sbcBreakdowns,
+    danaLocation: state.danaLocation,
+    danaBreakdowns: state.danaBreakdowns,
+    currentStepId: state.currentStepId,
+    completedStepIds: state.completedStepIds,
+    isModelComplete: state.isModelComplete,
+    sectionLocks: state.sectionLocks,
+    sectionExpanded: state.sectionExpanded,
+    confirmedRowIds: state.confirmedRowIds,
+  };
+}
+
+/** Apply a project snapshot into the store (model state only) */
+function applyProjectSnapshot(
+  set: (fn: (s: ModelState & ModelActions) => Partial<ModelState>) => void,
+  snapshot: ProjectSnapshot
+) {
+  set(() => ({
+    meta: snapshot.meta,
+    isInitialized: true, // Always true when loading a snapshot (if snapshot exists, project is initialized)
+    incomeStatement: snapshot.incomeStatement,
+    balanceSheet: snapshot.balanceSheet,
+    cashFlow: snapshot.cashFlow,
+    schedules: snapshot.schedules,
+    sbcBreakdowns: snapshot.sbcBreakdowns,
+    danaLocation: snapshot.danaLocation,
+    danaBreakdowns: snapshot.danaBreakdowns,
+    currentStepId: snapshot.currentStepId,
+    completedStepIds: snapshot.completedStepIds,
+    isModelComplete: snapshot.isModelComplete,
+    sectionLocks: snapshot.sectionLocks,
+    sectionExpanded: snapshot.sectionExpanded,
+    confirmedRowIds: snapshot.confirmedRowIds,
+  }));
+}
+
 /**
  * Store with persistence
  */
@@ -397,10 +486,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
     (set, get) => ({
   ...defaultState,
 
-  initializeModel: (meta) => {
+  initializeModel: (meta, options?: { force?: boolean }) => {
     const state = get();
-    // Only initialize if not already initialized (preserve existing data)
-    if (!state.isInitialized) {
+    const force = options?.force === true;
+    // Only initialize if not already initialized (preserve existing data), unless force
+    if (!state.isInitialized || force) {
       let incomeStatement = state.incomeStatement.length > 0 
         ? state.incomeStatement 
         : createIncomeStatementTemplate();
@@ -2220,16 +2310,140 @@ export const useModelStore = create<ModelState & ModelActions>()(
       };
     });
   },
+
+  createProject: (projectName, meta, options?: { fromCurrentState?: boolean }) => {
+    const id = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const state = get();
+    
+    if (options?.fromCurrentState && state.isInitialized) {
+      // Recovery: Create project from existing state without resetting
+      const snapshot = getProjectSnapshot(state);
+      set({
+        currentProjectId: id,
+        projects: [
+          ...state.projects,
+          { id, name: projectName, createdAt: Date.now(), updatedAt: Date.now() },
+        ],
+        projectStates: {
+          ...state.projectStates,
+          [id]: snapshot,
+        },
+      });
+    } else {
+      // Normal: Initialize new model
+      get().initializeModel(meta, { force: true });
+      const newState = get();
+      set({
+        currentProjectId: id,
+        projects: [
+          ...newState.projects,
+          { id, name: projectName, createdAt: Date.now(), updatedAt: Date.now() },
+        ],
+        projectStates: {
+          ...newState.projectStates,
+          [id]: getProjectSnapshot(newState),
+        },
+      });
+    }
+    return id;
+  },
+
+  loadProject: (projectId) => {
+    const state = get();
+    const snapshot = state.projectStates[projectId];
+    if (!snapshot) return;
+    // Apply snapshot (which sets isInitialized: true) and set current project id in one call
+    applyProjectSnapshot(set, snapshot);
+    set((s) => ({
+      currentProjectId: projectId,
+    }));
+  },
+
+  saveCurrentProject: () => {
+    const state = get();
+    if (!state.currentProjectId) return;
+    const snapshot = getProjectSnapshot(state);
+    const now = Date.now();
+    set({
+      projectStates: {
+        ...state.projectStates,
+        [state.currentProjectId]: snapshot,
+      },
+      projects: state.projects.map((p) =>
+        p.id === state.currentProjectId
+          ? { ...p, updatedAt: now }
+          : p
+      ),
+    });
+  },
+
+  renameProject: (projectId, name) => {
+    set((state) => ({
+      projects: state.projects.map((p) =>
+        p.id === projectId ? { ...p, name, updatedAt: Date.now() } : p
+      ),
+    }));
+  },
+
+  deleteProject: (projectId) => {
+    set((state) => {
+      const nextProjects = state.projects.filter((p) => p.id !== projectId);
+      const nextStates = { ...state.projectStates };
+      delete nextStates[projectId];
+      const nextCurrent =
+        state.currentProjectId === projectId
+          ? (nextProjects[0]?.id ?? null)
+          : state.currentProjectId;
+      return {
+        projects: nextProjects,
+        projectStates: nextStates,
+        currentProjectId: nextCurrent,
+      };
+    });
+  },
     }),
     {
       name: "financial-model-storage",
-      // Persist all state, including isInitialized
+      // Persist all state; always write current project into projectStates so no progress is lost
       partialize: (state) => {
-        // Don't persist the hydration flag
         const { _hasHydrated, ...stateToPersist } = state;
-        return stateToPersist;
+        let projectStates = stateToPersist.projectStates;
+        if (state.currentProjectId && state.isInitialized) {
+          projectStates = {
+            ...stateToPersist.projectStates,
+            [state.currentProjectId]: getProjectSnapshot(state),
+          };
+        }
+        return { ...stateToPersist, projectStates };
       },
       onRehydrateStorage: () => (state) => {
+        // Migration: existing users with no projects — create one project from current state
+        if (
+          state &&
+          state.isInitialized &&
+          (state.currentProjectId == null || !state.projects || state.projects.length === 0)
+        ) {
+          const id = `proj_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+          const snapshot = getProjectSnapshot(state);
+          // Update state immediately so migration can use it
+          state.currentProjectId = id;
+          state.projects = [
+            {
+              id,
+              name: state.meta?.companyName?.trim() || "Untitled",
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          ];
+          state.projectStates = { [id]: snapshot };
+          // Also update the store so it persists
+          useModelStore.setState({
+            currentProjectId: id,
+            projects: state.projects,
+            projectStates: state.projectStates,
+          });
+        }
+
         // When data is loaded from localStorage, recalculate all values
         if (state && state.isInitialized) {
           const allYears = [

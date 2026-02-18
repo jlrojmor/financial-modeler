@@ -1,2 +1,7 @@
-import Page from "./(app)/page";
-export default Page;
+"use client";
+
+import LandingPage from "@/components/landing-page";
+
+export default function HomePage() {
+  return <LandingPage />;
+}

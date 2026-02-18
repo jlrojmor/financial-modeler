@@ -1659,42 +1659,123 @@ export default function BalanceSheetBuilderUnified() {
           </CollapsibleSection>
         </div>
         
-        {/* Total Rows */}
-        {sections.totals.totalAssets && (
-          <div className="mt-6 rounded-lg border-2 border-green-800/40 bg-green-950/20 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="text-sm font-bold text-green-200">
-                {sections.totals.totalAssets.label}
-              </span>
-              <span className="text-xs text-slate-400 italic">(Calculated)</span>
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-              {years.map((year) => {
-                let computedValue: number;
-                try {
-                  computedValue = computeRowValue(
-                    sections.totals.totalAssets!,
-                    year,
-                    balanceSheet,
-                    balanceSheet,
-                    { incomeStatement: [], balanceSheet, cashFlow: [] }
-                  );
-                } catch {
-                  computedValue = 0;
-                }
-                const displayValue = storedToDisplay(computedValue, meta?.currencyUnit);
-                const unitLabel = getUnitLabel(meta?.currencyUnit);
-                
-                return (
-                  <div key={year} className="flex flex-col">
-                    <label className="text-xs text-green-300/80 mb-1">{year}</label>
-                    <div className="rounded-md border border-green-700/40 bg-green-950/40 px-2 py-1.5 text-sm font-semibold text-green-200">
-                      {computedValue !== 0 ? `${displayValue}${unitLabel ? ` ${unitLabel}` : ""}` : "—"}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+        {/* Total Rows: Assets, Liabilities, Shareholders' Equity */}
+        {(sections.totals.totalAssets || sections.totals.totalLiab || sections.totals.totalEquity) && (
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+            {sections.totals.totalAssets && (
+              <div className="rounded-lg border-2 border-green-800/40 bg-green-950/20 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="text-sm font-bold text-green-200">
+                    {sections.totals.totalAssets.label}
+                  </span>
+                  <span className="text-xs text-slate-400 italic">(Calculated)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {years.map((year) => {
+                    let computedValue: number;
+                    try {
+                      computedValue = computeRowValue(
+                        sections.totals.totalAssets!,
+                        year,
+                        balanceSheet,
+                        balanceSheet,
+                        { incomeStatement: [], balanceSheet, cashFlow: [] }
+                      );
+                    } catch {
+                      computedValue = 0;
+                    }
+                    const unit = meta?.currencyUnit ?? "millions";
+                    const formatted = computedValue !== 0
+                      ? `${storedToDisplay(computedValue, unit).toLocaleString(undefined, { maximumFractionDigits: 0, minimumFractionDigits: 0 })}${getUnitLabel(unit) ? ` ${getUnitLabel(unit)}` : ""}`
+                      : "—";
+                    return (
+                      <div key={year} className="flex flex-col">
+                        <label className="text-xs text-green-300/80 mb-1">{year}</label>
+                        <div className="rounded-md border border-green-700/40 bg-green-950/40 px-2 py-1.5 text-sm font-semibold text-green-200">
+                          {formatted}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {sections.totals.totalLiab && (
+              <div className="rounded-lg border-2 border-amber-800/40 bg-amber-950/20 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="text-sm font-bold text-amber-200">
+                    {sections.totals.totalLiab.label}
+                  </span>
+                  <span className="text-xs text-slate-400 italic">(Calculated)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {years.map((year) => {
+                    let computedValue: number;
+                    try {
+                      computedValue = computeRowValue(
+                        sections.totals.totalLiab!,
+                        year,
+                        balanceSheet,
+                        balanceSheet,
+                        { incomeStatement: [], balanceSheet, cashFlow: [] }
+                      );
+                    } catch {
+                      computedValue = 0;
+                    }
+                    const unit = meta?.currencyUnit ?? "millions";
+                    const formatted = computedValue !== 0
+                      ? `${storedToDisplay(computedValue, unit).toLocaleString(undefined, { maximumFractionDigits: 0, minimumFractionDigits: 0 })}${getUnitLabel(unit) ? ` ${getUnitLabel(unit)}` : ""}`
+                      : "—";
+                    return (
+                      <div key={year} className="flex flex-col">
+                        <label className="text-xs text-amber-300/80 mb-1">{year}</label>
+                        <div className="rounded-md border border-amber-700/40 bg-amber-950/40 px-2 py-1.5 text-sm font-semibold text-amber-200">
+                          {formatted}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {sections.totals.totalEquity && (
+              <div className="rounded-lg border-2 border-purple-800/40 bg-purple-950/20 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <span className="text-sm font-bold text-purple-200">
+                    {sections.totals.totalEquity.label}
+                  </span>
+                  <span className="text-xs text-slate-400 italic">(Calculated)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {years.map((year) => {
+                    let computedValue: number;
+                    try {
+                      computedValue = computeRowValue(
+                        sections.totals.totalEquity!,
+                        year,
+                        balanceSheet,
+                        balanceSheet,
+                        { incomeStatement: [], balanceSheet, cashFlow: [] }
+                      );
+                    } catch {
+                      computedValue = 0;
+                    }
+                    const unit = meta?.currencyUnit ?? "millions";
+                    const formatted = computedValue !== 0
+                      ? `${storedToDisplay(computedValue, unit).toLocaleString(undefined, { maximumFractionDigits: 0, minimumFractionDigits: 0 })}${getUnitLabel(unit) ? ` ${getUnitLabel(unit)}` : ""}`
+                      : "—";
+                    return (
+                      <div key={year} className="flex flex-col">
+                        <label className="text-xs text-purple-300/80 mb-1">{year}</label>
+                        <div className="rounded-md border border-purple-700/40 bg-purple-950/40 px-2 py-1.5 text-sm font-semibold text-purple-200">
+                          {formatted}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
         

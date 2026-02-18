@@ -155,8 +155,8 @@ export default function UnifiedItemCard({
     setIsExpanded(true);
   };
 
-  // Collapsed state - just show name
-  if (!isExpanded && isConfirmed) {
+  // Collapsed state - show when not expanded (regardless of confirmed state)
+  if (!isExpanded) {
     const isDraggingOver = dragOverId === row.id;
     return (
       <div
@@ -183,6 +183,16 @@ export default function UnifiedItemCard({
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16"><path d="M3 4h2v2H3V4zm4 0h2v2H7V4zm4 0h2v2h-2V4zM3 8h2v2H3V8zm4 0h2v2H7V8zm4 0h2v2h-2V8zM3 12h2v2H3v-2zm4 0h2v2H7v-2zm4 0h2v2h-2v-2z"/></svg>
               </span>
             )}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleToggleExpand();
+              }}
+              className="text-xs text-slate-400 hover:text-slate-300"
+            >
+              ▶
+            </button>
             <span className={`text-sm font-medium ${colors.text}`}>
               {row.label}
             </span>
@@ -196,16 +206,29 @@ export default function UnifiedItemCard({
             )}
           </div>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleEdit();
-              }}
-              className="text-xs text-blue-400 hover:text-blue-300"
-            >
-              Edit
-            </button>
+            {isConfirmed ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleEdit();
+                }}
+                className="text-xs text-blue-400 hover:text-blue-300"
+              >
+                Edit
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleToggleExpand();
+                }}
+                className="text-xs text-emerald-400 hover:text-emerald-300"
+              >
+                Expand
+              </button>
+            )}
             {canRemove && (
               <button
                 type="button"

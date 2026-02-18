@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { findGlossaryItem } from "@/lib/financial-glossary";
@@ -30,6 +30,15 @@ export default function IncomeStatementBuilder() {
   const insertRow = useModelStore((s) => s.insertRow);
   const removeRow = useModelStore((s) => s.removeRow);
   const addChildRow = useModelStore((s) => s.addChildRow);
+  const reorderIncomeStatementChildren = useModelStore((s) => s.reorderIncomeStatementChildren);
+  const reorderIncomeStatementRows = useModelStore((s) => s.reorderIncomeStatementRows);
+  
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [dragOverTopLevelId, setDragOverTopLevelId] = useState<string | null>(null);
+  const [newBreakdownLabels, setNewBreakdownLabels] = useState<Record<string, string>>({});
+  const [showAddBreakdown, setShowAddBreakdown] = useState<Record<string, boolean>>({});
+  const [showAddInterestDialog, setShowAddInterestDialog] = useState(false);
+  const [newInterestLabel, setNewInterestLabel] = useState("");
   
   const years = useMemo(() => {
     return meta?.years?.historical ?? [];
@@ -139,6 +148,87 @@ export default function IncomeStatementBuilder() {
   }, [sections.interest]);
   
   
+  const handleDragStart = (e: React.DragEvent, payload: { parentId: string; childId: string; fromIndex: number }) => {
+    e.dataTransfer.setData("application/json", JSON.stringify(payload));
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDragOver = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverId(targetId);
+  };
+
+  const handleDragLeave = () => {
+    setDragOverId(null);
+  };
+
+  const handleDrop = (
+    e: React.DragEvent,
+    target: { parentId: string; childId: string; toIndex: number }
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverId(null);
+    const raw = e.dataTransfer.getData("application/json");
+    if (!raw) return;
+    let payload: { parentId: string; childId: string; fromIndex: number };
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const { parentId: draggedParentId, childId: draggedChildId, fromIndex } = payload;
+    
+    // Only allow drops within the same parent
+    if (draggedParentId !== target.parentId) return;
+    // Don't reorder if dropping on itself
+    if (draggedChildId === target.childId) return;
+    
+    const toIndex = target.toIndex;
+    const adjustedToIndex = fromIndex < toIndex ? toIndex : toIndex;
+    
+    if (fromIndex !== adjustedToIndex) {
+      reorderIncomeStatementChildren(draggedParentId, fromIndex, adjustedToIndex);
+    }
+  };
+
+  // Drag-and-drop for top-level rows (Interest & Other section)
+  const handleDragStartTopLevel = (e: React.DragEvent, fromIndex: number) => {
+    e.dataTransfer.setData("application/json", JSON.stringify({ fromIndex, type: "is_top_level" }));
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDragOverTopLevel = (e: React.DragEvent, rowId: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverTopLevelId(rowId);
+  };
+
+  const handleDragLeaveTopLevel = () => {
+    setDragOverTopLevelId(null);
+  };
+
+  const handleDropTopLevel = (e: React.DragEvent, toIndex: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverTopLevelId(null);
+    const raw = e.dataTransfer.getData("application/json");
+    if (!raw) return;
+    let payload: { fromIndex: number; type: string };
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (payload.type !== "is_top_level") return;
+    const { fromIndex } = payload;
+    const adjustedToIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
+    if (fromIndex !== adjustedToIndex) {
+      reorderIncomeStatementRows(fromIndex, adjustedToIndex);
+    }
+  };
+
   const handleRemoveItem = (rowId: string) => {
     // All calculated output items (cannot be removed - they're calculations)
     const calculatedOutputItems = [
@@ -175,6 +265,8 @@ export default function IncomeStatementBuilder() {
       return null;
     }
     
+    const isInterestSection = sectionId === "is_interest";
+    
     return (
       <CollapsibleSection
         sectionId={sectionId}
@@ -185,6 +277,7 @@ export default function IncomeStatementBuilder() {
       >
         <div className="space-y-3">
           {items.map((row) => {
+            const globalIndex = incomeStatement.findIndex((r) => r.id === row.id);
             const glossaryItem = findGlossaryItem(row.label);
             // Only mark as calculated if it's truly a calculated row (not input rows that sum children)
             // Input rows like rev, cogs, sga can have children but should still be editable
@@ -234,7 +327,15 @@ export default function IncomeStatementBuilder() {
             const hasChildren = row.children && row.children.length > 0;
             
             return (
-              <div key={row.id} className="space-y-2">
+              <div
+                key={row.id}
+                className="space-y-2"
+                {...(isInterestSection && {
+                  onDragOver: (e: React.DragEvent) => handleDragOverTopLevel(e, row.id),
+                  onDragLeave: handleDragLeaveTopLevel,
+                  onDrop: (e: React.DragEvent) => handleDropTopLevel(e, globalIndex),
+                })}
+              >
                 <UnifiedItemCard
                   row={row}
                   years={years}
@@ -249,6 +350,12 @@ export default function IncomeStatementBuilder() {
                   showRemove={!isCalculatedOutput && !allProtectedItems.includes(row.id)}
                   showConfirm={!isCalculatedOutput}
                   protectedRows={allProtectedItems}
+                  draggable={isInterestSection && !isLocked}
+                  onDragStart={isInterestSection ? (e) => { e.stopPropagation(); handleDragStartTopLevel(e, globalIndex); } : undefined}
+                  onDragOver={isInterestSection ? (e) => handleDragOverTopLevel(e, row.id) : undefined}
+                  onDragLeave={isInterestSection ? handleDragLeaveTopLevel : undefined}
+                  onDrop={isInterestSection ? (e) => handleDropTopLevel(e, globalIndex) : undefined}
+                  dragOverId={isInterestSection ? dragOverTopLevelId : undefined}
                 />
                 
                 {/* Breakdown Section - for Revenue, COGS, SG&A */}
@@ -257,58 +364,134 @@ export default function IncomeStatementBuilder() {
                     {/* Show existing breakdowns */}
                     {hasChildren && (
                       <div className="space-y-2">
-                        {row.children!.map((child) => {
+                        {row.children!.map((child, childIndex) => {
                           const childGlossaryItem = findGlossaryItem(child.label);
                           return (
-                            <UnifiedItemCard
+                            <div
                               key={child.id}
-                              row={child}
-                              years={years}
-                              meta={meta}
-                              glossaryItem={childGlossaryItem}
-                              isLocked={isLocked}
-                              isCalculated={false}
-                              colorClass={colorClass}
-                              onUpdateValue={updateRowValue.bind(null, "incomeStatement")}
-                              onRemove={handleRemoveItem}
-                              showRemove={true}
-                              showConfirm={true}
-                              protectedRows={[]}
-                            />
+                              onDragOver={(e) => handleDragOver(e, child.id)}
+                              onDragLeave={handleDragLeave}
+                              onDrop={(e) => handleDrop(e, { parentId: row.id, childId: child.id, toIndex: childIndex })}
+                            >
+                              <UnifiedItemCard
+                                row={child}
+                                years={years}
+                                meta={meta}
+                                glossaryItem={childGlossaryItem}
+                                isLocked={isLocked}
+                                isCalculated={false}
+                                colorClass={colorClass}
+                                onUpdateValue={updateRowValue.bind(null, "incomeStatement")}
+                                onRemove={handleRemoveItem}
+                                showRemove={true}
+                                showConfirm={true}
+                                protectedRows={[]}
+                                draggable={!isLocked}
+                                onDragStart={(e) => {
+                                  e.stopPropagation();
+                                  handleDragStart(e, { parentId: row.id, childId: child.id, fromIndex: childIndex });
+                                }}
+                                onDragOver={(e) => handleDragOver(e, child.id)}
+                                onDragLeave={handleDragLeave}
+                                onDrop={(e) => handleDrop(e, { parentId: row.id, childId: child.id, toIndex: childIndex })}
+                                dragOverId={dragOverId}
+                              />
+                            </div>
                           );
                         })}
                       </div>
                     )}
                     
-                    {/* Add Breakdown Button */}
+                    {/* Add Breakdown - Proper input field instead of prompt */}
                     {!isLocked && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const label = prompt(
-                            row.id === "rev" 
-                              ? "Enter revenue stream name (e.g., Product Revenue, Service Revenue):"
-                              : row.id === "cogs"
-                              ? "Enter COGS breakdown name:"
-                              : "Enter breakdown name:"
-                          );
-                          if (label && label.trim()) {
-                            if (row.id === "rev") {
-                              // For Revenue, also add corresponding COGS stream
-                              addChildRow("incomeStatement", "rev", label.trim());
-                              const cogsRow = incomeStatement.find(r => r.id === "cogs");
-                              if (cogsRow) {
-                                addChildRow("incomeStatement", "cogs", `${label.trim()} COGS`);
+                      <div className="mt-2">
+                        {!showAddBreakdown[row.id] ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowAddBreakdown((prev) => ({ ...prev, [row.id]: true }));
+                              setNewBreakdownLabels((prev) => ({ ...prev, [row.id]: "" }));
+                            }}
+                            className="text-xs text-blue-400 hover:text-blue-300 underline"
+                          >
+                            + Add {row.id === "rev" ? "Revenue Stream" : row.id === "cogs" ? "COGS Breakdown" : row.id === "sga" ? "Operating Expense Item" : "Breakdown"}
+                          </button>
+                        ) : (
+                          <div className="flex gap-2 items-center">
+                            <input
+                              type="text"
+                              value={newBreakdownLabels[row.id] || ""}
+                              onChange={(e) => {
+                                setNewBreakdownLabels((prev) => ({ ...prev, [row.id]: e.target.value }));
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  const label = newBreakdownLabels[row.id]?.trim();
+                                  if (label) {
+                                    if (row.id === "rev") {
+                                      addChildRow("incomeStatement", "rev", label);
+                                      const cogsRow = incomeStatement.find(r => r.id === "cogs");
+                                      if (cogsRow) {
+                                        addChildRow("incomeStatement", "cogs", `${label} COGS`);
+                                      }
+                                    } else {
+                                      addChildRow("incomeStatement", row.id, label);
+                                    }
+                                    setShowAddBreakdown((prev) => ({ ...prev, [row.id]: false }));
+                                    setNewBreakdownLabels((prev) => ({ ...prev, [row.id]: "" }));
+                                  }
+                                } else if (e.key === "Escape") {
+                                  setShowAddBreakdown((prev) => ({ ...prev, [row.id]: false }));
+                                  setNewBreakdownLabels((prev) => ({ ...prev, [row.id]: "" }));
+                                }
+                              }}
+                              placeholder={
+                                row.id === "rev"
+                                  ? "e.g., Product Revenue, Service Revenue"
+                                  : row.id === "cogs"
+                                  ? "e.g., Product COGS"
+                                  : row.id === "sga"
+                                  ? "e.g., Sales & Marketing, Customer Support"
+                                  : "Enter breakdown name"
                               }
-                            } else {
-                              addChildRow("incomeStatement", row.id, label.trim());
-                            }
-                          }
-                        }}
-                        className="text-xs text-blue-400 hover:text-blue-300 underline"
-                      >
-                        + Add {row.id === "rev" ? "Revenue Stream" : row.id === "cogs" ? "COGS Breakdown" : "Breakdown"}
-                      </button>
+                              className="flex-1 rounded-md border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-blue-500 focus:outline-none"
+                              autoFocus
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const label = newBreakdownLabels[row.id]?.trim();
+                                if (label) {
+                                  if (row.id === "rev") {
+                                    addChildRow("incomeStatement", "rev", label);
+                                    const cogsRow = incomeStatement.find(r => r.id === "cogs");
+                                    if (cogsRow) {
+                                      addChildRow("incomeStatement", "cogs", `${label} COGS`);
+                                    }
+                                  } else {
+                                    addChildRow("incomeStatement", row.id, label);
+                                  }
+                                  setShowAddBreakdown((prev) => ({ ...prev, [row.id]: false }));
+                                  setNewBreakdownLabels((prev) => ({ ...prev, [row.id]: "" }));
+                                }
+                              }}
+                              className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500"
+                            >
+                              Add
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowAddBreakdown((prev) => ({ ...prev, [row.id]: false }));
+                                setNewBreakdownLabels((prev) => ({ ...prev, [row.id]: "" }));
+                              }}
+                              className="rounded-md border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
@@ -372,13 +555,85 @@ export default function IncomeStatementBuilder() {
               
               {/* Manual Add Option - Always show for Interest & Other section */}
               <div className="mt-3">
-                <button
-                  type="button"
-                  onClick={() => setShowAddDialog(true)}
-                  className="text-xs text-slate-400 hover:text-slate-300 underline"
-                >
-                  + Add custom item
-                </button>
+                {!showAddInterestDialog ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowAddInterestDialog(true)}
+                    className="text-xs text-slate-400 hover:text-slate-300 underline"
+                  >
+                    + Add custom item
+                  </button>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={newInterestLabel}
+                      onChange={(e) => setNewInterestLabel(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          const trimmed = newInterestLabel.trim();
+                          if (!trimmed) return;
+                          const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
+                          const ebtIndex = incomeStatement.findIndex((r) => r.id === "ebt");
+                          const insertIndex = ebtIndex >= 0 ? ebtIndex : ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : incomeStatement.length;
+                          const newRow: Row = {
+                            id: `is_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                            label: trimmed,
+                            kind: "input",
+                            valueType: "currency",
+                            values: {},
+                            children: [],
+                          };
+                          insertRow("incomeStatement", insertIndex, newRow);
+                          setShowAddInterestDialog(false);
+                          setNewInterestLabel("");
+                        }
+                        if (e.key === "Escape") {
+                          setShowAddInterestDialog(false);
+                          setNewInterestLabel("");
+                        }
+                      }}
+                      placeholder="Label for new item"
+                      className="rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-sm text-slate-200 placeholder-slate-500 w-48"
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const trimmed = newInterestLabel.trim();
+                        if (!trimmed) return;
+                        const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
+                        const ebtIndex = incomeStatement.findIndex((r) => r.id === "ebt");
+                        const insertIndex = ebtIndex >= 0 ? ebtIndex : ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : incomeStatement.length;
+                        const newRow: Row = {
+                          id: `is_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                          label: trimmed,
+                          kind: "input",
+                          valueType: "currency",
+                          values: {},
+                          children: [],
+                        };
+                        insertRow("incomeStatement", insertIndex, newRow);
+                        setShowAddInterestDialog(false);
+                        setNewInterestLabel("");
+                      }}
+                      disabled={!newInterestLabel.trim()}
+                      className="rounded-md bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50"
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAddInterestDialog(false);
+                        setNewInterestLabel("");
+                      }}
+                      className="rounded-md border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}

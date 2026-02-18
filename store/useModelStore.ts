@@ -293,6 +293,10 @@ export type ModelActions = {
   moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number) => void;
   /** Balance Sheet builder: reorder items within a category (e.g., current_assets, fixed_assets). */
   reorderBalanceSheetCategory: (category: "current_assets" | "fixed_assets" | "current_liabilities" | "non_current_liabilities" | "equity", fromIndex: number, toIndex: number) => void;
+  /** Income Statement builder: reorder children of a parent row (e.g., SG&A breakdowns). */
+  reorderIncomeStatementChildren: (parentId: string, fromIndex: number, toIndex: number) => void;
+  /** Income Statement builder: reorder top-level rows (e.g., Interest & Other items). */
+  reorderIncomeStatementRows: (fromIndex: number, toIndex: number) => void;
 
   // SBC annotation
   updateSbcValue: (categoryId: string, year: string, value: number) => void;
@@ -2245,6 +2249,86 @@ export const useModelStore = create<ModelState & ModelActions>()(
       ];
       
       return { balanceSheet: newBalanceSheet };
+    });
+  },
+
+  reorderIncomeStatementChildren: (parentId, fromIndex, toIndex) => {
+    set((state) => {
+      const parentRow = state.incomeStatement.find((r) => r.id === parentId);
+      if (!parentRow || !parentRow.children || parentRow.children.length === 0) {
+        return state;
+      }
+      
+      const children = [...parentRow.children];
+      if (fromIndex < 0 || fromIndex >= children.length || toIndex < 0 || toIndex >= children.length) {
+        return state;
+      }
+      
+      const [removed] = children.splice(fromIndex, 1);
+      children.splice(toIndex, 0, removed);
+      
+      const updatedIncomeStatement = state.incomeStatement.map((r) =>
+        r.id === parentId ? { ...r, children } : r
+      );
+      
+      // Recalculate all years after reordering
+      const allYears = [
+        ...(state.meta.years.historical || []),
+        ...(state.meta.years.projection || []),
+      ];
+      
+      let recalculated = updatedIncomeStatement;
+      const allStatements = {
+        incomeStatement: updatedIncomeStatement,
+        balanceSheet: state.balanceSheet,
+        cashFlow: state.cashFlow,
+      };
+      
+      allYears.forEach((year) => {
+        recalculated = recomputeCalculations(
+          recalculated,
+          year,
+          recalculated,
+          allStatements,
+          state.sbcBreakdowns,
+          state.danaBreakdowns
+        );
+      });
+      
+      return { incomeStatement: recalculated };
+    });
+  },
+
+  reorderIncomeStatementRows: (fromIndex, toIndex) => {
+    set((state) => {
+      const rows = [...state.incomeStatement];
+      if (fromIndex < 0 || fromIndex >= rows.length || toIndex < 0 || toIndex >= rows.length) {
+        return state;
+      }
+      const [removed] = rows.splice(fromIndex, 1);
+      const insertIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
+      rows.splice(insertIndex, 0, removed);
+      const allYears = [
+        ...(state.meta.years.historical || []),
+        ...(state.meta.years.projection || []),
+      ];
+      let recalculated = rows;
+      const allStatements = {
+        incomeStatement: rows,
+        balanceSheet: state.balanceSheet,
+        cashFlow: state.cashFlow,
+      };
+      allYears.forEach((year) => {
+        recalculated = recomputeCalculations(
+          recalculated,
+          year,
+          recalculated,
+          allStatements,
+          state.sbcBreakdowns,
+          state.danaBreakdowns
+        );
+      });
+      return { incomeStatement: recalculated };
     });
   },
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Row } from "@/types/finance";
 import { storedToDisplay, displayToStored, getUnitLabel } from "@/lib/currency-utils";
 import type { GlossaryItem } from "@/lib/financial-glossary";
@@ -23,6 +23,12 @@ interface UnifiedItemCardProps {
   showConfirm?: boolean;
   protectedRows?: string[]; // Rows that cannot be removed
   customDescription?: string; // Override description from glossary
+  draggable?: boolean; // Whether this item can be dragged
+  onDragStart?: (e: React.DragEvent) => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDragLeave?: () => void;
+  onDrop?: (e: React.DragEvent) => void;
+  dragOverId?: string | null; // ID of item being dragged over
 }
 
 /**
@@ -54,9 +60,22 @@ export default function UnifiedItemCard({
   showConfirm = true,
   protectedRows = [],
   customDescription,
+  draggable = false,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  dragOverId = null,
 }: UnifiedItemCardProps) {
   const [isExpanded, setIsExpanded] = useState(true); // Start expanded so users can edit immediately
   const [isConfirmed, setIsConfirmed] = useState(false);
+  
+  // Ensure items always show Confirm when expanded - reset confirmed state if expanded
+  useEffect(() => {
+    if (isExpanded && isConfirmed) {
+      setIsConfirmed(false);
+    }
+  }, [isExpanded]);
 
   const colorMap = {
     blue: {
@@ -109,9 +128,16 @@ export default function UnifiedItemCard({
   const canRemove = showRemove && !isProtected && !isLocked;
   const canEdit = !isLocked && !isCalculated;
   const description = customDescription || glossaryItem?.description || linkInfo?.text || "";
+  const isTotalRow = row.id.startsWith("total_") || row.kind === "total" || row.kind === "subtotal";
+  // Always show Confirm for non-total, non-calculated items that can be edited
+  const shouldShowConfirm = showConfirm && !isTotalRow && canEdit && !isCalculated;
 
   const handleToggleExpand = () => {
     if (!isLocked) {
+      if (!isExpanded && isConfirmed) {
+        // When expanding a confirmed item, reset confirmed state so Confirm button shows
+        setIsConfirmed(false);
+      }
       setIsExpanded(!isExpanded);
     }
   };
@@ -131,13 +157,32 @@ export default function UnifiedItemCard({
 
   // Collapsed state - just show name
   if (!isExpanded && isConfirmed) {
+    const isDraggingOver = dragOverId === row.id;
     return (
       <div
-        className={`rounded-lg border ${colors.border} ${colors.bg} p-3 cursor-pointer hover:opacity-80 transition-opacity`}
+        className={`rounded-lg border-2 ${isDraggingOver ? "ring-2 ring-emerald-500" : colors.border} ${colors.bg} p-3 cursor-pointer hover:opacity-80 transition-opacity`}
         onClick={handleToggleExpand}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
+            {draggable && !isLocked && !isTotalRow && (
+              <span
+                draggable
+                onDragStart={(e) => {
+                  e.stopPropagation();
+                  if (onDragStart) onDragStart(e);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="cursor-grab active:cursor-grabbing text-slate-500 hover:text-slate-300 touch-none shrink-0"
+                title="Drag to reorder"
+                aria-hidden
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16"><path d="M3 4h2v2H3V4zm4 0h2v2H7V4zm4 0h2v2h-2V4zM3 8h2v2H3V8zm4 0h2v2H7V8zm4 0h2v2h-2V8zM3 12h2v2H3v-2zm4 0h2v2H7v-2zm4 0h2v2h-2v-2z"/></svg>
+              </span>
+            )}
             <span className={`text-sm font-medium ${colors.text}`}>
               {row.label}
             </span>
@@ -180,12 +225,33 @@ export default function UnifiedItemCard({
   }
 
   // Expanded state - show full details and inputs
+  const isDraggingOver = dragOverId === row.id;
   return (
-    <div className={`rounded-lg border ${colors.border} ${colors.bg} p-3`}>
+    <div
+      className={`rounded-lg border-2 ${isDraggingOver ? "ring-2 ring-emerald-500" : colors.border} ${colors.bg} p-3`}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       {/* Header */}
       <div className="flex items-start justify-between mb-2">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-1">
+            {draggable && !isLocked && !isTotalRow && (
+              <span
+                draggable
+                onDragStart={(e) => {
+                  e.stopPropagation();
+                  if (onDragStart) onDragStart(e);
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="cursor-grab active:cursor-grabbing text-slate-500 hover:text-slate-300 touch-none shrink-0"
+                title="Drag to reorder"
+                aria-hidden
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16"><path d="M3 4h2v2H3V4zm4 0h2v2H7V4zm4 0h2v2h-2V4zM3 8h2v2H3V8zm4 0h2v2H7V8zm4 0h2v2h-2V8zM3 12h2v2H3v-2zm4 0h2v2H7v-2zm4 0h2v2h-2v-2z"/></svg>
+              </span>
+            )}
             <button
               type="button"
               onClick={handleToggleExpand}
@@ -230,7 +296,7 @@ export default function UnifiedItemCard({
         
         {/* Action buttons */}
         <div className="flex gap-2">
-          {showConfirm && !isConfirmed && canEdit && !isCalculated && (
+          {shouldShowConfirm && isExpanded && (
             <button
               type="button"
               onClick={handleConfirm}

@@ -302,6 +302,8 @@ export type ModelActions = {
   moveCashFlowRowIntoWc: (rowId: string, insertAtIndex?: number) => void;
   /** Cash Flow builder: move a row out of Working Capital (becomes top-level operating item, no longer in WC subtotal). */
   moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number) => void;
+  /** Balance Sheet builder: reorder items within a category (e.g., current_assets, fixed_assets). */
+  reorderBalanceSheetCategory: (category: "current_assets" | "fixed_assets" | "current_liabilities" | "non_current_liabilities" | "equity", fromIndex: number, toIndex: number) => void;
 
   // SBC annotation
   updateSbcValue: (categoryId: string, year: string, value: number) => void;
@@ -492,13 +494,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // Only initialize if not already initialized (preserve existing data), unless force
     if (!state.isInitialized || force) {
       let incomeStatement = state.incomeStatement.length > 0 
-        ? state.incomeStatement 
+        ? [...state.incomeStatement] 
         : createIncomeStatementTemplate();
       let balanceSheet = state.balanceSheet.length > 0 
-        ? state.balanceSheet 
+        ? [...state.balanceSheet] 
         : createBalanceSheetTemplate();
       let cashFlow = state.cashFlow.length > 0 
-        ? state.cashFlow 
+        ? [...state.cashFlow] 
         : createCashFlowTemplate();
 
       // Migration: Ensure core Income Statement skeleton items always exist
@@ -986,11 +988,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
       // Recalculate all years for all statements
       const allYears = [...(meta.years.historical || []), ...(meta.years.projection || [])];
       allYears.forEach((year) => {
-        const allStatements = { incomeStatement, balanceSheet, cashFlow };
         const sbcBreakdowns = get().sbcBreakdowns;
         const danaBreakdowns = get().danaBreakdowns;
+        // Update allStatements after each recalculation to ensure we use the latest values
+        let allStatements = { incomeStatement, balanceSheet, cashFlow };
         incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+        allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after IS
         balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
+        allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after BS
         cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
       });
 
@@ -1017,9 +1022,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       ...(state.meta.years.projection || []),
     ];
 
-    let incomeStatement = state.incomeStatement;
-    let balanceSheet = state.balanceSheet;
-    let cashFlow = state.cashFlow;
+    let incomeStatement = [...state.incomeStatement];
+    let balanceSheet = [...state.balanceSheet];
+    let cashFlow = [...state.cashFlow];
     
     // #region agent log
     if (typeof window !== 'undefined') {
@@ -1663,11 +1668,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // Recalculate all years for all statements
     // Pass all statements so CFS can access IS/BS values, and sbcBreakdowns for SBC calculation
     allYears.forEach((year) => {
-      const allStatements = { incomeStatement, balanceSheet, cashFlow };
       const sbcBreakdowns = get().sbcBreakdowns;
       const danaBreakdowns = get().danaBreakdowns;
+      // Update allStatements after each recalculation to ensure we use the latest values
+      let allStatements = { incomeStatement, balanceSheet, cashFlow };
       incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+      allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after IS
       balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
+      allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after BS
       cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
     });
 
@@ -1928,14 +1936,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
       "ebt", "tax", "net_income", "net_income_margin"
     ];
     
-    // Core Balance Sheet items that form the skeleton - cannot be removed
+    // Only total/subtotal rows are protected; default line items (cash, ar, ppe, etc.) can be removed
     const coreBSItems = [
-      "cash", "ar", "inventory", "other_ca", "total_current_assets",
-      "ppe", "intangible_assets", "goodwill", "other_assets", "total_assets",
-      "ap", "st_debt", "other_cl", "total_current_liabilities",
-      "lt_debt", "other_liab", "total_liabilities",
-      "common_stock", "retained_earnings", "other_equity", "total_equity",
-      "total_liab_and_equity"
+      "total_current_assets", "total_fixed_assets", "total_assets", "total_current_liabilities",
+      "total_non_current_liabilities", "total_liabilities", "total_equity", "total_liab_and_equity"
     ];
     
     // Core Cash Flow items that form the skeleton - cannot be removed
@@ -1982,6 +1986,38 @@ export const useModelStore = create<ModelState & ModelActions>()(
       
       if (sgaRow && sgaRow.kind === "calc" && (!sgaRow.children || sgaRow.children.length === 0)) {
         finalUpdated = updateRowKindDeep(finalUpdated, "sga", "input");
+      }
+      
+      // After removing a row, recalculate all totals to ensure they're correct
+      if (statement === "balanceSheet" || statement === "incomeStatement" || statement === "cashFlow") {
+        const state = get();
+        const allYears = [
+          ...(state.meta.years.historical || []),
+          ...(state.meta.years.projection || []),
+        ];
+        
+        // Recompute calculations for the updated statement
+        let recalculated = finalUpdated;
+        const updatedAllStatements = {
+          incomeStatement: statement === "incomeStatement" ? finalUpdated : state.incomeStatement,
+          balanceSheet: statement === "balanceSheet" ? finalUpdated : state.balanceSheet,
+          cashFlow: statement === "cashFlow" ? finalUpdated : state.cashFlow,
+        };
+        
+        allYears.forEach((year) => {
+          const sbcBreakdowns = state.sbcBreakdowns;
+          const danaBreakdowns = state.danaBreakdowns;
+          recalculated = recomputeCalculations(
+            recalculated,
+            year,
+            recalculated,
+            updatedAllStatements,
+            sbcBreakdowns,
+            danaBreakdowns
+          );
+        });
+        
+        return { [statement]: recalculated };
       }
       
       return { [statement]: finalUpdated };
@@ -2127,6 +2163,73 @@ export const useModelStore = create<ModelState & ModelActions>()(
         recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
       });
       return { cashFlow: recalculated };
+    });
+  },
+
+  reorderBalanceSheetCategory: (category, fromIndex, toIndex) => {
+    set((state) => {
+      const categoryRows = getRowsForCategory(state.balanceSheet, category);
+      
+      // Filter out total rows from reordering
+      const reorderableRows = categoryRows.filter((r) => !r.id.startsWith("total_"));
+      
+      if (fromIndex < 0 || fromIndex >= reorderableRows.length || toIndex < 0 || toIndex >= reorderableRows.length) {
+        return state;
+      }
+      
+      // Reorder within the category
+      const reordered = [...reorderableRows];
+      const [removed] = reordered.splice(fromIndex, 1);
+      const insertIndex = Math.min(toIndex, reordered.length);
+      reordered.splice(insertIndex, 0, removed);
+      
+      // Find the boundaries of this category in the full balanceSheet array
+      const totalCurrentAssetsIndex = state.balanceSheet.findIndex((r) => r.id === "total_current_assets");
+      const totalAssetsIndex = state.balanceSheet.findIndex((r) => r.id === "total_assets");
+      const totalCurrentLiabIndex = state.balanceSheet.findIndex((r) => r.id === "total_current_liabilities");
+      const totalLiabIndex = state.balanceSheet.findIndex((r) => r.id === "total_liabilities");
+      const totalEquityIndex = state.balanceSheet.findIndex((r) => r.id === "total_equity");
+      
+      let categoryStartIndex = 0;
+      let categoryEndIndex = state.balanceSheet.length;
+      
+      switch (category) {
+        case "current_assets":
+          categoryStartIndex = 0;
+          categoryEndIndex = totalCurrentAssetsIndex >= 0 ? totalCurrentAssetsIndex : totalAssetsIndex >= 0 ? totalAssetsIndex : state.balanceSheet.length;
+          break;
+        case "fixed_assets":
+          categoryStartIndex = totalCurrentAssetsIndex >= 0 ? totalCurrentAssetsIndex + 1 : 0;
+          categoryEndIndex = totalAssetsIndex >= 0 ? totalAssetsIndex : state.balanceSheet.length;
+          break;
+        case "current_liabilities":
+          categoryStartIndex = totalAssetsIndex >= 0 ? totalAssetsIndex + 1 : 0;
+          categoryEndIndex = totalCurrentLiabIndex >= 0 ? totalCurrentLiabIndex : totalLiabIndex >= 0 ? totalLiabIndex : state.balanceSheet.length;
+          break;
+        case "non_current_liabilities":
+          categoryStartIndex = totalCurrentLiabIndex >= 0 ? totalCurrentLiabIndex + 1 : 0;
+          categoryEndIndex = totalLiabIndex >= 0 ? totalLiabIndex : state.balanceSheet.length;
+          break;
+        case "equity":
+          categoryStartIndex = totalLiabIndex >= 0 ? totalLiabIndex + 1 : 0;
+          categoryEndIndex = totalEquityIndex >= 0 ? totalEquityIndex : state.balanceSheet.length;
+          break;
+      }
+      
+      // Get all rows outside this category
+      const beforeCategory = state.balanceSheet.slice(0, categoryStartIndex);
+      const categoryTotalRows = state.balanceSheet.slice(categoryStartIndex, categoryEndIndex + 1).filter((r) => r.id.startsWith("total_"));
+      const afterCategory = state.balanceSheet.slice(categoryEndIndex + 1);
+      
+      // Rebuild balanceSheet with reordered category items
+      const newBalanceSheet = [
+        ...beforeCategory,
+        ...reordered,
+        ...categoryTotalRows,
+        ...afterCategory,
+      ];
+      
+      return { balanceSheet: newBalanceSheet };
     });
   },
 
@@ -2451,9 +2554,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
             ...(state.meta.years.projection || []),
           ];
 
-          let incomeStatement = state.incomeStatement;
-          let balanceSheet = state.balanceSheet;
-          let cashFlow = state.cashFlow;
+          let incomeStatement = [...state.incomeStatement];
+          let balanceSheet = [...state.balanceSheet];
+          let cashFlow = [...state.cashFlow];
           
           // Helper function to find section boundaries in cashFlow for order-preserving migrations
           const findSectionBoundaries = () => {

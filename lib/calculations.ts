@@ -487,46 +487,40 @@ function computeFormula(
 
   // Balance Sheet formulas - subtotals should sum all items in their category dynamically
   if (rowId === "total_current_assets") {
-    // Find all current assets items (everything before total_current_assets that's not a total/subtotal)
-    const totalCurrentAssetsIndex = statementRows.findIndex(r => r.id === "total_current_assets");
-    if (totalCurrentAssetsIndex >= 0) {
-      let sum = 0;
-      for (let i = 0; i < totalCurrentAssetsIndex; i++) {
-        const item = statementRows[i];
-        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
-          sum += findRowValue(statementRows, item.id, year);
-        }
-      }
-      return sum;
+    // SUM ONLY ITEMS THAT ARE ACTUALLY IN THE BUILDER - NOTHING MORE, NOTHING LESS
+    // Use getRowsForCategory to get the exact list of current assets items that are shown in the builder
+    const currentAssetsItems = getRowsForCategory(statementRows, "current_assets");
+    // Filter out the total row itself and any other totals/subtotals - ONLY sum actual line items
+    const itemsToSum = currentAssetsItems.filter(
+      item => item.id !== "total_current_assets" && 
+               !item.id.startsWith("total_") && 
+               item.kind !== "total" && 
+               item.kind !== "subtotal"
+    );
+    // Sum ONLY these items - use their actual values directly
+    let sum = 0;
+    for (const item of itemsToSum) {
+      // Use the item's stored value directly - this is what's shown in the builder
+      const itemValue = item.values?.[year] ?? 0;
+      sum += itemValue;
     }
-    // Fallback to hardcoded items if structure is unexpected
-    const cash = findRowValue(statementRows, "cash", year);
-    const ar = findRowValue(statementRows, "ar", year);
-    const inventory = findRowValue(statementRows, "inventory", year);
-    const otherCA = findRowValue(statementRows, "other_ca", year);
-    return cash + ar + inventory + otherCA;
+    return sum;
   }
 
   if (rowId === "total_fixed_assets") {
-    // Sum all fixed assets items (everything between total_current_assets and total_assets)
-    const totalCurrentAssetsIndex = statementRows.findIndex(r => r.id === "total_current_assets");
-    const totalAssetsIndex = statementRows.findIndex(r => r.id === "total_assets");
-    if (totalCurrentAssetsIndex >= 0 && totalAssetsIndex >= 0) {
-      let sum = 0;
-      for (let i = totalCurrentAssetsIndex + 1; i < totalAssetsIndex; i++) {
-        const item = statementRows[i];
-        // Skip the total_fixed_assets row itself and other subtotals
-        if (item.id !== "total_fixed_assets" && !item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
-          sum += findRowValue(statementRows, item.id, year);
-        }
-      }
-      return sum;
+    // SUM ONLY ITEMS THAT ARE ACTUALLY IN THE BUILDER - same logic as total_current_assets
+    const fixedAssetsItems = getRowsForCategory(statementRows, "fixed_assets");
+    const itemsToSum = fixedAssetsItems.filter(
+      item => item.id !== "total_fixed_assets" &&
+               !item.id.startsWith("total_") &&
+               item.kind !== "total" &&
+               item.kind !== "subtotal"
+    );
+    let sum = 0;
+    for (const item of itemsToSum) {
+      sum += item.values?.[year] ?? 0;
     }
-    // Fallback
-    const ppe = findRowValue(statementRows, "ppe", year);
-    const intangible = findRowValue(statementRows, "intangible_assets", year);
-    const otherAssets = findRowValue(statementRows, "other_assets", year);
-    return ppe + intangible + otherAssets;
+    return sum;
   }
 
   if (rowId === "total_assets") {
@@ -558,45 +552,35 @@ function computeFormula(
   }
 
   if (rowId === "total_current_liabilities") {
-    // Find all current liabilities items dynamically
-    const totalAssetsIndex = statementRows.findIndex(r => r.id === "total_assets");
-    const totalCurrentLiabIndex = statementRows.findIndex(r => r.id === "total_current_liabilities");
-    if (totalAssetsIndex >= 0 && totalCurrentLiabIndex >= 0) {
-      let sum = 0;
-      for (let i = totalAssetsIndex + 1; i < totalCurrentLiabIndex; i++) {
-        const item = statementRows[i];
-        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
-          sum += findRowValue(statementRows, item.id, year);
-        }
-      }
-      return sum;
+    // SUM ONLY ITEMS THAT ARE ACTUALLY IN THE BUILDER - same logic as total_current_assets / total_fixed_assets
+    const currentLiabilitiesItems = getRowsForCategory(statementRows, "current_liabilities");
+    const itemsToSum = currentLiabilitiesItems.filter(
+      item => item.id !== "total_current_liabilities" &&
+               !item.id.startsWith("total_") &&
+               item.kind !== "total" &&
+               item.kind !== "subtotal"
+    );
+    let sum = 0;
+    for (const item of itemsToSum) {
+      sum += item.values?.[year] ?? 0;
     }
-    // Fallback
-    const ap = findRowValue(statementRows, "ap", year);
-    const stDebt = findRowValue(statementRows, "st_debt", year);
-    const otherCL = findRowValue(statementRows, "other_cl", year);
-    return ap + stDebt + otherCL;
+    return sum;
   }
 
   if (rowId === "total_non_current_liabilities") {
-    // Sum all non-current liabilities items (everything between total_current_liabilities and total_liabilities)
-    const totalCurrentLiabIndex = statementRows.findIndex(r => r.id === "total_current_liabilities");
-    const totalLiabIndex = statementRows.findIndex(r => r.id === "total_liabilities");
-    if (totalCurrentLiabIndex >= 0 && totalLiabIndex >= 0) {
-      let sum = 0;
-      for (let i = totalCurrentLiabIndex + 1; i < totalLiabIndex; i++) {
-        const item = statementRows[i];
-        // Skip the total_non_current_liabilities row itself and other subtotals
-        if (item.id !== "total_non_current_liabilities" && !item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
-          sum += findRowValue(statementRows, item.id, year);
-        }
-      }
-      return sum;
+    // SUM ONLY ITEMS THAT ARE ACTUALLY IN THE BUILDER - same logic as other category totals
+    const nonCurrentLiabilitiesItems = getRowsForCategory(statementRows, "non_current_liabilities");
+    const itemsToSum = nonCurrentLiabilitiesItems.filter(
+      item => item.id !== "total_non_current_liabilities" &&
+               !item.id.startsWith("total_") &&
+               item.kind !== "total" &&
+               item.kind !== "subtotal"
+    );
+    let sum = 0;
+    for (const item of itemsToSum) {
+      sum += item.values?.[year] ?? 0;
     }
-    // Fallback
-    const ltDebt = findRowValue(statementRows, "lt_debt", year);
-    const otherLiab = findRowValue(statementRows, "other_liab", year);
-    return ltDebt + otherLiab;
+    return sum;
   }
 
   if (rowId === "total_liabilities") {
@@ -628,24 +612,19 @@ function computeFormula(
   }
 
   if (rowId === "total_equity") {
-    // Sum all equity items dynamically
-    const totalLiabIndex = statementRows.findIndex(r => r.id === "total_liabilities");
-    const totalEquityIndex = statementRows.findIndex(r => r.id === "total_equity");
-    if (totalLiabIndex >= 0 && totalEquityIndex >= 0) {
-      let equitySum = 0;
-      for (let i = totalLiabIndex + 1; i < totalEquityIndex; i++) {
-        const item = statementRows[i];
-        if (!item.id.startsWith("total_") && item.kind !== "total" && item.kind !== "subtotal") {
-          equitySum += findRowValue(statementRows, item.id, year);
-        }
-      }
-      return equitySum;
+    // SUM ONLY ITEMS THAT ARE ACTUALLY IN THE BUILDER - same logic as other category totals
+    const equityItems = getRowsForCategory(statementRows, "equity");
+    const itemsToSum = equityItems.filter(
+      item => item.id !== "total_equity" &&
+               !item.id.startsWith("total_") &&
+               item.kind !== "total" &&
+               item.kind !== "subtotal"
+    );
+    let sum = 0;
+    for (const item of itemsToSum) {
+      sum += item.values?.[year] ?? 0;
     }
-    // Fallback
-    const commonStock = findRowValue(statementRows, "common_stock", year);
-    const retainedEarnings = findRowValue(statementRows, "retained_earnings", year);
-    const otherEquity = findRowValue(statementRows, "other_equity", year);
-    return commonStock + retainedEarnings + otherEquity;
+    return sum;
   }
 
   if (rowId === "total_liab_and_equity") {

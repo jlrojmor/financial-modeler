@@ -515,9 +515,21 @@ function StatementTable({
               // Don't recompute here to avoid recursion - values should already be stored
               let storedValue = row.values?.[y] ?? 0;
               
+              // FOR BALANCE SHEET TOTALS: ALWAYS RECALCULATE ON THE FLY
+              // This ensures totals reflect ONLY items that are actually in the builder
+              // When items are removed, totals must immediately reflect the change
+              if (isBalanceSheet && (row.kind === "subtotal" || row.kind === "total" || isBalanceSheetSubtotal)) {
+                // Always recalculate Balance Sheet totals to ensure they're accurate
+                try {
+                  storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                } catch (e) {
+                  // If recursion error, fall back to stored value
+                  storedValue = row.values?.[y] ?? 0;
+                }
+              }
               // For CFS items that pull from IS/BS, the values should already be computed and stored
               // Only recompute if absolutely necessary and we can do it safely
-              if (isCashFlow && allStatements) {
+              else if (isCashFlow && allStatements) {
                 const isCalculatedCFSItem = row.kind === "calc" || 
                   ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_income", "danda", "sbc", "wc_change"].includes(row.id) ||
                   row.id.startsWith("cfo_");
@@ -547,38 +559,38 @@ function StatementTable({
                       // Year format unclear - treat as input
                       storedValue = row.values?.[y] ?? 0;
                     }
-                  } else {
-                    // Use stored value first (should be there after recomputeCalculations)
-                    // But also compute if value is 0 or undefined to ensure we show calculated values
-                    if (row.values?.[y] !== undefined && row.values[y] !== 0) {
-                      storedValue = row.values[y];
                     } else {
-                      // Only compute if no stored value exists, but be very careful to avoid recursion
-                      // For net_income, danda, sbc - these pull from IS/SBC/D&A breakdowns
-                      if (row.id === "net_income") {
-                        // Get from IS directly
-                        const isRow = allStatements.incomeStatement.find(r => r.id === row.id);
-                        if (isRow && isRow.values?.[y] !== undefined) {
-                          storedValue = isRow.values[y];
-                        }
-                      } else if (row.id === "danda") {
-                        // D&A is now a manual input in CFO - use stored value
-                        storedValue = row.values?.[y] ?? 0;
-                      } else if (row.id === "sbc" && sbcBreakdowns && allStatements) {
-                        // Total SBC without double-counting (same logic as IS Total SBC row)
-                        storedValue = getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns, y);
+                      // Use stored value first (should be there after recomputeCalculations)
+                      // But also compute if value is 0 or undefined to ensure we show calculated values
+                      if (row.values?.[y] !== undefined && row.values[y] !== 0) {
+                        storedValue = row.values[y];
                       } else {
-                        // For other calculated items, try to compute (but this might cause recursion)
-                        // Only do this as last resort
-                        try {
-                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
-                        } catch (e) {
-                          // If recursion error, just use 0
-                          storedValue = 0;
+                        // Only compute if no stored value exists, but be very careful to avoid recursion
+                        // For net_income, danda, sbc - these pull from IS/SBC/D&A breakdowns
+                        if (row.id === "net_income") {
+                          // Get from IS directly
+                          const isRow = allStatements.incomeStatement.find(r => r.id === row.id);
+                          if (isRow && isRow.values?.[y] !== undefined) {
+                            storedValue = isRow.values[y];
+                          }
+                        } else if (row.id === "danda") {
+                          // D&A is now a manual input in CFO - use stored value
+                          storedValue = row.values?.[y] ?? 0;
+                        } else if (row.id === "sbc" && sbcBreakdowns && allStatements) {
+                          // Total SBC without double-counting (same logic as IS Total SBC row)
+                          storedValue = getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns, y);
+                        } else {
+                          // For other calculated items, try to compute (but this might cause recursion)
+                          // Only do this as last resort
+                          try {
+                            storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                          } catch (e) {
+                            // If recursion error, just use 0
+                            storedValue = 0;
+                          }
                         }
                       }
                     }
-                  }
                 } else if (row.kind === "input") {
                   // For input items, use stored value
                   storedValue = row.values?.[y] ?? 0;

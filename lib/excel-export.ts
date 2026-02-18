@@ -350,17 +350,32 @@ export function exportStatementToExcel(
   // Always expand all rows for Excel export (null = all expanded, matching preview when expandedRows === null)
   const flattened = flattenRows(rows, 0, { forStatement }, null);
   
+  // IB-grade colors (dark blue headers, light green sections, light blue inputs)
+  const IB_DARK_BLUE = "FF1E3A5F";
+  const IB_LIGHT_GREEN = "FFD4EDDA";
+  const IB_LIGHT_GREEN_SUB = "FFE8F5E9";
+  const IB_INPUT_FILL = "FFD6E4F0";
+
   // Add statement label header if provided and not first statement
   if (statementLabel && !isFirstStatement) {
     // Add spacing before new statement
     startRow += 2;
     ws.getCell(startRow, 1).value = statementLabel;
-    ws.getCell(startRow, 1).font = { bold: true, size: 12, color: { argb: "FF000000" } };
+    ws.getCell(startRow, 1).font = { bold: true, size: 12, color: { argb: "FFFFFFFF" } };
     ws.getRow(startRow).fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FFE5E7EB" }, // Light grey background for statement header
+      fgColor: { argb: IB_DARK_BLUE },
     };
+    years.forEach((_, yearIdx) => {
+      ws.getCell(startRow, 2 + yearIdx).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: IB_DARK_BLUE },
+      };
+      ws.getCell(startRow, 2 + yearIdx).alignment = { horizontal: "right", vertical: "middle" };
+    });
+    ws.getCell(startRow, 1).alignment = { horizontal: "left", vertical: "middle" };
     startRow += 1;
   }
   
@@ -381,14 +396,23 @@ export function exportStatementToExcel(
       ws.getCell(startRow, 2 + idx).value = year;
     });
     
-    // Style header row - IB standard: dark background, white text
+    // Style header row - IB standard: dark blue, white text
     ws.getRow(startRow).font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
     ws.getRow(startRow).fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FF1E293B" }, // Dark slate background
+      fgColor: { argb: IB_DARK_BLUE },
     };
-    ws.getRow(startRow).alignment = { horizontal: "left", vertical: "middle" };
+    years.forEach((_, yearIdx) => {
+      ws.getCell(startRow, 2 + yearIdx).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: IB_DARK_BLUE },
+      };
+      ws.getCell(startRow, 2 + yearIdx).alignment = { horizontal: "right", vertical: "middle" };
+    });
+    ws.getCell(startRow, 1).alignment = { horizontal: "left", vertical: "middle" };
+    ws.getRow(startRow).height = 20;
     startRow += 1;
   }
   
@@ -477,20 +501,21 @@ export function exportStatementToExcel(
       ws.getRow(sectionRow).fill = {
         type: "pattern",
         pattern: "solid",
-        fgColor: { argb: "FFE5E7EB" }, // Light grey background
+        fgColor: { argb: IB_LIGHT_GREEN },
       };
       ws.getRow(sectionRow).border = {
-        top: { style: "medium", color: { argb: "FF94A3B8" } },
-        bottom: { style: "thin", color: { argb: "FFCBD5E1" } },
+        top: { style: "medium", color: { argb: IB_DARK_BLUE } },
+        bottom: { style: "thin", color: { argb: "FF94A3B8" } },
       };
-      // Fill year columns
       years.forEach((_, yearIdx) => {
         ws.getCell(sectionRow, 2 + yearIdx).fill = {
           type: "pattern",
           pattern: "solid",
-          fgColor: { argb: "FFE5E7EB" },
+          fgColor: { argb: IB_LIGHT_GREEN },
         };
+        ws.getCell(sectionRow, 2 + yearIdx).alignment = { horizontal: "right", vertical: "middle" };
       });
+      ws.getCell(sectionRow, 1).alignment = { horizontal: "left", vertical: "middle" };
     }
     
     // Add category subtitle row if needed (BEFORE current row)
@@ -500,20 +525,21 @@ export function exportStatementToExcel(
       const categoryRow = baseRow + rowOffset;
       rowOffset += 1; // Increment BEFORE writing item, so item goes to next row
       ws.getCell(categoryRow, 1).value = categoryLabels[currentCategory] || currentCategory;
-      ws.getCell(categoryRow, 1).font = { size: 10, color: { argb: "FF64748B" } };
+      ws.getCell(categoryRow, 1).font = { size: 10, color: { argb: "FF475569" } };
       ws.getRow(categoryRow).fill = {
         type: "pattern",
         pattern: "solid",
-        fgColor: { argb: "FFF8F9FA" }, // Very light grey
+        fgColor: { argb: IB_LIGHT_GREEN_SUB },
       };
-      // Fill year columns
       years.forEach((_, yearIdx) => {
         ws.getCell(categoryRow, 2 + yearIdx).fill = {
           type: "pattern",
           pattern: "solid",
-          fgColor: { argb: "FFF8F9FA" },
+          fgColor: { argb: IB_LIGHT_GREEN_SUB },
         };
+        ws.getCell(categoryRow, 2 + yearIdx).alignment = { horizontal: "right", vertical: "middle" };
       });
+      ws.getCell(categoryRow, 1).alignment = { horizontal: "left", vertical: "middle" };
     }
     
     // Add blank row after "Total Current Assets" and before first Fixed Assets item
@@ -559,8 +585,9 @@ export function exportStatementToExcel(
     const isCfsSectionTotal = ["operating_cf", "investing_cf", "financing_cf"].includes(row.id);
     const isNetChangeCash = row.id === "net_change_cash";
     const shouldBeBold = isSubtotal || isKeyCalculation || isParentWithChildren || isCfsSectionTotal || isNetChangeCash;
-
-    const rowBgColor = isNetChangeCash ? "FFF1F5F9" : "FFFFFFFF"; // Slate-100 for net change (IB bottom-line style)
+    // IB: light blue-grey fill for input-only rows (no children); white for others; light grey for net change
+    const isInputOnly = isInput && !hasChildren;
+    const rowBgColor = isNetChangeCash ? "FFF1F5F9" : isInputOnly ? IB_INPUT_FILL : "FFFFFFFF";
     ws.getRow(excelRow).fill = {
       type: "pattern",
       pattern: "solid",
@@ -585,11 +612,16 @@ export function exportStatementToExcel(
       };
     }
     
-    // Top border for key rows; double bottom for Net Change in Cash (IB bottom-line emphasis)
+    // IB: single top line for subtotals; double bottom for grand totals (net income, total assets, total L&E, net change in cash)
+    const isGrandTotal =
+      row.id === "net_income" ||
+      row.id === "total_assets" ||
+      row.id === "total_liab_and_equity" ||
+      row.id === "net_change_cash";
     if (shouldBeBold || isKeyCalculation) {
       ws.getRow(excelRow).border = {
-        top: { style: "thin", color: { argb: "FFCBD5E1" } },
-        ...(isNetChangeCash ? { bottom: { style: "double", color: { argb: "FF64748B" } } } : {}),
+        top: { style: "thin", color: { argb: "FF94A3B8" } },
+        ...(isGrandTotal ? { bottom: { style: "double", color: { argb: "FF475569" } } } : {}),
       };
     }
     
@@ -635,7 +667,7 @@ export function exportStatementToExcel(
               
               if (isInput && hasChildren) {
                 ws.getCell(excelRow, col).font = { 
-                  color: { argb: "FF0066CC" }, // Blue for input rows with children
+                  color: { argb: "FF1E3A5F" },
                   bold: shouldBeBold
                 };
               } else if (isLink) {
@@ -700,23 +732,28 @@ export function exportStatementToExcel(
         
         if (isInput && hasChildren) {
           ws.getCell(excelRow, col).font = { 
-            color: { argb: "FF0066CC" }, // Blue
+            color: { argb: "FF1E3A5F" },
+            bold: shouldBeBold
+          };
+        } else if (isInputOnly) {
+          ws.getCell(excelRow, col).font = {
+            color: { argb: "FF1E3A5F" },
             bold: shouldBeBold
           };
         } else if (isLink) {
           ws.getCell(excelRow, col).font = { 
-            color: { argb: "FF22C55E" }, // Green
+            color: { argb: "FF22C55E" },
             bold: shouldBeBold
           };
         } else if (isPercent) {
           ws.getCell(excelRow, col).font = { 
-            color: { argb: "FF64748B" }, // Grey
+            color: { argb: "FF64748B" },
             italic: true,
             size: 10
           };
         } else {
           ws.getCell(excelRow, col).font = { 
-            color: { argb: "FF000000" }, // Black (readable on white)
+            color: { argb: "FF000000" },
             bold: shouldBeBold
           };
         }
@@ -731,12 +768,15 @@ export function exportStatementToExcel(
         }
       } else {
         ws.getCell(excelRow, col).value = typeof value === "number" ? value : null;
-        ws.getCell(excelRow, col).font = { color: { argb: "FF0066CC" } };
+        ws.getCell(excelRow, col).font = {
+          color: { argb: isInputOnly ? "FF1E3A5F" : "FF0066CC" }
+        };
         if (useNames && row.id) defineCellName(wb, sheetName, prefix, row.id, col, excelRow);
       }
       
-      // Cell background: match row (white, or slate for Net Change in Cash)
-      const cellBg = row.id === "net_change_cash" ? "FFF1F5F9" : "FFFFFFFF";
+      // Cell background: match row (input-only = light blue-grey, net change = light grey, else white)
+      const cellBg =
+        row.id === "net_change_cash" ? "FFF1F5F9" : isInputOnly ? IB_INPUT_FILL : "FFFFFFFF";
       ws.getCell(excelRow, col).fill = {
         type: "pattern",
         pattern: "solid",
@@ -755,7 +795,7 @@ export function exportStatementToExcel(
         ws.getCell(excelRow, col).numFmt = "#,##0_);(#,##0)";
       }
       
-      // Alignment
+      // Alignment: all columns right + vertically centered; label column (1) left + centered
       ws.getCell(excelRow, col).alignment = { horizontal: "right", vertical: "middle" };
       ws.getCell(excelRow, 1).alignment = { horizontal: "left", vertical: "middle" };
     });

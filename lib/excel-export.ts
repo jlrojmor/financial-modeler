@@ -13,6 +13,7 @@ import { generateExcelFormula, getCellName, getColumnLetter } from "./excel-form
 import { storedToDisplay, getUnitLabel } from "./currency-utils";
 import { findCFIItem } from "./cfi-intelligence";
 import { findCFFItem } from "./cff-intelligence";
+import { computeRowValue } from "@/lib/calculations";
 
 type FlattenOptions = {
   forStatement?: "income" | "balance" | "cashflow";
@@ -310,6 +311,12 @@ function defineCellName(
  * Export Income Statement to Excel worksheet.
  * When wb and statementPrefix are provided, defines names for each data cell and formulas use those names (robust to reorder).
  */
+export type ExportStatementContext = {
+  allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
+  sbcBreakdowns?: Record<string, Record<string, number>>;
+  danaBreakdowns?: Record<string, number>;
+};
+
 export function exportStatementToExcel(
   ws: any,
   rows: Row[],
@@ -319,7 +326,8 @@ export function exportStatementToExcel(
   statementLabel?: string,
   isFirstStatement: boolean = true,
   wb?: any,
-  statementPrefix?: string
+  statementPrefix?: string,
+  context?: ExportStatementContext
 ): number {
   if (!rows || rows.length === 0) {
     return startRow;
@@ -585,10 +593,16 @@ export function exportStatementToExcel(
       };
     }
     
-    // Values for each year
+    // Values for each year (use same computation as preview when allStatements provided)
     years.forEach((year, yearIdx) => {
       const col = 2 + yearIdx;
-      const value = row.values?.[year];
+      const allStatements = context?.allStatements;
+      const sbcBreakdowns = context?.sbcBreakdowns ?? {};
+      const danaBreakdowns = context?.danaBreakdowns;
+      const value =
+        allStatements != null
+          ? computeRowValue(row, year, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns)
+          : (row.values?.[year] ?? 0);
       const isLink = row.excelFormula?.includes("!") || false; // Links reference other sheets
       // hasChildren is already defined above for this row
       

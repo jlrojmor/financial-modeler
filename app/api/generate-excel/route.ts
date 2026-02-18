@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ModelState } from "@/store/useModelStore";
-import { exportStatementToExcel, exportSbcDisclosureToExcel, exportBalanceCheckToExcel } from "@/lib/excel-export";
+import { exportStatementToExcel, exportSbcDisclosureToExcel, exportBalanceCheckToExcel, type ExportStatementContext } from "@/lib/excel-export";
 
 // Force Node runtime (ExcelJS needs Node APIs)
 export const runtime = "nodejs";
@@ -24,6 +24,20 @@ export async function POST(request: Request) {
     const ws = wb.addWorksheet("Financial Model");
     let currentRow = 1;
     
+    const allStatements = {
+      incomeStatement: modelState.incomeStatement ?? [],
+      balanceSheet: modelState.balanceSheet ?? [],
+      cashFlow: modelState.cashFlow ?? [],
+    };
+    const sbcBreakdowns = modelState.sbcBreakdowns ?? {};
+    const danaBreakdowns = modelState.danaBreakdowns ?? {};
+    
+    const exportContext: ExportStatementContext = {
+      allStatements,
+      sbcBreakdowns,
+      danaBreakdowns,
+    };
+
     // Income Statement (first statement - includes currency note and headers)
     currentRow = exportStatementToExcel(
       ws,
@@ -34,7 +48,8 @@ export async function POST(request: Request) {
       undefined,
       true,
       wb,
-      "IS"
+      "IS",
+      exportContext
     );
     
     // Add SBC Disclosure section below Income Statement
@@ -60,7 +75,8 @@ export async function POST(request: Request) {
         "Balance Sheet",
         false,
         wb,
-        "BS"
+        "BS",
+        exportContext
       );
       currentRow = exportBalanceCheckToExcel(
         ws,
@@ -84,7 +100,8 @@ export async function POST(request: Request) {
         "Cash Flow Statement",
         false,
         wb,
-        "CFS"
+        "CFS",
+        exportContext
       );
     }
     

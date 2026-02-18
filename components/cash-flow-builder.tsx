@@ -833,7 +833,7 @@ function CFSSectionComponent({
                         const isConfirmed = confirmedRowIds[child.id] === true;
                         return (
                           <div
-                            key={child.id}
+                            key={`${child.id}-${wcChildIndex}`}
                             className={`rounded-lg border ${colors.border} ${colors.bg} p-3 ${dragOverId === child.id ? "ring-2 ring-emerald-500" : ""}`}
                             onDragOver={(e) => handleDragOver(e, child.id)}
                             onDragLeave={handleDragLeave}

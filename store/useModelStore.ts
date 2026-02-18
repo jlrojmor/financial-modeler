@@ -115,9 +115,10 @@ function uuid() {
 
 /**
  * Ensure wc_change has one child per BS current asset (except cash) and current liability (except short-term debt).
- * Only adds missing children; preserves existing children and their values.
+ * Only includes items that exist in the Balance Sheet; respects wcExcludedIds (user-removed items stay excluded).
+ * Does NOT preserve legacy/custom WC children that are no longer in BS — WC mirrors BS only.
  */
-function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[]): Row[] {
+function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[], wcExcludedIds: Set<string> = new Set()): Row[] {
   if (balanceSheet.length === 0) return cashFlow;
 
   const currentAssets = getRowsForCategory(balanceSheet, "current_assets");
@@ -137,32 +138,26 @@ function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[]): Row[]
     ),
   ];
   const desiredById = new Map(desired.map((r) => [r.id, r]));
-  const desiredList = Array.from(desiredById.values());
+  const desiredList = Array.from(desiredById.values()).filter((bs) => !wcExcludedIds.has(bs.id));
 
   return cashFlow.map((r) => {
     if (r.id !== "wc_change") {
       return r.children?.length
-        ? { ...r, children: ensureWcChildrenInCashFlow(r.children, balanceSheet) }
+        ? { ...r, children: ensureWcChildrenInCashFlow(r.children, balanceSheet, wcExcludedIds) }
         : r;
     }
     const existingChildren = r.children ?? [];
     const existingById = new Map(existingChildren.map((c) => [c.id, c]));
-    const desiredIds = new Set(desiredList.map((bs) => bs.id));
-    
-    // Build children array: include all desired items from BS, PLUS any custom items not in BS
     const newChildren: Row[] = [];
     const seen = new Set<string>();
-    
-    // First, add all desired items from Balance Sheet (preserve order from desiredList)
+
     for (const bs of desiredList) {
       if (seen.has(bs.id)) continue;
       seen.add(bs.id);
       const existing = existingById.get(bs.id);
       if (existing) {
-        // Use existing child to preserve values and any custom properties
         newChildren.push(existing);
       } else {
-        // Add new child from Balance Sheet
         newChildren.push({
           id: bs.id,
           label: bs.label,
@@ -172,17 +167,7 @@ function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[]): Row[]
         });
       }
     }
-    
-    // Then, preserve any custom WC children that aren't in the Balance Sheet
-    // These are user-added items like "Operating Lease Liabilities" that should persist
-    for (const existingChild of existingChildren) {
-      if (!seen.has(existingChild.id) && !desiredIds.has(existingChild.id)) {
-        // This is a custom item not in BS - preserve it
-        newChildren.push(existingChild);
-        seen.add(existingChild.id);
-      }
-    }
-    
+
     return { ...r, children: newChildren };
   });
 }
@@ -224,6 +209,8 @@ export type ProjectSnapshot = {
   sectionLocks: Record<string, boolean>;
   sectionExpanded: Record<string, boolean>;
   confirmedRowIds: Record<string, boolean>;
+  /** BS row IDs that user has removed from CFO Working Capital; persist so they stay excluded after save */
+  wcExcludedIds: string[];
 };
 
 export type ProjectMeta = {
@@ -273,6 +260,8 @@ export type ModelState = {
   
   // Confirmed row IDs for Cash Flow Builder (collapsed cards)
   confirmedRowIds: Record<string, boolean>; // { [rowId]: isConfirmed }
+  /** BS CA/CL row IDs user removed from CFO WC section; kept so they stay excluded after save */
+  wcExcludedIds: string[];
 };
 
 export type ModelActions = {
@@ -433,6 +422,7 @@ const defaultState: ModelState = {
   
   // Confirmed row IDs - default empty (no rows confirmed/collapsed)
   confirmedRowIds: {},
+  wcExcludedIds: [],
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -453,6 +443,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     sectionLocks: state.sectionLocks,
     sectionExpanded: state.sectionExpanded,
     confirmedRowIds: state.confirmedRowIds,
+    wcExcludedIds: state.wcExcludedIds,
   };
 }
 
@@ -477,6 +468,7 @@ function applyProjectSnapshot(
     sectionLocks: snapshot.sectionLocks,
     sectionExpanded: snapshot.sectionExpanded,
     confirmedRowIds: snapshot.confirmedRowIds,
+    wcExcludedIds: snapshot.wcExcludedIds ?? [],
   }));
 }
 
@@ -1966,6 +1958,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
     
     set((state) => {
       const currentRows = state[statement];
+      let wcExcludedIds = state.wcExcludedIds ?? [];
+      if (statement === "cashFlow") {
+        const wcRow = state.cashFlow.find((r) => r.id === "wc_change");
+        const isWcChild = wcRow?.children?.some((c) => c.id === rowId);
+        if (isWcChild) {
+          const ca = getRowsForCategory(state.balanceSheet, "current_assets");
+          const cl = getRowsForCategory(state.balanceSheet, "current_liabilities");
+          const bsCaClIds = new Set([...ca, ...cl].map((r) => r.id).filter((id) => !id.startsWith("total")));
+          if (bsCaClIds.has(rowId) && !wcExcludedIds.includes(rowId)) {
+            wcExcludedIds = [...wcExcludedIds, rowId];
+          }
+        }
+      }
       const updated = removeRowDeep(currentRows, rowId);
       
       // Check if we removed the last child from Revenue, COGS, or SG&A
@@ -2017,10 +2022,18 @@ export const useModelStore = create<ModelState & ModelActions>()(
           );
         });
         
-        return { [statement]: recalculated };
+        const out: Partial<ModelState> = { [statement]: recalculated };
+        if (statement === "cashFlow" && wcExcludedIds !== (state.wcExcludedIds ?? [])) {
+          out.wcExcludedIds = wcExcludedIds;
+        }
+        return out;
       }
       
-      return { [statement]: finalUpdated };
+      const out: Partial<ModelState> = { [statement]: finalUpdated };
+      if (statement === "cashFlow" && wcExcludedIds !== (state.wcExcludedIds ?? [])) {
+        out.wcExcludedIds = wcExcludedIds;
+      }
+      return out;
     });
   },
 
@@ -2069,9 +2082,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
   ensureWcChildrenFromBS: () => {
     set((state) => {
+      const excluded = new Set(state.wcExcludedIds ?? []);
       const cashFlow = ensureWcChildrenInCashFlow(
         state.cashFlow,
-        state.balanceSheet
+        state.balanceSheet,
+        excluded
       );
       if (cashFlow === state.cashFlow) return state;
       return { cashFlow };

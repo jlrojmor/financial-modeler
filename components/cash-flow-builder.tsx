@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, Fragment } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import {
@@ -13,10 +13,40 @@ import { findTermKnowledge } from "@/lib/financial-terms-knowledge";
 import { analyzeBSItemsForCFO, type CFOItem } from "@/lib/cfo-intelligence";
 import { getSuggestedCFIItems, validateCFIItem, findCFIItem, type CFIItem } from "@/lib/cfi-intelligence";
 import { getSuggestedCFFItems, validateCFFItem, findCFFItem, type CFFItem } from "@/lib/cff-intelligence";
-import { computeRowValue } from "@/lib/calculations";
+import { computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
 // UUID helper
 function uuid() {
   return `id_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/**
+ * Infer CFO sign for an unrecognized operating item from its label.
+ * Cash outflow / use of cash → negative; inflow / source of cash → positive.
+ */
+function inferOperatingSignFromLabel(label: string): "positive" | "negative" {
+  const L = label.toLowerCase();
+  const negativePatterns = [
+    "payment", "payments", "paid", "expense", "expenses", "cost", "costs",
+    "outflow", "outflows", "charge", "charges", "loss", "losses", "write-off", "writeoff",
+    "settlement", "repayment", "funding of", "increase in receivable", "increase in inventory",
+    "decrease in payable", "accrued", "accrual", "prepaid", "deposit paid",
+    "litigation", "restructuring", "severance", "penalty", "fine", "interest paid",
+  ];
+  const positivePatterns = [
+    "receipt", "receipts", "received", "income", "revenue", "inflow", "inflows",
+    "gain", "gains", "recovery", "recoveries", "refund", "refunds", "rebate",
+    "decrease in receivable", "decrease in inventory", "increase in payable",
+    "amortization", "depreciation add-back", "non-cash", "noncash",
+    "proceeds", "collection", "collections",
+  ];
+  for (const p of negativePatterns) {
+    if (L.includes(p)) return "negative";
+  }
+  for (const p of positivePatterns) {
+    if (L.includes(p)) return "positive";
+  }
+  // Default: treat as additive (positive) as most "other operating" items are add-backs
+  return "positive";
 }
 
 type CFSSection = "operating" | "investing" | "financing";
@@ -98,12 +128,104 @@ function CFSSectionComponent({
   // Get current cashFlow from store to ensure we have the latest state
   // This ensures we always have the most up-to-date data after insertions
   const currentCashFlow = useModelStore((s) => s.cashFlow);
+  const ensureWcChildrenFromBS = useModelStore((s) => s.ensureWcChildrenFromBS);
+  const reorderCashFlowTopLevel = useModelStore((s) => s.reorderCashFlowTopLevel);
+  const reorderWcChildren = useModelStore((s) => s.reorderWcChildren);
+  const moveCashFlowRowIntoWc = useModelStore((s) => s.moveCashFlowRowIntoWc);
+  const moveCashFlowRowOutOfWc = useModelStore((s) => s.moveCashFlowRowOutOfWc);
   // Always use currentCashFlow from store as the source of truth
   const currentRows = currentCashFlow;
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [newItemLabel, setNewItemLabel] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [termKnowledge, setTermKnowledge] = useState<any>(null);
+  /** Row ids in "confirmed" state: card shows only name + Remove + Edit (collapsed to save space) */
+  const [confirmedRowIds, setConfirmedRowIds] = useState<Set<string>>(new Set());
+  const [wcSectionExpanded, setWcSectionExpanded] = useState(true);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+
+  const toggleConfirmed = (rowId: string) => {
+    setConfirmedRowIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  };
+
+  const sectionStartIndex = currentRows.findIndex((r) => {
+    if (section.id === "operating") return r.id === "net_income";
+    if (section.id === "investing") return r.id === "capex";
+    if (section.id === "financing") return r.id === "debt_issuance";
+    return false;
+  });
+  const sectionEndIndex = currentRows.findIndex((r, idx) => {
+    if (idx <= sectionStartIndex) return false;
+    if (section.id === "operating") return r.id === "operating_cf";
+    if (section.id === "investing") return r.id === "investing_cf";
+    if (section.id === "financing") return r.id === "financing_cf";
+    return false;
+  });
+
+  const handleDragStart = (e: React.DragEvent, payload: { rowId: string; isWcChild: boolean; fromTopLevelIndex?: number; fromWcChildIndex?: number }) => {
+    e.dataTransfer.setData("application/json", JSON.stringify(payload));
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleDragOver = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverId(targetId);
+  };
+
+  const handleDragLeave = () => setDragOverId(null);
+
+  const handleDrop = (
+    e: React.DragEvent,
+    target: { type: "top-level"; rowId: string; globalIndex: number } | { type: "wc-container" } | { type: "wc-child"; rowId: string; wcChildIndex: number }
+  ) => {
+    e.preventDefault();
+    setDragOverId(null);
+    const raw = e.dataTransfer.getData("application/json");
+    if (!raw) return;
+    let payload: { rowId: string; isWcChild: boolean; fromTopLevelIndex?: number; fromWcChildIndex?: number };
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const { rowId, isWcChild, fromTopLevelIndex, fromWcChildIndex } = payload;
+    if (target.type !== "wc-container" && rowId === target.rowId) return;
+
+    if (target.type === "top-level") {
+      const toIndex = target.globalIndex;
+      if (isWcChild) {
+        moveCashFlowRowOutOfWc(rowId, toIndex);
+      } else {
+        const fromIndex = fromTopLevelIndex ?? currentRows.findIndex((r) => r.id === rowId);
+        if (fromIndex === -1) return;
+        const toIndexAdj = fromIndex < toIndex ? toIndex - 1 : toIndex;
+        if (fromIndex !== toIndexAdj) reorderCashFlowTopLevel(fromIndex, toIndexAdj);
+      }
+    } else if (target.type === "wc-container") {
+      if (!isWcChild) moveCashFlowRowIntoWc(rowId);
+    } else if (target.type === "wc-child") {
+      const toIndex = target.wcChildIndex;
+      if (isWcChild) {
+        const fromIndex = fromWcChildIndex ?? currentRows.find((r) => r.id === "wc_change")?.children?.findIndex((c) => c.id === rowId) ?? -1;
+        if (fromIndex !== -1 && fromIndex !== toIndex) reorderWcChildren(fromIndex, toIndex);
+      } else {
+        moveCashFlowRowIntoWc(rowId, toIndex);
+      }
+    }
+  };
+
+  // Sync Working Capital children from Balance Sheet when operating section is shown
+  useEffect(() => {
+    if (section.id === "operating" && balanceSheet.length > 0) {
+      ensureWcChildrenFromBS();
+    }
+  }, [section.id, balanceSheet.length, ensureWcChildrenFromBS]);
   
   // Check if label is recognized - use CFI validation for investing section
   useEffect(() => {
@@ -139,11 +261,15 @@ function CFSSectionComponent({
           setValidationError(validation.suggestion || validation.reason || "⚠️ This term may not be appropriate for Financing Activities.");
         }
       } else {
-        // Use financial terms knowledge for other sections
+        // Use financial terms knowledge for operating and others
         const knowledge = findTermKnowledge(newItemLabel.trim());
         setTermKnowledge(knowledge);
         if (!knowledge && !section.standardItems.some(id => currentRows.some(r => r.id === id && r.label.toLowerCase() === newItemLabel.trim().toLowerCase()))) {
-          setValidationError("This term is not recognized. Please use standard financial terminology or select a suggestion.");
+          if (section.id === "operating") {
+            setValidationError("This term is not recognized. You can still add it; we'll infer the sign from the label.");
+          } else {
+            setValidationError("This term is not recognized. Please use standard financial terminology or select a suggestion.");
+          }
         } else {
           setValidationError(null);
         }
@@ -256,6 +382,7 @@ function CFSSectionComponent({
     return result;
   }, [currentRows, section.id]);
 
+  const historicalYears = meta?.years?.historical ?? years.filter((y) => y.endsWith("A"));
   const totalRow = sectionItems.find(r => r.id === section.totalRowId);
   const isLocked = useModelStore((s) => s.sectionLocks[section.sectionId] ?? false);
 
@@ -274,15 +401,10 @@ function CFSSectionComponent({
         return "+"; // Can be negative, but shown as + (value itself can be negative)
       }
       
-      // CFO intelligence items - check the impact
-      if (row.id.startsWith("cfo_") && row.cfsLink) {
-        if (row.cfsLink.impact === "positive") {
-          return "+";
-        } else if (row.cfsLink.impact === "negative") {
-          return "-";
-        } else {
-          return "+"; // Neutral defaults to +
-        }
+      // Custom / CFO intelligence items - check cfsLink.impact (set when recognized or inferred)
+      if (row.cfsLink?.section === "operating") {
+        if (row.cfsLink.impact === "negative") return "-";
+        return "+";
       }
     } else if (section.id === "investing") {
       // Standard CFI items
@@ -378,12 +500,8 @@ function CFSSectionComponent({
       }
     }
     // D&A is now a manual input - no auto-population
-    if (row.id === "sbc") {
-      // Sum all SBC breakdowns for this year
-      let total = 0;
-      Object.keys(sbcBreakdowns).forEach(categoryId => {
-        total += sbcBreakdowns[categoryId]?.[year] ?? 0;
-      });
+    if (row.id === "sbc" && allStatements) {
+      const total = getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns || {}, year);
       return total > 0 ? total : null;
     }
     if (row.id === "wc_change") {
@@ -415,9 +533,9 @@ function CFSSectionComponent({
   const handleAddCustomItem = () => {
     if (!newItemLabel.trim()) return;
     
-    // Validation: must be recognized term or have validation passed
-    if (validationError && !termKnowledge) {
-      return; // Don't add if validation failed
+    // For investing/financing, require recognized term; for operating, allow add even when unrecognized
+    if (section.id !== "operating" && validationError && !termKnowledge) {
+      return;
     }
 
     // Find insertion point (before the total row)
@@ -433,7 +551,27 @@ function CFSSectionComponent({
       children: [],
     };
     
-    // If term is recognized, store its knowledge
+    // Operating: set cfsLink from term knowledge or infer sign from label when unrecognized
+    if (section.id === "operating") {
+      if (termKnowledge?.cfsTreatment) {
+        newRow.cfsLink = {
+          section: "operating",
+          cfsItemId: newRow.id,
+          impact: termKnowledge.cfsTreatment.impact,
+          description: termKnowledge.cfsTreatment.description,
+        };
+      } else {
+        const impact = inferOperatingSignFromLabel(newItemLabel.trim());
+        newRow.cfsLink = {
+          section: "operating",
+          cfsItemId: newRow.id,
+          impact,
+          description: "Custom operating item (sign inferred from label)",
+        };
+      }
+    }
+    
+    // If term is recognized (investing/financing or other), store its knowledge
     if (termKnowledge) {
       // CFI item (for investing section)
       if (termKnowledge.cfiItem) {
@@ -540,14 +678,176 @@ function CFSSectionComponent({
             const isCalculated = row.id === "danda" ? false : (row.kind === "calc" && row.id !== "wc_change");
             const autoValue = linkInfo?.isAutoPopulated ? getAutoPopulatedValue(row, years[0] || "") : null;
 
-            return (
+            const globalIndex = currentRows.findIndex((r) => r.id === row.id);
+            const isTotalRow = row.id === section.totalRowId;
+            const canDrag = !isLocked && !isTotalRow && sectionStartIndex !== -1;
+            const protectedRows = ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_income"];
+            const isProtected = protectedRows.includes(row.id) || row.id === section.totalRowId;
+            const isTopConfirmed = confirmedRowIds.has(row.id);
+
+            return row.id === "wc_change" && row.children && row.children.length > 0 ? (
               <div
                 key={row.id}
-                className={`rounded-lg border ${colors.border} ${colors.bg} p-3`}
+                className={`rounded-lg border-2 ${colors.border} ${colors.bg} overflow-hidden ${dragOverId === "wc-container" ? "ring-2 ring-emerald-500" : ""}`}
+                onDragOver={(e) => handleDragOver(e, "wc-container")}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, { type: "wc-container" })}
               >
-                <div className="flex items-start justify-between mb-2">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
+                {/* WC category header */}
+                <div className="p-3">
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 flex items-center gap-1">
+                      {canDrag && (
+                        <span
+                          draggable
+                          onDragStart={(e) => handleDragStart(e, { rowId: row.id, isWcChild: false, fromTopLevelIndex: globalIndex })}
+                          className="cursor-grab active:cursor-grabbing text-slate-500 hover:text-slate-300 touch-none"
+                          title="Drag to reorder"
+                          aria-hidden
+                        >
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16"><path d="M3 4h2v2H3V4zm4 0h2v2H7V4zm4 0h2v2h-2V4zM3 8h2v2H3V8zm4 0h2v2H7V8zm4 0h2v2h-2V8zM3 12h2v2H3v-2zm4 0h2v2H7v-2zm4 0h2v2h-2v-2z"/></svg>
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setWcSectionExpanded((prev) => !prev)}
+                        className="flex items-center justify-center w-5 h-5 text-slate-400 hover:text-slate-200 transition-colors shrink-0"
+                        title={wcSectionExpanded ? "Collapse" : "Expand"}
+                        aria-expanded={wcSectionExpanded}
+                      >
+                        <span className="text-xs">{wcSectionExpanded ? "▼" : "▶"}</span>
+                      </button>
+                      {getCFOSign(row) && (
+                        <span className={`text-sm font-semibold ${getCFOSign(row) === "+" ? "text-green-400" : "text-red-400"}`}>
+                          ({getCFOSign(row)})
+                        </span>
+                      )}
+                      <span className={`text-sm font-medium ${colors.text}`}>{row.label}</span>
+                      {linkInfo && (
+                        <span className={`text-xs ${linkInfo.isAutoPopulated ? "text-emerald-400" : "text-slate-400"}`}>
+                          {linkInfo.isAutoPopulated ? "✨ " : "🔗 "}{linkInfo.text}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {years.length > 0 && (
+                    <div className="mt-2 rounded-md border border-blue-700/40 bg-blue-950/20 p-2">
+                      <div className="text-xs text-blue-300">📊 <strong>Working Capital Change</strong></div>
+                      <div className="text-[10px] text-blue-400/80 mt-1">
+                        Enter the change in each component below for historical years. Total is the sum of components. Projection years are calculated from the Balance Sheet.
+                      </div>
+                      <div className="text-[10px] text-blue-400/60 mt-1 italic">
+                        Formula: Change in (Current Assets − Current Liabilities), excluding Cash & Short-Term Debt
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Nested: WC components live INSIDE this category card */}
+                {wcSectionExpanded && (
+                  <div className="border-t border-slate-700/60 bg-slate-900/30 pl-4 pr-3 py-3 border-l-4 border-blue-600/60 rounded-br-lg">
+                    <div className="text-[10px] font-medium text-slate-400 uppercase tracking-wide mb-2">Components</div>
+                    <div className="space-y-2">
+                      {row.children.map((child, wcChildIndex) => {
+                        const isConfirmed = confirmedRowIds.has(child.id);
+                        return (
+                          <div
+                            key={child.id}
+                            className={`rounded-lg border ${colors.border} ${colors.bg} p-3 ${dragOverId === child.id ? "ring-2 ring-emerald-500" : ""}`}
+                            onDragOver={(e) => handleDragOver(e, child.id)}
+                            onDragLeave={handleDragLeave}
+                            onDrop={(e) => handleDrop(e, { type: "wc-child", rowId: child.id, wcChildIndex })}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1 min-w-0">
+                                {canDrag && (
+                                  <span
+                                    draggable
+                                    onDragStart={(e) => handleDragStart(e, { rowId: child.id, isWcChild: true, fromWcChildIndex: wcChildIndex })}
+                                    className="cursor-grab active:cursor-grabbing text-slate-500 hover:text-slate-300 touch-none shrink-0"
+                                    title="Drag to reorder or drag out of Working Capital"
+                                    aria-hidden
+                                  >
+                                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16"><path d="M3 4h2v2H3V4zm4 0h2v2H7V4zm4 0h2v2h-2V4zM3 8h2v2H3V8zm4 0h2v2H7V8zm4 0h2v2h-2V8zM3 12h2v2H3v-2zm4 0h2v2H7v-2zm4 0h2v2h-2v-2z"/></svg>
+                                  </span>
+                                )}
+                                <span className={`text-sm font-medium ${colors.text} truncate`}>{child.label}</span>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleConfirmed(child.id)}
+                                  className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                                    isConfirmed ? "bg-slate-600 text-slate-300 hover:bg-slate-500" : "bg-emerald-600 text-white hover:bg-emerald-500"
+                                  }`}
+                                >
+                                  {isConfirmed ? "Edit" : "Done"}
+                                </button>
+                                {!isLocked && (
+                                  <button type="button" onClick={() => handleRemoveItem(child.id)} className="text-xs text-red-400 hover:text-red-300">
+                                    Remove
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            {!isConfirmed && (
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-2">
+                                {historicalYears.map((year: string) => {
+                                  const storedValue = child.values?.[year] ?? 0;
+                                  const displayValue = storedToDisplay(storedValue, meta?.currencyUnit);
+                                  const unitLabel = getUnitLabel(meta?.currencyUnit);
+                                  return (
+                                    <div key={year} className="flex flex-col">
+                                      <label className={`text-xs ${colors.textLight} mb-1`}>{year}</label>
+                                      <input
+                                        type="number"
+                                        step="any"
+                                        value={displayValue === 0 ? "" : String(displayValue)}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          if (val === "" || val === "-") { updateRowValue("cashFlow", child.id, year, 0); return; }
+                                          const displayNum = Number(val);
+                                          if (!isNaN(displayNum)) updateRowValue("cashFlow", child.id, year, displayToStored(displayNum, meta?.currencyUnit));
+                                        }}
+                                        onBlur={(e) => { if (e.target.value === "") updateRowValue("cashFlow", child.id, year, 0); }}
+                                        placeholder="0"
+                                        disabled={isLocked}
+                                        className="w-full rounded border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-blue-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                                      />
+                                      {unitLabel && <span className="text-xs text-slate-500 mt-0.5">{unitLabel}</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div
+                key={row.id}
+                className={`rounded-lg border ${colors.border} ${colors.bg} p-3 ${dragOverId === row.id ? "ring-2 ring-emerald-500" : ""}`}
+                onDragOver={(e) => handleDragOver(e, row.id)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, { type: "top-level", rowId: row.id, globalIndex })}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {canDrag && (
+                        <span
+                          draggable
+                          onDragStart={(e) => handleDragStart(e, { rowId: row.id, isWcChild: false, fromTopLevelIndex: globalIndex })}
+                          className="cursor-grab active:cursor-grabbing text-slate-500 hover:text-slate-300 touch-none shrink-0"
+                          title="Drag to reorder"
+                          aria-hidden
+                        >
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16"><path d="M3 4h2v2H3V4zm4 0h2v2H7V4zm4 0h2v2h-2V4zM3 8h2v2H3V8zm4 0h2v2H7V8zm4 0h2v2h-2V8zM3 12h2v2H3v-2zm4 0h2v2H7v-2zm4 0h2v2h-2v-2z"/></svg>
+                        </span>
+                      )}
                       {getCFOSign(row) && (
                         <span className={`text-sm font-semibold ${getCFOSign(row) === "+" ? "text-green-400" : "text-red-400"}`}>
                           ({getCFOSign(row)})
@@ -556,34 +856,32 @@ function CFSSectionComponent({
                       <span className={`text-sm font-medium ${colors.text}`}>
                         {row.label}
                       </span>
-                      {isCalculated && (
+                      {!isTopConfirmed && isCalculated && (
                         <span className="text-xs text-slate-400 italic">(Calculated)</span>
                       )}
-                      {linkInfo && (
+                      {!isTopConfirmed && linkInfo && (
                         <span className={`text-xs ${linkInfo.isAutoPopulated ? "text-emerald-400" : "text-slate-400"}`}>
                           {linkInfo.isAutoPopulated ? "✨ " : "🔗 "}{linkInfo.text}
                         </span>
                       )}
-                      {autoValue !== null && autoValue !== undefined && (
+                      {!isTopConfirmed && autoValue !== null && autoValue !== undefined && (
                         <span className="text-xs text-emerald-300">
                           (Value: {storedToDisplay(autoValue, meta?.currencyUnit)} {getUnitLabel(meta?.currencyUnit)})
                         </span>
                       )}
                     </div>
                   </div>
-                  {(() => {
-                    // Protect critical totals and calculated rows
-                    const protectedRows = [
-                      "operating_cf",
-                      "investing_cf",
-                      "financing_cf", 
-                      "net_change_cash",
-                      "net_income",
-                    ];
-                    const isProtected = protectedRows.includes(row.id) || row.id === section.totalRowId;
-                    
-                    // Show Remove button for all items except protected ones, and only when not locked
-                    return !isProtected && !isLocked ? (
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => toggleConfirmed(row.id)}
+                      className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                        isTopConfirmed ? "bg-slate-600 text-slate-300 hover:bg-slate-500" : "bg-emerald-600 text-white hover:bg-emerald-500"
+                      }`}
+                    >
+                      {isTopConfirmed ? "Edit" : "Done"}
+                    </button>
+                    {!isProtected && !isLocked && (
                       <button
                         type="button"
                         onClick={() => handleRemoveItem(row.id)}
@@ -591,24 +889,40 @@ function CFSSectionComponent({
                       >
                         Remove
                       </button>
-                    ) : null;
-                  })()}
+                    )}
+                  </div>
                 </div>
 
+                {/* When confirmed, only show the header line; otherwise show full content */}
+                {!isTopConfirmed && (
+                <>
                 {/* Show auto-populated value or input fields */}
                 {/* For Net Income and SBC: show read-only auto-populated value */}
                 {/* For D&A and WC Change: show auto-populated value as suggestion, but allow input */}
                 {linkInfo?.isAutoPopulated && autoValue !== null && (row.id === "net_income" || row.id === "sbc") ? (
                   <div className="mt-2 rounded-md border border-emerald-700/40 bg-emerald-950/20 p-2">
                     <div className="text-xs text-emerald-300">
-                      ✨ Auto-populated from linked statement: {storedToDisplay(autoValue, meta?.currencyUnit)} {getUnitLabel(meta?.currencyUnit)}
+                      ✨ Auto-populated from linked statement
+                      {years.length > 0 && (
+                        <span className="ml-1">
+                          · {years.map((y) => {
+                            const v = getAutoPopulatedValue(row, y);
+                            if (v === null) return null;
+                            return (
+                              <span key={y} className="mr-2">
+                                {y}: {storedToDisplay(v, meta?.currencyUnit)}{getUnitLabel(meta?.currencyUnit) ? ` ${getUnitLabel(meta?.currencyUnit)}` : ""}
+                              </span>
+                            );
+                          }).filter(Boolean)}
+                        </span>
+                      )}
                     </div>
                     <div className="text-[10px] text-emerald-400/70 mt-1">
                       {row.id === "net_income" 
-                        ? "This value is automatically pulled from the Income Statement (Net Income row). No manual input needed."
+                        ? "Values are pulled from the Income Statement (Net Income row). No manual input needed."
                         : row.id === "sbc"
-                        ? "This value is automatically calculated from all SBC breakdowns (SG&A and COGS categories). No manual input needed."
-                        : "This value is automatically pulled from the Income Statement or SBC breakdowns. No manual input needed."}
+                        ? "Values are calculated from all SBC breakdowns (SG&A and COGS). No manual input needed."
+                        : "Values are pulled from the Income Statement or SBC breakdowns. No manual input needed."}
                     </div>
                   </div>
                 ) : !isCalculated || row.id === "danda" || row.id === "wc_change" || row.kind === "input" ? (
@@ -730,6 +1044,8 @@ function CFSSectionComponent({
                   <div className="mt-2 text-xs text-slate-400 italic">
                     Value calculated automatically from linked statements
                   </div>
+                )}
+                </>
                 )}
               </div>
             );
@@ -918,79 +1234,6 @@ function CFSSectionComponent({
           );
         })()}
 
-        {/* CFO Intelligence Suggestions (only for Operating Activities) */}
-        {section.id === "operating" && (
-          <>
-            {cfoIntelligence.length > 0 && (
-              <div className="mb-2 text-xs text-slate-400 italic">
-                💡 CFO Intelligence: Found {cfoIntelligence.length} items ({cfoIntelligence.filter(i => i.treatment === "auto_add").length} auto-added, {cfoIntelligence.filter(i => i.treatment === "suggest_review").length} suggestions)
-              </div>
-            )}
-          </>
-        )}
-        {section.id === "operating" && cfoIntelligence.length > 0 && (
-          <div className="mt-4 space-y-2">
-            {cfoIntelligence
-              .filter(item => item.treatment === "suggest_review")
-              .map(item => {
-                const alreadyAdded = currentRows.some(r => r.id === `cfo_${item.rowId}`);
-                
-                if (alreadyAdded) return null;
-                
-                return (
-                  <div
-                    key={item.rowId}
-                    className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3"
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-amber-200">
-                            💡 Suggested: {item.label}
-                          </span>
-                          <span className="text-xs text-amber-400/80">(Review needed)</span>
-                        </div>
-                        <p className="text-xs text-amber-300/70 mt-1">
-                          {item.description}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const otherOperatingIndex = rows.findIndex(r => r.id === "other_operating");
-                          const operatingCfIndex = rows.findIndex(r => r.id === "operating_cf");
-                          const insertIndex = otherOperatingIndex >= 0 ? otherOperatingIndex : 
-                                           operatingCfIndex >= 0 ? operatingCfIndex : 
-                                           rows.length;
-                          
-                          const newRow: Row = {
-                            id: `cfo_${item.rowId}`,
-                            label: `Change in ${item.label}`,
-                            kind: "calc",
-                            valueType: "currency",
-                            values: {},
-                            children: [],
-                            cfsLink: {
-                              section: "operating",
-                              cfsItemId: "other_operating",
-                              impact: item.impact,
-                              description: item.description,
-                            },
-                          };
-                          
-                          insertRow("cashFlow", insertIndex, newRow);
-                        }}
-                        className="rounded-md bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-600 transition"
-                      >
-                        Add to CFO
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        )}
-
         {/* Total Row Display */}
         {totalRow && (
           <div className={`rounded-lg border-2 ${colors.border} ${colors.bg} p-3 mt-4`}>
@@ -1032,10 +1275,17 @@ function CFSSectionComponent({
                   }}
                   autoFocus
                 />
-                {/* Validation Error */}
+                {/* Validation: red error for investing/financing when unrecognized; amber warning for operating (still allow add) */}
                 {validationError && (
-                  <div className="mb-2 rounded-md border border-red-700/40 bg-red-950/20 p-2">
-                    <div className="text-xs text-red-300">⚠️ {validationError}</div>
+                  <div className={`mb-2 rounded-md border p-2 ${section.id === "operating" && !termKnowledge ? "border-amber-700/40 bg-amber-950/20" : "border-red-700/40 bg-red-950/20"}`}>
+                    <div className={`text-xs ${section.id === "operating" && !termKnowledge ? "text-amber-300" : "text-red-300"}`}>
+                      ⚠️ {validationError}
+                      {section.id === "operating" && !termKnowledge && newItemLabel.trim() && (
+                        <span className="block mt-1 font-medium">
+                          Inferred sign: ({inferOperatingSignFromLabel(newItemLabel.trim()) === "negative" ? "−" : "+"}) — you can still add it.
+                        </span>
+                      )}
+                    </div>
                   </div>
                 )}
                 
@@ -1056,7 +1306,7 @@ function CFSSectionComponent({
                   <button
                     type="button"
                     onClick={handleAddCustomItem}
-                    disabled={!newItemLabel.trim() || (validationError && !termKnowledge) ? true : false}
+                    disabled={!newItemLabel.trim() || (section.id !== "operating" && !!validationError && !termKnowledge)}
                     className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Add

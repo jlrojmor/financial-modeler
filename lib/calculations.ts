@@ -9,6 +9,38 @@ import type { Row } from "@/types/finance";
 import { getBSCategoryForRow, getRowsForCategory } from "./bs-category-mapper";
 
 /**
+ * Total SBC for a year without double-counting.
+ * If SG&A/COGS have breakdown children, sum those category values; otherwise use "sga"/"cogs".
+ * (Summing all keys in sbcBreakdowns would double-count when both parent and breakdown keys exist.)
+ */
+export function getTotalSbcForYear(
+  incomeStatement: Row[],
+  sbcBreakdowns: Record<string, Record<string, number>>,
+  year: string
+): number {
+  let total = 0;
+  const sgaRow = incomeStatement.find((r) => r.id === "sga");
+  const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+  const sgaBreakdowns = sgaRow?.children ?? [];
+  const cogsBreakdowns = cogsRow?.children ?? [];
+  if (sgaBreakdowns.length > 0) {
+    sgaBreakdowns.forEach((b) => {
+      total += sbcBreakdowns[b.id]?.[year] ?? 0;
+    });
+  } else {
+    total += sbcBreakdowns["sga"]?.[year] ?? 0;
+  }
+  if (cogsBreakdowns.length > 0) {
+    cogsBreakdowns.forEach((b) => {
+      total += sbcBreakdowns[b.id]?.[year] ?? 0;
+    });
+  } else {
+    total += sbcBreakdowns["cogs"]?.[year] ?? 0;
+  }
+  return total;
+}
+
+/**
  * Get the computed value for a row in a specific year
  * Handles: sum of children, formulas, inputs
  */
@@ -23,18 +55,32 @@ export function computeRowValue(
 ): number {
   // Special case: WC Change is input for all historical years, calculated for projection years
   if (row.id === "wc_change" && allStatements) {
-    // Check if year is historical (ends with "A") or projection (ends with "E")
     const isHistorical = year.endsWith("A");
     const isProjection = year.endsWith("E");
-    
+
     if (isHistorical) {
-      // All historical years are manual input
+      // Historical: if we have component children, sum them; otherwise use aggregate input
+      if (row.children && row.children.length > 0) {
+        return row.children.reduce(
+          (sum, child) =>
+            sum +
+            computeRowValue(
+              child,
+              year,
+              allRows,
+              statementRows,
+              allStatements,
+              sbcBreakdowns,
+              danaBreakdowns
+            ),
+          0
+        );
+      }
       return row.values?.[year] ?? 0;
-    } else if (isProjection) {
-      // Projection years are calculated from BS changes
+    }
+    if (isProjection) {
       return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns);
     }
-    // Default: treat as input if year format is unclear
     return row.values?.[year] ?? 0;
   }
   
@@ -153,13 +199,8 @@ function computeFormula(
     return 0;
   }
   
-  if (rowId === "sbc" && isInCFS && sbcBreakdowns) {
-    // Calculate total SBC from all breakdowns for this year
-    let total = 0;
-    Object.keys(sbcBreakdowns).forEach(categoryId => {
-      total += sbcBreakdowns[categoryId]?.[year] ?? 0;
-    });
-    return total;
+  if (rowId === "sbc" && isInCFS && sbcBreakdowns && allStatements) {
+    return getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns, year);
   }
   
   // Working Capital Change calculation from Balance Sheet
@@ -229,60 +270,57 @@ function computeFormula(
   }
   
   if (rowId === "operating_cf") {
-    // For CFS operating_cf, pull net_income and danda from IS, SBC from breakdowns
-    const netIncome = isInCFS && allStatements 
+    // Sum all operating section items (between net_income and operating_cf).
+    // Only TOP-LEVEL rows are iterated, so wc_change is included exactly once (its value
+    // is the sum of its children or stored aggregate; children are not added again).
+    // All line items use the same rule: add the row value. For wc_change, the stored value
+    // is already the CF impact (projection: -rawChange; historical: sum of signed components).
+    const netIncomeIndex = statementRows.findIndex((r) => r.id === "net_income");
+    const operatingCfIndex = statementRows.findIndex((r) => r.id === "operating_cf");
+
+    if (netIncomeIndex >= 0 && operatingCfIndex > netIncomeIndex) {
+      let total = 0;
+      for (let i = netIncomeIndex; i < operatingCfIndex; i++) {
+        const item = statementRows[i];
+        if (item.id === "operating_cf") continue;
+        const value = findRowValue(statementRows, item.id, year);
+        total += value;
+      }
+      return total;
+    }
+
+    // Fallback: hardcoded formula when structure is unexpected
+    const netIncome = isInCFS && allStatements
       ? findRowValue(allStatements.incomeStatement, "net_income", year)
       : findRowValue(statementRows, "net_income", year);
     const danda = isInCFS && allStatements
       ? findRowValue(allStatements.incomeStatement, "danda", year)
       : findRowValue(statementRows, "danda", year);
-    const sbc = isInCFS && sbcBreakdowns
-      ? (() => {
-          let total = 0;
-          Object.keys(sbcBreakdowns).forEach(categoryId => {
-            total += sbcBreakdowns[categoryId]?.[year] ?? 0;
-          });
-          return total;
-        })()
+    const sbc = isInCFS && sbcBreakdowns && allStatements
+      ? getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns, year)
       : findRowValue(statementRows, "sbc", year);
     const wcChange = findRowValue(statementRows, "wc_change", year);
     const otherOperating = findRowValue(statementRows, "other_operating", year);
-    
-    // Add CFO intelligence items (auto-detected BS items that flow to CFO)
-    // These are items with IDs like "cfo_${bsRowId}" that are calculated from BS changes
     let cfoIntelligenceItems = 0;
     if (isInCFS && allStatements) {
-      // Find all CFO intelligence items (rows with IDs starting with "cfo_")
-      const cfoItems = statementRows.filter(r => r.id.startsWith("cfo_"));
-      for (const cfoItem of cfoItems) {
-        // Extract the original BS row ID (remove "cfo_" prefix)
-        const bsRowId = cfoItem.id.replace("cfo_", "");
-        const bsRow = allStatements.balanceSheet.find(r => r.id === bsRowId);
-        
-        if (bsRow && cfoItem.cfsLink) {
-          // Calculate change from previous year
-          const currentValue = bsRow.values?.[year] ?? 0;
-          // Find previous year
-          const yearIndex = allStatements.balanceSheet[0]?.values ? 
-            Object.keys(allStatements.balanceSheet[0].values).indexOf(year) : -1;
-          const previousYear = yearIndex > 0 ? 
-            Object.keys(allStatements.balanceSheet[0].values)[yearIndex - 1] : null;
-          const previousValue = previousYear ? (bsRow.values?.[previousYear] ?? 0) : 0;
-          const change = currentValue - previousValue;
-          
-          // Apply impact based on cfsLink.impact
-          if (cfoItem.cfsLink.impact === "positive") {
-            cfoIntelligenceItems += change; // Increase in liability = positive CF
-          } else if (cfoItem.cfsLink.impact === "negative") {
-            cfoIntelligenceItems -= change; // Increase in liability = negative CF
-          } else {
-            cfoIntelligenceItems += change; // Neutral - just add the change
-          }
-        }
+      for (const r of statementRows) {
+        if (!r.id.startsWith("cfo_") || !r.cfsLink) continue;
+        const bsRowId = r.id.replace("cfo_", "");
+        const bsRow = allStatements.balanceSheet.find((x) => x.id === bsRowId);
+        if (!bsRow) continue;
+        const allYears = allStatements.balanceSheet[0]?.values
+          ? Object.keys(allStatements.balanceSheet[0].values).sort()
+          : [];
+        const yearIdx = allYears.indexOf(year);
+        const prevYear = yearIdx > 0 ? allYears[yearIdx - 1] : null;
+        const curr = bsRow.values?.[year] ?? 0;
+        const prev = prevYear ? (bsRow.values?.[prevYear] ?? 0) : 0;
+        const change = curr - prev;
+        if (r.cfsLink.impact === "negative") cfoIntelligenceItems -= change;
+        else cfoIntelligenceItems += change;
       }
     }
-    
-    return netIncome + danda + sbc - wcChange + otherOperating + cfoIntelligenceItems;
+    return netIncome + danda + sbc + wcChange + otherOperating + cfoIntelligenceItems;
   }
 
   if (rowId === "investing_cf") {

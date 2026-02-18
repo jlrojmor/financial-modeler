@@ -10,6 +10,7 @@ import {
   createBalanceSheetTemplate,
   createCashFlowTemplate,
 } from "@/lib/statement-templates";
+import { getRowsForCategory } from "@/lib/bs-category-mapper";
 
 /**
  * Helpers
@@ -58,6 +59,39 @@ function removeRowDeep(rows: Row[], rowId: string): Row[] {
     });
 }
 
+/** Find a row anywhere in the tree by id */
+function findRowDeep(rows: Row[], rowId: string): Row | null {
+  for (const r of rows) {
+    if (r.id === rowId) return r;
+    if (r.children?.length) {
+      const found = findRowDeep(r.children, rowId);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/** Add an existing row as child of parentId (for moving into WC, etc.) */
+function addExistingChildToParent(
+  rows: Row[],
+  parentId: string,
+  childRow: Row,
+  atIndex?: number
+): Row[] {
+  return rows.map((r) => {
+    if (r.id !== parentId) {
+      if (r.children?.length) {
+        return { ...r, children: addExistingChildToParent(r.children, parentId, childRow, atIndex) };
+      }
+      return r;
+    }
+    const children = [...(r.children ?? [])];
+    const idx = atIndex ?? children.length;
+    children.splice(idx, 0, childRow);
+    return { ...r, children };
+  });
+}
+
 function updateRowKindDeep(
   rows: Row[],
   rowId: string,
@@ -77,6 +111,63 @@ function updateRowKindDeep(
 function uuid() {
   // Simple, reliable unique id without crypto
   return `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+/**
+ * Ensure wc_change has one child per BS current asset (except cash) and current liability (except short-term debt).
+ * Only adds missing children; preserves existing children and their values.
+ */
+function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[]): Row[] {
+  if (balanceSheet.length === 0) return cashFlow;
+
+  const currentAssets = getRowsForCategory(balanceSheet, "current_assets");
+  const currentLiabilities = getRowsForCategory(balanceSheet, "current_liabilities");
+  const excludeIds = new Set([
+    "cash",
+    "st_debt",
+    "total_current_assets",
+    "total_current_liabilities",
+  ]);
+  const desired = [
+    ...currentAssets.filter(
+      (r) => !excludeIds.has(r.id) && !r.id.startsWith("total")
+    ),
+    ...currentLiabilities.filter(
+      (r) => !excludeIds.has(r.id) && !r.id.startsWith("total")
+    ),
+  ];
+  const desiredById = new Map(desired.map((r) => [r.id, r]));
+  const desiredList = Array.from(desiredById.values());
+
+  return cashFlow.map((r) => {
+    if (r.id !== "wc_change") {
+      return r.children?.length
+        ? { ...r, children: ensureWcChildrenInCashFlow(r.children, balanceSheet) }
+        : r;
+    }
+    const existingChildren = r.children ?? [];
+    const existingById = new Map(existingChildren.map((c) => [c.id, c]));
+    // Build exactly one child per desired id (dedupe); use existing if present (keep values), else add new
+    const newChildren: Row[] = [];
+    const seen = new Set<string>();
+    for (const bs of desiredList) {
+      if (seen.has(bs.id)) continue;
+      seen.add(bs.id);
+      const existing = existingById.get(bs.id);
+      if (existing) {
+        newChildren.push(existing);
+      } else {
+        newChildren.push({
+          id: bs.id,
+          label: bs.label,
+          kind: "input" as const,
+          valueType: "currency" as const,
+          values: {} as Record<string, number>,
+        });
+      }
+    }
+    return { ...r, children: newChildren };
+  });
 }
 
 /**
@@ -146,7 +237,19 @@ export type ModelActions = {
   removeRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string) => void;
   updateRowValue: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, year: string, value: number) => void;
   updateRowKind: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, kind: "input" | "calc" | "subtotal" | "total") => void;
-  
+
+  /** Sync Working Capital change children from Balance Sheet (CA except cash, CL except short-term debt). */
+  ensureWcChildrenFromBS: () => void;
+
+  /** Cash Flow builder: reorder top-level row (visual order only). */
+  reorderCashFlowTopLevel: (fromIndex: number, toIndex: number) => void;
+  /** Cash Flow builder: reorder children of wc_change. */
+  reorderWcChildren: (fromIndex: number, toIndex: number) => void;
+  /** Cash Flow builder: move a row into Working Capital (becomes child of wc_change, included in WC subtotal). */
+  moveCashFlowRowIntoWc: (rowId: string, insertAtIndex?: number) => void;
+  /** Cash Flow builder: move a row out of Working Capital (becomes top-level operating item, no longer in WC subtotal). */
+  moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number) => void;
+
   // SBC annotation
   updateSbcValue: (categoryId: string, year: string, value: number) => void;
   
@@ -1863,6 +1966,100 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const currentRows = state[statement];
       const updated = updateRowKindDeep(currentRows, rowId, kind);
       return { [statement]: updated };
+    });
+  },
+
+  ensureWcChildrenFromBS: () => {
+    set((state) => {
+      const cashFlow = ensureWcChildrenInCashFlow(
+        state.cashFlow,
+        state.balanceSheet
+      );
+      if (cashFlow === state.cashFlow) return state;
+      return { cashFlow };
+    });
+  },
+
+  reorderCashFlowTopLevel: (fromIndex, toIndex) => {
+    set((state) => {
+      const rows = [...state.cashFlow];
+      if (fromIndex < 0 || fromIndex >= rows.length || toIndex < 0 || toIndex >= rows.length) return state;
+      const [removed] = rows.splice(fromIndex, 1);
+      rows.splice(toIndex, 0, removed);
+      const allYears = [
+        ...(state.meta.years.historical || []),
+        ...(state.meta.years.projection || []),
+      ];
+      let recalculated = rows;
+      const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow: rows };
+      allYears.forEach((year) => {
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+      });
+      return { cashFlow: recalculated };
+    });
+  },
+
+  reorderWcChildren: (fromIndex, toIndex) => {
+    set((state) => {
+      const wcRow = state.cashFlow.find((r) => r.id === "wc_change");
+      if (!wcRow?.children?.length) return state;
+      const children = [...wcRow.children];
+      if (fromIndex < 0 || fromIndex >= children.length || toIndex < 0 || toIndex >= children.length) return state;
+      const [removed] = children.splice(fromIndex, 1);
+      children.splice(toIndex, 0, removed);
+      const cashFlow = state.cashFlow.map((r) => (r.id === "wc_change" ? { ...r, children } : r));
+      const allYears = [...(state.meta.years.historical || []), ...(state.meta.years.projection || [])];
+      let recalculated = cashFlow;
+      const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
+      allYears.forEach((year) => {
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+      });
+      return { cashFlow: recalculated };
+    });
+  },
+
+  moveCashFlowRowIntoWc: (rowId, insertAtIndex) => {
+    set((state) => {
+      const row = findRowDeep(state.cashFlow, rowId);
+      if (!row) return state;
+      if (row.id === "wc_change" || row.id === "operating_cf" || row.id === "net_income" || row.id === "danda" || row.id === "sbc") return state;
+      let cashFlow = removeRowDeep(state.cashFlow, rowId);
+      const wcRow = cashFlow.find((r) => r.id === "wc_change");
+      if (!wcRow) return state;
+      const child = { ...row, children: undefined };
+      const atIndex = insertAtIndex ?? (wcRow.children?.length ?? 0);
+      cashFlow = addExistingChildToParent(cashFlow, "wc_change", child, atIndex);
+      const allYears = [...(state.meta.years.historical || []), ...(state.meta.years.projection || [])];
+      let recalculated = cashFlow;
+      const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
+      allYears.forEach((year) => {
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+      });
+      return { cashFlow: recalculated };
+    });
+  },
+
+  moveCashFlowRowOutOfWc: (rowId, insertAtTopLevelIndex) => {
+    set((state) => {
+      const wcRow = state.cashFlow.find((r) => r.id === "wc_change");
+      const childIndex = wcRow?.children?.findIndex((c) => c.id === rowId) ?? -1;
+      if (childIndex === -1) return state;
+      const row = wcRow!.children![childIndex];
+      const newWcChildren = wcRow!.children!.filter((c) => c.id !== rowId);
+      let cashFlow = state.cashFlow.map((r) =>
+        r.id === "wc_change" ? { ...r, children: newWcChildren } : r
+      );
+      const wcChangeIndex = cashFlow.findIndex((r) => r.id === "wc_change");
+      const insertAt = insertAtTopLevelIndex ?? Math.min(wcChangeIndex + 1, cashFlow.length);
+      const topLevelRow = { ...row, children: undefined };
+      cashFlow = [...cashFlow.slice(0, insertAt), topLevelRow, ...cashFlow.slice(insertAt)];
+      const allYears = [...(state.meta.years.historical || []), ...(state.meta.years.projection || [])];
+      let recalculated = cashFlow;
+      const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
+      allYears.forEach((year) => {
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+      });
+      return { cashFlow: recalculated };
     });
   },
 

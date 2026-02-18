@@ -10,7 +10,7 @@ import { getBSCategoryForRow, getRowsForCategory } from "./bs-category-mapper";
 
 /**
  * Total SBC for a year without double-counting.
- * If SG&A/COGS have breakdown children, sum those category values; otherwise use "sga"/"cogs".
+ * If SG&A / COGS / R&D have breakdown children, sum those category values; otherwise use "sga" / "cogs" / "rd".
  * (Summing all keys in sbcBreakdowns would double-count when both parent and breakdown keys exist.)
  */
 export function getTotalSbcForYear(
@@ -21,8 +21,10 @@ export function getTotalSbcForYear(
   let total = 0;
   const sgaRow = incomeStatement.find((r) => r.id === "sga");
   const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+  const rdRow = incomeStatement.find((r) => r.id === "rd");
   const sgaBreakdowns = sgaRow?.children ?? [];
   const cogsBreakdowns = cogsRow?.children ?? [];
+  const rdBreakdowns = rdRow?.children ?? [];
   if (sgaBreakdowns.length > 0) {
     sgaBreakdowns.forEach((b) => {
       total += sbcBreakdowns[b.id]?.[year] ?? 0;
@@ -36,6 +38,13 @@ export function getTotalSbcForYear(
     });
   } else {
     total += sbcBreakdowns["cogs"]?.[year] ?? 0;
+  }
+  if (rdBreakdowns.length > 0) {
+    rdBreakdowns.forEach((b) => {
+      total += sbcBreakdowns[b.id]?.[year] ?? 0;
+    });
+  } else {
+    total += sbcBreakdowns["rd"]?.[year] ?? 0;
   }
   return total;
 }

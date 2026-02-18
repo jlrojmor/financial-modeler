@@ -790,10 +790,13 @@ export function exportSbcDisclosureToExcel(
 ): number {
   const sgaRow = incomeStatement.find((r) => r.id === "sga");
   const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+  const rdRow = incomeStatement.find((r) => r.id === "rd");
   const sgaBreakdowns = sgaRow?.children ?? [];
   const cogsBreakdowns = cogsRow?.children ?? [];
+  const rdBreakdowns = rdRow?.children ?? [];
   const hasSgaBreakdowns = sgaBreakdowns.length > 0;
   const hasCogsBreakdowns = cogsBreakdowns.length > 0;
+  const hasRdBreakdowns = rdBreakdowns.length > 0;
   
   // Helper to get SBC value
   const getSbcValue = (categoryId: string, year: string): number => {
@@ -816,6 +819,13 @@ export function exportSbcDisclosureToExcel(
       });
     } else {
       if (getSbcValue("cogs", y) !== 0) hasAnySbc = true;
+    }
+    if (hasRdBreakdowns) {
+      rdBreakdowns.forEach((b) => {
+        if (getSbcValue(b.id, y) !== 0) hasAnySbc = true;
+      });
+    } else {
+      if (getSbcValue("rd", y) !== 0) hasAnySbc = true;
     }
   });
   
@@ -932,6 +942,43 @@ export function exportSbcDisclosureToExcel(
       });
       ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
       sbcComponentRows.push(startRow); // Track this row for total formula
+      startRow += 1;
+    }
+  }
+  
+  // R&D SBC
+  if (hasRdBreakdowns) {
+    rdBreakdowns.forEach((breakdown) => {
+      const breakdownSbc = years.map((y) => getSbcValue(breakdown.id, y));
+      if (breakdownSbc.some(v => v !== 0)) {
+        ws.getCell(startRow, 1).value = breakdown.label;
+        years.forEach((y, idx) => {
+          const storedValue = getSbcValue(breakdown.id, y);
+          const displayValue = currencyUnit && currencyUnit !== "units" 
+            ? storedToDisplay(storedValue, currencyUnit as CurrencyUnit)
+            : storedValue;
+          ws.getCell(startRow, 2 + idx).value = displayValue;
+          ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0_);("$"#,##0)';
+        });
+        ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+        sbcComponentRows.push(startRow);
+        startRow += 1;
+      }
+    });
+  } else {
+    const rdSbc = years.map((y) => getSbcValue("rd", y));
+    if (rdSbc.some(v => v !== 0)) {
+      ws.getCell(startRow, 1).value = "Research and development";
+      years.forEach((y, idx) => {
+        const storedValue = getSbcValue("rd", y);
+        const displayValue = currencyUnit && currencyUnit !== "units" 
+          ? storedToDisplay(storedValue, currencyUnit as CurrencyUnit)
+          : storedValue;
+        ws.getCell(startRow, 2 + idx).value = displayValue;
+        ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
+      });
+      ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+      sbcComponentRows.push(startRow);
       startRow += 1;
     }
   }

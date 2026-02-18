@@ -25,16 +25,18 @@ export default function SbcBreakdownSection() {
     return meta?.years?.historical ?? [];
   }, [meta]);
 
-  // Find SG&A and COGS rows to get their breakdowns
+  // Find SG&A, COGS, and R&D rows to get their breakdowns
   const sgaRow = incomeStatement.find((r) => r.id === "sga");
   const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+  const rdRow = incomeStatement.find((r) => r.id === "rd");
 
   const sgaBreakdowns = sgaRow?.children ?? [];
   const cogsBreakdowns = cogsRow?.children ?? [];
+  const rdBreakdowns = rdRow?.children ?? [];
 
-  // Get all available categories (COGS and Operating Expenses breakdowns)
+  // Get all available categories (COGS, SG&A, and R&D breakdowns)
   const availableCategories = useMemo(() => {
-    const categories: Array<{ id: string; label: string; type: "COGS" | "Operating Expenses" }> = [];
+    const categories: Array<{ id: string; label: string; type: "COGS" | "Operating Expenses" | "R&D" }> = [];
     
     // Add COGS breakdowns
     cogsBreakdowns.forEach((breakdown) => {
@@ -45,7 +47,7 @@ export default function SbcBreakdownSection() {
       });
     });
     
-    // Add Operating Expenses breakdowns (SG&A breakdowns)
+    // Add Operating Expenses breakdowns (SG&A)
     sgaBreakdowns.forEach((breakdown) => {
       categories.push({
         id: breakdown.id,
@@ -54,8 +56,17 @@ export default function SbcBreakdownSection() {
       });
     });
     
+    // Add R&D breakdowns
+    rdBreakdowns.forEach((breakdown) => {
+      categories.push({
+        id: breakdown.id,
+        label: breakdown.label,
+        type: "R&D",
+      });
+    });
+    
     return categories;
-  }, [cogsBreakdowns, sgaBreakdowns]);
+  }, [cogsBreakdowns, sgaBreakdowns, rdBreakdowns]);
 
   // Calculate total SBC for each year
   const totalSbcByYear = useMemo(() => {
@@ -141,7 +152,7 @@ function SbcCategoryCard({
 }: {
   categoryId: string;
   categoryLabel: string;
-  categoryType: "COGS" | "Operating Expenses";
+  categoryType: "COGS" | "Operating Expenses" | "R&D";
   years: string[];
   meta: any;
   sbcBreakdowns: Record<string, Record<string, number>>;

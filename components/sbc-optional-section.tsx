@@ -12,10 +12,14 @@ export default function SbcOptionalSection() {
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const incomeStatement = useModelStore((s) => s.incomeStatement);
   
-  // Check if there are breakdown categories available
+  // Check if there are breakdown categories available (SG&A, COGS, or R&D)
   const sgaRow = incomeStatement.find((r) => r.id === "sga");
   const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-  const hasCategories = (sgaRow?.children?.length ?? 0) > 0 || (cogsRow?.children?.length ?? 0) > 0;
+  const rdRow = incomeStatement.find((r) => r.id === "rd");
+  const hasCategories =
+    (sgaRow?.children?.length ?? 0) > 0 ||
+    (cogsRow?.children?.length ?? 0) > 0 ||
+    (rdRow?.children?.length ?? 0) > 0;
   
   // Always start with null to show the question first
   // The question should ALWAYS be visible - Yes/No controls whether breakdown is shown
@@ -49,7 +53,7 @@ export default function SbcOptionalSection() {
           you've already set up in COGS and Operating Expenses.
         </p>
         <p className="text-xs text-amber-400/70 italic">
-          💡 To add SBC breakdowns, first add breakdown categories to COGS or Operating Expenses (SG&A).
+          💡 To add SBC breakdowns, first add breakdown categories to COGS or Operating Expenses (SG&A / R&D).
         </p>
       </div>
     );

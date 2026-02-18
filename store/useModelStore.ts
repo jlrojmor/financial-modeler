@@ -2492,12 +2492,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
       });
       
       // Recalculate all formulas for all new years
+      const sbcBreakdowns = state.sbcBreakdowns;
+      const danaBreakdowns = state.danaBreakdowns;
       allNewYears.forEach((year) => {
         const allStatements = { incomeStatement, balanceSheet, cashFlow };
-        const sbcBreakdowns = state.sbcBreakdowns;
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns);
-        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns);
-        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns);
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
       });
       
       return {

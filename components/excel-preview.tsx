@@ -823,10 +823,13 @@ export default function ExcelPreview() {
             {(() => {
               const sgaRow = incomeStatement.find((r) => r.id === "sga");
               const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+              const rdRow = incomeStatement.find((r) => r.id === "rd");
               const sgaBreakdowns = sgaRow?.children ?? [];
               const cogsBreakdowns = cogsRow?.children ?? [];
+              const rdBreakdowns = rdRow?.children ?? [];
               const hasSgaBreakdowns = sgaBreakdowns.length > 0;
               const hasCogsBreakdowns = cogsBreakdowns.length > 0;
+              const hasRdBreakdowns = rdBreakdowns.length > 0;
               
               // Check if there's any SBC data
               let hasAnySbc = false;
@@ -844,6 +847,13 @@ export default function ExcelPreview() {
                   });
                 } else {
                   if (sbcBreakdowns["cogs"]?.[y]) hasAnySbc = true;
+                }
+                if (hasRdBreakdowns) {
+                  rdBreakdowns.forEach((b) => {
+                    if (sbcBreakdowns[b.id]?.[y]) hasAnySbc = true;
+                  });
+                } else {
+                  if (sbcBreakdowns["rd"]?.[y]) hasAnySbc = true;
                 }
               });
               
@@ -951,6 +961,51 @@ export default function ExcelPreview() {
                     );
                   })()}
 
+                  {/* R&D SBC */}
+                  {hasRdBreakdowns ? (
+                    rdBreakdowns.map((breakdown) => {
+                      const breakdownSbc = years.map((y) => sbcBreakdowns[breakdown.id]?.[y] ?? 0);
+                      const hasAnySbc = breakdownSbc.some(v => v !== 0);
+                      if (!hasAnySbc) return null;
+                      
+                      return (
+                        <tr key={breakdown.id} className="border-b border-amber-900/30 bg-amber-950/10">
+                          <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
+                            {breakdown.label}
+                          </td>
+                          {years.map((y) => {
+                            const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
+                            return (
+                              <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                                {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    }).filter(Boolean)
+                  ) : (() => {
+                    const rdSbc = years.map((y) => sbcBreakdowns["rd"]?.[y] ?? 0);
+                    const hasAnySbc = rdSbc.some(v => v !== 0);
+                    if (!hasAnySbc) return null;
+                    
+                    return (
+                      <tr className="border-b border-amber-900/30 bg-amber-950/10">
+                        <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
+                          Research and development
+                        </td>
+                        {years.map((y) => {
+                          const value = sbcBreakdowns["rd"]?.[y] ?? 0;
+                          return (
+                            <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                              {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })()}
+
                   {/* Total SBC Row */}
                   {(() => {
                     const totalSbcByYear = years.map((y) => {
@@ -968,6 +1023,13 @@ export default function ExcelPreview() {
                         });
                       } else {
                         total += sbcBreakdowns["cogs"]?.[y] ?? 0;
+                      }
+                      if (hasRdBreakdowns) {
+                        rdBreakdowns.forEach((b) => {
+                          total += sbcBreakdowns[b.id]?.[y] ?? 0;
+                        });
+                      } else {
+                        total += sbcBreakdowns["rd"]?.[y] ?? 0;
                       }
                       return total;
                     });

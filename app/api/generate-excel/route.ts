@@ -26,13 +26,15 @@ export async function POST(request: Request) {
     
     // Income Statement (first statement - includes currency note and headers)
     currentRow = exportStatementToExcel(
-      ws, 
-      modelState.incomeStatement, 
-      years, 
-      currentRow, 
+      ws,
+      modelState.incomeStatement,
+      years,
+      currentRow,
       modelState.meta.currencyUnit,
-      undefined, // no statement label for first statement
-      true // isFirstStatement
+      undefined,
+      true,
+      wb,
+      "IS"
     );
     
     // Add SBC Disclosure section below Income Statement
@@ -49,45 +51,40 @@ export async function POST(request: Request) {
     
     // Balance Sheet (below SBC - add statement header)
     if (modelState.balanceSheet && modelState.balanceSheet.length > 0) {
-      const balanceSheetStartRow = currentRow;
       currentRow = exportStatementToExcel(
-        ws, 
-        modelState.balanceSheet, 
-        years, 
-        currentRow, 
+        ws,
+        modelState.balanceSheet,
+        years,
+        currentRow,
         modelState.meta.currencyUnit,
-        "Balance Sheet", // statement label
-        false // not first statement
+        "Balance Sheet",
+        false,
+        wb,
+        "BS"
       );
-      
-      // Calculate where Balance Sheet data actually starts:
-      // - balanceSheetStartRow: row before statement label
-      // - +2: spacing before statement label
-      // - +1: statement label row
-      // - +1: first data row (startRow + 1 in exportStatementToExcel)
-      const balanceSheetDataStartRow = balanceSheetStartRow + 2 + 1 + 1;
-      
-      // Add Balance Check section after Balance Sheet
       currentRow = exportBalanceCheckToExcel(
         ws,
         modelState.balanceSheet,
         years,
         currentRow,
-        balanceSheetDataStartRow,
-        modelState.meta.currencyUnit
+        0,
+        modelState.meta.currencyUnit,
+        "BS"
       );
     }
     
     // Cash Flow Statement (below Balance Sheet - add statement header)
     if (modelState.cashFlow && modelState.cashFlow.length > 0) {
       currentRow = exportStatementToExcel(
-        ws, 
-        modelState.cashFlow, 
-        years, 
-        currentRow, 
+        ws,
+        modelState.cashFlow,
+        years,
+        currentRow,
         modelState.meta.currencyUnit,
-        "Cash Flow Statement", // statement label
-        false // not first statement
+        "Cash Flow Statement",
+        false,
+        wb,
+        "CFS"
       );
     }
     

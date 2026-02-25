@@ -279,8 +279,6 @@ export default function IncomeStatementBuilder() {
           {items.map((row) => {
             const globalIndex = incomeStatement.findIndex((r) => r.id === row.id);
             const glossaryItem = findGlossaryItem(row.label);
-            // Only mark as calculated if it's truly a calculated row (not input rows that sum children)
-            // Input rows like rev, cogs, sga can have children but should still be editable
             const isCalculated = (row.kind === "calc" || row.kind === "total") && 
                                  !["rev", "cogs", "sga", "danda", "tax", "interest_expense", "interest_income", "other_income"].includes(row.id);
             

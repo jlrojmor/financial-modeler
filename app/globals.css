@@ -24,3 +24,18 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.font-landing {
+  font-family: var(--font-plus-jakarta), ui-sans-serif, sans-serif;
+}
+
+/* Landing page: dark blue-grey with gradient + subtle texture (not solid blue) */
+.landing-bg {
+  background-color: #14191e;
+  background-image:
+    url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E"),
+    /* Soft gradient: blue-grey to charcoal so it doesn’t read as flat blue */
+    radial-gradient(ellipse 100% 80% at 50% 0%, rgba(28, 34, 42, 0.6) 0%, transparent 55%),
+    radial-gradient(ellipse 120% 100% at 50% 50%, rgba(22, 28, 35, 0.4) 0%, transparent 70%);
+  background-attachment: fixed;
+}

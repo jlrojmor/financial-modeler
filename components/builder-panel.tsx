@@ -2,10 +2,11 @@
 
 import { useMemo, useState, useEffect } from "react";
 import { useModelStore } from "@/store/useModelStore";
-import StatementBuilder from "@/components/statement-builder";
 import IncomeStatementBuilder from "@/components/income-statement-builder";
 import BalanceSheetBuilder from "@/components/balance-sheet-builder-unified";
 import CashFlowBuilder from "@/components/cash-flow-builder";
+import ISBuildView from "@/components/is-build-view";
+import RevenueProjectionStep from "@/components/revenue-projection-step";
 import CollapsibleSection from "@/components/collapsible-section";
 import YearsEditor from "@/components/years-editor";
 import { checkBalanceSheetBalance } from "@/lib/calculations";
@@ -213,13 +214,7 @@ export default function BuilderPanel() {
           </div>
         )}
 
-        {currentStepId === "is_build" && (
-          <StatementBuilder
-            statement="incomeStatement"
-            statementLabel="Income Statement Structure"
-            description="Review and customize your Income Statement structure. Add or remove line items as needed."
-          />
-        )}
+        {currentStepId === "is_build" && <ISBuildView />}
 
         {currentStepId === "bs_build" && (
           <BalanceSheetBuilder />
@@ -229,7 +224,9 @@ export default function BuilderPanel() {
           <CashFlowBuilder />
         )}
 
-        {!["historicals", "is_build", "bs_build", "cfs_build"].includes(currentStepId) && (
+        {currentStepId === "projections" && <RevenueProjectionStep />}
+
+        {!["historicals", "is_build", "bs_build", "cfs_build", "projections"].includes(currentStepId) && (
           <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-8 text-center">
             <p className="text-sm text-slate-400">
               Step-specific builder coming soon for: <span className="text-slate-200">{currentStepId}</span>

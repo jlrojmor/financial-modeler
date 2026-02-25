@@ -5,6 +5,7 @@ import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { formatCurrencyDisplay, storedToDisplay, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
 import { checkBalanceSheetBalance, computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
+import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
 import { findCFIItem } from "@/lib/cfi-intelligence";
 import { findCFFItem } from "@/lib/cff-intelligence";
 
@@ -284,7 +285,8 @@ function StatementTable({
   toggleRow,
   allStatements,
   sbcBreakdowns,
-  danaBreakdowns
+  danaBreakdowns,
+  projectedRevenue
 }: { 
   rows: Row[]; 
   label: string; 
@@ -296,6 +298,8 @@ function StatementTable({
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
   sbcBreakdowns?: Record<string, Record<string, number>>;
   danaBreakdowns?: Record<string, number>;
+  /** For Income Statement: rev and its direct children use this for projection years (sum of IS Build breakdowns). */
+  projectedRevenue?: Record<string, Record<string, number>>;
 }) {
   const forStatement: FlattenOptions["forStatement"] =
     label === "Cash Flow Statement" ? "cashflow" : label === "Balance Sheet" ? "balance" : "income";
@@ -515,6 +519,13 @@ function StatementTable({
               // Don't recompute here to avoid recursion - values should already be stored
               let storedValue = row.values?.[y] ?? 0;
               
+              // INCOME STATEMENT REVENUE: projection years use engine (sum of IS Build breakdowns per stream)
+              const isProjectionYear = y.endsWith("E");
+              const isRevenueRow = label === "Income Statement" && (row.id === "rev" || parentId === "rev");
+              if (label === "Income Statement" && projectedRevenue && isProjectionYear && isRevenueRow) {
+                storedValue = projectedRevenue[row.id]?.[y] ?? storedValue;
+              }
+              
               // FOR BALANCE SHEET TOTALS: ALWAYS RECALCULATE ON THE FLY
               // This ensures totals reflect ONLY items that are actually in the builder
               // When items are removed, totals must immediately reflect the change
@@ -685,6 +696,7 @@ export default function ExcelPreview() {
   const cashFlow = useModelStore((s) => s.cashFlow);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
+  const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -731,6 +743,42 @@ export default function ExcelPreview() {
     const cfsFlat = flattenRows(cashFlow ?? [], 0, expandedRows, { forStatement: "cashflow" });
     return isFlat.length + bsFlat.length + cfsFlat.length;
   }, [incomeStatement, balanceSheet, cashFlow, expandedRows]);
+
+  const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
+  const lastHistoricYear = useMemo(
+    () => (meta?.years?.historical ?? [])[(meta?.years?.historical ?? []).length - 1] ?? "",
+    [meta]
+  );
+  const allStatementsForProj = useMemo(
+    () => ({
+      incomeStatement: incomeStatement ?? [],
+      balanceSheet: balanceSheet ?? [],
+      cashFlow: cashFlow ?? [],
+    }),
+    [incomeStatement, balanceSheet, cashFlow]
+  );
+  const projectedRevenue = useMemo(() => {
+    if (!incomeStatement?.length || !revenueProjectionConfig?.items || projectionYears.length === 0) return undefined;
+    return computeRevenueProjections(
+      incomeStatement,
+      revenueProjectionConfig,
+      projectionYears,
+      lastHistoricYear,
+      allStatementsForProj,
+      sbcBreakdowns,
+      danaBreakdowns,
+      (meta?.currencyUnit ?? "millions") as CurrencyUnit
+    );
+  }, [
+    incomeStatement,
+    revenueProjectionConfig,
+    projectionYears,
+    lastHistoricYear,
+    allStatementsForProj,
+    sbcBreakdowns,
+    danaBreakdowns,
+    meta?.currencyUnit,
+  ]);
 
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
@@ -798,7 +846,7 @@ export default function ExcelPreview() {
           </thead>
 
           <tbody>
-            {/* Income Statement */}
+            {/* Income Statement — projection years for Revenue use engine (sum of IS Build breakdowns) */}
             <StatementTable
               rows={incomeStatement.filter(r => 
                 r.id !== "ebitda" && 
@@ -817,6 +865,7 @@ export default function ExcelPreview() {
               allStatements={{ incomeStatement, balanceSheet, cashFlow }}
               sbcBreakdowns={sbcBreakdowns}
               danaBreakdowns={danaBreakdowns}
+              projectedRevenue={projectedRevenue}
             />
 
             {/* Stock-Based Compensation Disclosure */}

@@ -4,6 +4,13 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { Row, WizardStepId } from "@/types/finance";
 import { WIZARD_STEPS } from "@/types/finance";
+import type {
+  RevenueProjectionConfig,
+  RevenueProjectionMethod,
+  RevenueProjectionInputs,
+  RevenueBreakdownItem,
+} from "@/types/revenue-projection";
+import { DEFAULT_REVENUE_PROJECTION_CONFIG } from "@/types/revenue-projection";
 import { recomputeCalculations, computeRowValue } from "@/lib/calculations";
 import {
   createIncomeStatementTemplate,
@@ -211,6 +218,8 @@ export type ProjectSnapshot = {
   confirmedRowIds: Record<string, boolean>;
   /** BS row IDs that user has removed from CFO Working Capital; persist so they stay excluded after save */
   wcExcludedIds: string[];
+  /** IS Build: how each revenue stream/sub-item is forecasted (method + inputs) */
+  revenueProjectionConfig: RevenueProjectionConfig;
 };
 
 export type ProjectMeta = {
@@ -262,6 +271,8 @@ export type ModelState = {
   confirmedRowIds: Record<string, boolean>; // { [rowId]: isConfirmed }
   /** BS CA/CL row IDs user removed from CFO WC section; kept so they stay excluded after save */
   wcExcludedIds: string[];
+  /** IS Build: revenue projection method + inputs per stream/sub-item */
+  revenueProjectionConfig: RevenueProjectionConfig;
 };
 
 export type ModelActions = {
@@ -323,6 +334,16 @@ export type ModelActions = {
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => void;
   updateIncomeStatementValue: (rowId: string, year: string, value: number) => void;
+
+  // IS Build: revenue projection config (method + inputs per stream/sub-item)
+  setRevenueProjectionMethod: (itemId: string, method: RevenueProjectionMethod) => void;
+  setRevenueProjectionInputs: (itemId: string, inputs: RevenueProjectionInputs) => void;
+  addRevenueBreakdown: (parentId: string, label: string) => string;
+  removeRevenueBreakdown: (parentId: string, itemId: string) => void;
+  renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
+  setBreakdownAllocation: (parentId: string, mode: "percentages" | "amounts", allocations: Record<string, number>, year: string) => void;
+  /** Allocation for projection years only: % per breakdown (sum 100%). Applies from first projection year onwards. */
+  setProjectionAllocation: (parentId: string, percentages: Record<string, number>) => void;
 };
 
 /**
@@ -427,6 +448,7 @@ const defaultState: ModelState = {
   // Confirmed row IDs - default empty (no rows confirmed/collapsed)
   confirmedRowIds: {},
   wcExcludedIds: [],
+  revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -448,6 +470,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     sectionExpanded: state.sectionExpanded,
     confirmedRowIds: state.confirmedRowIds,
     wcExcludedIds: state.wcExcludedIds,
+    revenueProjectionConfig: state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
   };
 }
 
@@ -473,6 +496,7 @@ function applyProjectSnapshot(
     sectionExpanded: snapshot.sectionExpanded,
     confirmedRowIds: snapshot.confirmedRowIds,
     wcExcludedIds: snapshot.wcExcludedIds ?? [],
+    revenueProjectionConfig: snapshot.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
   }));
 }
 
@@ -630,20 +654,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
       const sgaIndex = incomeStatement.findIndex((r) => r.id === "sga");
       
-      // #region agent log
-      if (typeof window !== 'undefined') {
-        fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:365',message:'EBIT Position Check',data:{hasEbit,ebitIndex,sgaIndex,incomeStatementLength:incomeStatement.length,incomeStatementIds:incomeStatement.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      }
-      // #endregion
-      
       if (!hasEbit) {
         // Insert EBIT after SG&A
         const insertIndex = sgaIndex >= 0 ? sgaIndex + 1 : incomeStatement.length;
-        // #region agent log
-        if (typeof window !== 'undefined') {
-          fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:373',message:'Inserting EBIT (not exists)',data:{insertIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        }
-        // #endregion
         incomeStatement.splice(insertIndex, 0, {
           id: "ebit",
           label: "EBIT (Operating Income)",
@@ -655,33 +668,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
       } else if (ebitIndex >= 0 && sgaIndex >= 0) {
         // EBIT exists - check if it needs to be moved
         if (ebitIndex < sgaIndex) {
-          // #region agent log
-          if (typeof window !== 'undefined') {
-            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:387',message:'Moving EBIT (before SG&A)',data:{ebitIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          }
-          // #endregion
           // EBIT exists but is before SG&A - move it after SG&A
           const ebitRow = incomeStatement[ebitIndex];
           incomeStatement.splice(ebitIndex, 1);
           const newIndex = sgaIndex; // sgaIndex is now correct since we removed EBIT
           incomeStatement.splice(newIndex + 1, 0, ebitRow);
         } else if (ebitIndex > sgaIndex + 3) {
-          // #region agent log
-          if (typeof window !== 'undefined') {
-            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:395',message:'Moving EBIT (too far after SG&A)',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          }
-          // #endregion
           // EBIT exists but is too far after SG&A (likely at the end) - move it right after SG&A
           const ebitRow = incomeStatement[ebitIndex];
           incomeStatement.splice(ebitIndex, 1);
           const newIndex = sgaIndex;
           incomeStatement.splice(newIndex + 1, 0, ebitRow);
-        } else {
-          // #region agent log
-          if (typeof window !== 'undefined') {
-            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:403',message:'EBIT position OK',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          }
-          // #endregion
         }
       }
       
@@ -1022,12 +1019,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
     let balanceSheet = [...state.balanceSheet];
     let cashFlow = [...state.cashFlow];
     
-    // #region agent log
-    if (typeof window !== 'undefined') {
-      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:692',message:'recalculateAll - Before migrations',data:{cashFlowIds:cashFlow.map(r=>r.id),cashFlowCount:cashFlow.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'O'})}).catch(()=>{});
-    }
-    // #endregion
-
     // Helper function to find section boundaries in cashFlow for order-preserving migrations
     const findSectionBoundaries = () => {
       const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
@@ -1158,11 +1149,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
     // Migration: Ensure Operating CF total exists
     const hasOperatingCf = cashFlow.some((r) => r.id === "operating_cf");
-    // #region agent log
-    if (typeof window !== 'undefined') {
-      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:644',message:'Checking Operating CF',data:{hasOperatingCf,cashFlowIds:cashFlow.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'F'})}).catch(()=>{});
-    }
-    // #endregion
     if (!hasOperatingCf) {
       // Insert at end of operating section
       cashFlow.splice(boundaries.operatingEnd, 0, {
@@ -1195,11 +1181,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
     // Migration: Ensure Investing section items exist (capex, investing_cf)
     const hasCapex = cashFlow.some((r) => r.id === "capex");
-    // #region agent log
-    if (typeof window !== 'undefined') {
-      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:664',message:'Checking Capex',data:{hasCapex,cashFlowIds:cashFlow.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'H'})}).catch(()=>{});
-    }
-    // #endregion
     if (!hasCapex) {
       // Insert at end of investing section (before investing_cf total) to preserve user order
       cashFlow.splice(boundaries.investingEnd, 0, {
@@ -1217,11 +1198,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
 
     const hasInvestingCf = cashFlow.some((r) => r.id === "investing_cf");
-    // #region agent log
-    if (typeof window !== 'undefined') {
-      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:699',message:'Checking Investing CF',data:{hasInvestingCf},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'L'})}).catch(()=>{});
-    }
-    // #endregion
     if (!hasInvestingCf) {
       // Insert at end of investing section
       cashFlow.splice(boundaries.investingEnd, 0, {
@@ -1238,12 +1214,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
       boundaries.financingEnd++;
     }
     
-    // #region agent log
-    if (typeof window !== 'undefined') {
-      fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:714',message:'After Investing Migration',data:{cashFlowIds:cashFlow.map(r=>r.id),hasCapex:cashFlow.some(r=>r.id==='capex'),hasInvestingCf:cashFlow.some(r=>r.id==='investing_cf')},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'N'})}).catch(()=>{});
-    }
-    // #endregion
-
     // Migration: Ensure Financing CF total exists (no default items - user chooses from suggestions)
     const hasFinancingCf = cashFlow.some((r) => r.id === "financing_cf");
     if (!hasFinancingCf) {
@@ -2048,7 +2018,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const updated = updateRowValueDeep(currentRows, rowId, year, value);
       
       // Recompute all calculated rows for this year
-      // This will recalculate parent rows (like Revenue from children, COGS from children, Gross Profit from Revenue - COGS)
+      // Rows that have IS Build breakdowns (keys of revenueProjectionConfig.breakdowns) are not overwritten with sum-of-children so Historicals stays editable
       const allStatements = {
         incomeStatement: state.incomeStatement,
         balanceSheet: state.balanceSheet,
@@ -2056,7 +2026,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
       };
       const sbcBreakdowns = state.sbcBreakdowns;
       const danaBreakdowns = state.danaBreakdowns;
-      const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns);
+      const parentIdsWithProjectionBreakdowns =
+        statement === "incomeStatement"
+          ? new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}))
+          : undefined;
+      const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns);
       
       // If Balance Sheet was updated, also recalculate Cash Flow (WC Change depends on BS)
       let updatedCashFlow = state.cashFlow;
@@ -2604,6 +2578,154 @@ export const useModelStore = create<ModelState & ModelActions>()(
       };
     });
   },
+
+  setRevenueProjectionMethod: (itemId, method) => {
+    set((state) => {
+      const config = state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
+      const existing = config.items[itemId];
+      const lastHistoric = state.meta?.years?.historical?.slice(-1)?.[0] ?? "";
+      const defaultInputs: RevenueProjectionInputs =
+        method === "growth_rate"
+          ? { growthType: "constant", ratePercent: 0, baseYear: lastHistoric }
+          : method === "price_volume"
+          ? { baseYear: lastHistoric, price: 0, volume: 0, annualizeFromMonthly: false }
+          : method === "customers_arpu"
+          ? { baseYear: lastHistoric, customers: 0, arpu: 0 }
+          : method === "pct_of_total"
+          ? { referenceId: "rev", pctOfTotal: 0 }
+          : method === "product_line" || method === "channel"
+          ? { items: [] }
+          : { growthType: "constant", ratePercent: 0 };
+      return {
+        revenueProjectionConfig: {
+          ...config,
+          items: { ...config.items, [itemId]: { method, inputs: (existing?.inputs ?? defaultInputs) as RevenueProjectionInputs } },
+        },
+      };
+    });
+  },
+
+  setRevenueProjectionInputs: (itemId, inputs) => {
+    set((state) => {
+      const config = state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
+      const existing = config.items[itemId];
+      if (!existing) return state;
+      return {
+        revenueProjectionConfig: {
+          ...config,
+          items: { ...config.items, [itemId]: { ...existing, inputs } },
+        },
+      };
+    });
+  },
+
+  // IS Build breakdowns live ONLY in config; they are NOT added to the incomeStatement tree.
+  // Historicals structure (e.g. Revenue → Subscription, Services) is unchanged. For projection
+  // years, each stream's value = sum of its IS Build breakdown projections (see projection engine).
+  addRevenueBreakdown: (parentId, label) => {
+    const trimmed = (label ?? "").trim();
+    if (!trimmed) return "";
+    const id = `rev_break_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    set((state) => {
+      const config = state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
+      const breakdowns = config.breakdowns ?? {};
+      return {
+        revenueProjectionConfig: {
+          ...config,
+          breakdowns: {
+            ...breakdowns,
+            [parentId]: [...(breakdowns[parentId] || []), { id, label: trimmed }],
+          },
+        },
+      };
+    });
+    return id;
+  },
+
+  removeRevenueBreakdown: (parentId, itemId) => {
+    set((state) => {
+      const config = state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
+      const breakdowns = { ...(config.breakdowns ?? {}) };
+      const list = (breakdowns[parentId] || []).filter((b) => b.id !== itemId);
+      if (list.length === 0) delete breakdowns[parentId];
+      else breakdowns[parentId] = list;
+      const items = { ...(config.items ?? {}) };
+      delete items[itemId];
+      const allocations = { ...(config.allocations ?? {}) };
+      if (allocations[parentId]) {
+        const alloc = { ...allocations[parentId] };
+        const newAllocValues = { ...alloc.allocations };
+        delete newAllocValues[itemId];
+        if (Object.keys(newAllocValues).length === 0) {
+          delete allocations[parentId];
+        } else {
+          allocations[parentId] = { ...alloc, allocations: newAllocValues };
+        }
+      }
+      const projectionAllocations = { ...(config.projectionAllocations ?? {}) };
+      if (projectionAllocations[parentId]) {
+        const next = { ...projectionAllocations[parentId].percentages };
+        delete next[itemId];
+        if (Object.keys(next).length === 0) delete projectionAllocations[parentId];
+        else projectionAllocations[parentId] = { percentages: next };
+      }
+      return {
+        revenueProjectionConfig: { ...config, breakdowns, items, allocations, projectionAllocations },
+      };
+    });
+  },
+
+  renameRevenueBreakdown: (parentId, itemId, label) => {
+    const trimmed = (label ?? "").trim();
+    if (!trimmed) return;
+    set((state) => {
+      const config = state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
+      const breakdowns = { ...(config.breakdowns ?? {}) };
+      const list = (breakdowns[parentId] || []).map((b) => (b.id === itemId ? { ...b, label: trimmed } : b));
+      breakdowns[parentId] = list;
+      const incomeStatement = state.incomeStatement.map((r) => {
+        if (r.id === itemId) return { ...r, label: trimmed };
+        if (r.children?.length) {
+          return { ...r, children: r.children.map((c) => (c.id === itemId ? { ...c, label: trimmed } : c)) };
+        }
+        return r;
+      });
+      return {
+        incomeStatement,
+        revenueProjectionConfig: { ...config, breakdowns },
+      };
+    });
+  },
+
+  setBreakdownAllocation: (parentId, mode, allocations, year) => {
+    set((state) => {
+      const config = state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
+      return {
+        revenueProjectionConfig: {
+          ...config,
+          allocations: {
+            ...(config.allocations ?? {}),
+            [parentId]: { mode, allocations, year },
+          },
+        },
+      };
+    });
+  },
+
+  setProjectionAllocation: (parentId, percentages) => {
+    set((state) => {
+      const config = state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
+      return {
+        revenueProjectionConfig: {
+          ...config,
+          projectionAllocations: {
+            ...(config.projectionAllocations ?? {}),
+            [parentId]: { percentages },
+          },
+        },
+      };
+    });
+  },
     }),
     {
       name: "financial-model-storage",
@@ -2777,20 +2899,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
           const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
           const sgaIndex = incomeStatement.findIndex((r) => r.id === "sga");
           
-          // #region agent log
-          if (typeof window !== 'undefined') {
-            fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:1999',message:'EBIT Position Check (recalculateAll)',data:{hasEbit,ebitIndex,sgaIndex,incomeStatementLength:incomeStatement.length,incomeStatementIds:incomeStatement.map(r=>r.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-          }
-          // #endregion
-          
           if (!hasEbit) {
             // Insert EBIT after SG&A
             const insertIndex = sgaIndex >= 0 ? sgaIndex + 1 : incomeStatement.length;
-            // #region agent log
-            if (typeof window !== 'undefined') {
-              fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2007',message:'Inserting EBIT (not exists, recalculateAll)',data:{insertIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-            }
-            // #endregion
             incomeStatement.splice(insertIndex, 0, {
               id: "ebit",
               label: "EBIT (Operating Income)",
@@ -2802,33 +2913,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
           } else if (ebitIndex >= 0 && sgaIndex >= 0) {
             // EBIT exists - check if it needs to be moved
             if (ebitIndex < sgaIndex) {
-              // #region agent log
-              if (typeof window !== 'undefined') {
-                fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2021',message:'Moving EBIT (before SG&A, recalculateAll)',data:{ebitIndex,sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-              }
-              // #endregion
               // EBIT exists but is before SG&A - move it after SG&A
               const ebitRow = incomeStatement[ebitIndex];
               incomeStatement.splice(ebitIndex, 1);
               const newIndex = sgaIndex; // sgaIndex is now correct since we removed EBIT
               incomeStatement.splice(newIndex + 1, 0, ebitRow);
             } else if (ebitIndex > sgaIndex + 3) {
-              // #region agent log
-              if (typeof window !== 'undefined') {
-                fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2029',message:'Moving EBIT (too far after SG&A, recalculateAll)',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-              }
-              // #endregion
               // EBIT exists but is too far after SG&A (likely at the end) - move it right after SG&A
               const ebitRow = incomeStatement[ebitIndex];
               incomeStatement.splice(ebitIndex, 1);
               const newIndex = sgaIndex;
               incomeStatement.splice(newIndex + 1, 0, ebitRow);
-            } else {
-              // #region agent log
-              if (typeof window !== 'undefined') {
-                fetch('http://127.0.0.1:7243/ingest/e9ae427e-a3fc-454d-ad70-e095b68390a2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'useModelStore.ts:2037',message:'EBIT position OK (recalculateAll)',data:{ebitIndex,sgaIndex,distance:ebitIndex-sgaIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-              }
-              // #endregion
             }
           }
           

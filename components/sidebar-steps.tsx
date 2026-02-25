@@ -23,6 +23,7 @@ export default function SidebarSteps() {
         {WIZARD_STEPS.map((step) => {
           const isActive = step.id === currentStepId;
           const isDone = completed.includes(step.id);
+          const isInProgress = isActive && !isDone;
 
           return (
             <button
@@ -45,10 +46,12 @@ export default function SidebarSteps() {
                     "text-[10px] px-2 py-0.5 rounded-full",
                     isDone
                       ? "bg-emerald-600/20 text-emerald-300 border border-emerald-700/40"
-                      : "bg-slate-800/40 text-slate-400 border border-slate-700/30",
+                      : isInProgress
+                        ? "bg-amber-600/20 text-amber-300 border border-amber-700/40"
+                        : "bg-slate-800/40 text-slate-400 border border-slate-700/30",
                   ].join(" ")}
                 >
-                  {isDone ? "Done" : "Pending"}
+                  {isDone ? "Done" : isInProgress ? "In progress" : "Pending"}
                 </div>
               </div>
 

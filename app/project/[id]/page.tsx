@@ -6,6 +6,7 @@ import { useModelStore } from "@/store/useModelStore";
 import SidebarSteps from "@/components/sidebar-steps";
 import BuilderPanel from "@/components/builder-panel";
 import ExcelPreview from "@/components/excel-preview";
+import ISBuildPreview from "@/components/is-build-preview";
 
 export default function ProjectPage() {
   const router = useRouter();
@@ -20,6 +21,7 @@ export default function ProjectPage() {
   const recalculateAll = useModelStore((s) => s.recalculateAll);
   const hasHydrated = useModelStore((s) => s._hasHydrated);
   const currentProjectId = useModelStore((s) => s.currentProjectId);
+  const currentStepId = useModelStore((s) => s.currentStepId);
 
   const [mounted, setMounted] = useState(false);
   const [loadAttempted, setLoadAttempted] = useState(false);
@@ -122,7 +124,11 @@ export default function ProjectPage() {
         <div className="h-full w-full p-4 overflow-hidden">
           <div className="h-full grid grid-cols-[40%_60%] gap-4 overflow-hidden">
             <BuilderPanel />
-            <ExcelPreview />
+            {currentStepId === "is_build" ? (
+              <ISBuildPreview />
+            ) : (
+              <ExcelPreview />
+            )}
           </div>
         </div>
       </div>

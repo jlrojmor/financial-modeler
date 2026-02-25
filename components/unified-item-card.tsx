@@ -13,6 +13,8 @@ interface UnifiedItemCardProps {
   isLocked?: boolean;
   isCalculated?: boolean;
   autoValue?: number | null; // For auto-populated values
+  /** When set, show read-only value per year (e.g. parent row = sum of children) */
+  computedValueByYear?: Record<string, number> | null;
   linkInfo?: { text: string; isAutoPopulated: boolean } | null;
   signIndicator?: "+" | "-" | null; // For CFS items (+ or -)
   colorClass?: "blue" | "green" | "orange" | "purple" | "amber" | "slate" | "red";
@@ -50,6 +52,7 @@ export default function UnifiedItemCard({
   isLocked = false,
   isCalculated = false,
   autoValue = null,
+  computedValueByYear = null,
   linkInfo = null,
   signIndicator = null,
   colorClass = "slate",
@@ -340,11 +343,31 @@ export default function UnifiedItemCard({
         </div>
       </div>
 
-      {/* Input fields - only show if expanded and not calculated */}
-      {isExpanded && !isCalculated && (
+      {/* Input fields - only show if expanded and not calculated (or show read-only per-year when computedValueByYear) */}
+      {isExpanded && (!isCalculated || (isCalculated && computedValueByYear)) && (
         <div className="ml-5">
           {/* Show read-only for auto-populated items */}
-          {linkInfo?.isAutoPopulated && autoValue !== null ? (
+          {computedValueByYear ? (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              {years.map((year) => {
+                const value = computedValueByYear[year] ?? 0;
+                const displayValue = storedToDisplay(value, meta?.currencyUnit);
+                const unitLabel = getUnitLabel(meta?.currencyUnit);
+                const decimals = meta?.currencyUnit === "millions" ? 2 : meta?.currencyUnit === "thousands" ? 1 : 0;
+                const displayRounded = displayValue === 0 ? "0" : Number(displayValue.toFixed(decimals));
+                return (
+                  <div key={year} className="flex flex-col">
+                    <label className={`text-xs ${colors.textLight} mb-1`}>
+                      {year}
+                    </label>
+                    <div className="rounded-md border border-slate-600 bg-slate-800/50 px-2 py-1.5 text-sm text-slate-300">
+                      {displayRounded} {unitLabel}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : linkInfo?.isAutoPopulated && autoValue !== null ? (
             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
               {years.map((year) => {
                 const value = autoValue; // Use auto-populated value
@@ -364,12 +387,14 @@ export default function UnifiedItemCard({
               })}
             </div>
           ) : (
-            /* Regular input fields */
+            /* Regular input fields - round display/save to avoid floating point noise */
             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
               {years.map((year) => {
                 let storedValue = row.values?.[year] ?? 0;
                 const displayValue = storedToDisplay(storedValue, meta?.currencyUnit);
                 const unitLabel = getUnitLabel(meta?.currencyUnit);
+                const decimals = meta?.currencyUnit === "millions" ? 2 : meta?.currencyUnit === "thousands" ? 1 : 0;
+                const displayRounded = displayValue === 0 ? "" : Number(displayValue.toFixed(decimals));
                 
                 return (
                   <div key={year} className="flex flex-col">
@@ -378,8 +403,8 @@ export default function UnifiedItemCard({
                     </label>
                     <input
                       type="number"
-                      step="any"
-                      value={displayValue === 0 ? "" : String(displayValue)}
+                      step={decimals > 0 ? "0.01" : "1"}
+                      value={displayRounded}
                       onChange={(e) => {
                         const val = e.target.value;
                         if (val === "" || val === "-") {
@@ -389,12 +414,18 @@ export default function UnifiedItemCard({
                         const displayNum = Number(val);
                         if (!isNaN(displayNum)) {
                           const storedNum = displayToStored(displayNum, meta?.currencyUnit);
-                          onUpdateValue(row.id, year, storedNum);
+                          onUpdateValue(row.id, year, Math.round(storedNum));
                         }
                       }}
                       onBlur={(e) => {
                         if (e.target.value === "") {
                           onUpdateValue(row.id, year, 0);
+                        } else {
+                          const displayNum = Number(e.target.value);
+                          if (!isNaN(displayNum)) {
+                            const storedNum = displayToStored(displayNum, meta?.currencyUnit);
+                            onUpdateValue(row.id, year, Math.round(storedNum));
+                          }
                         }
                       }}
                       placeholder="0"
@@ -412,8 +443,8 @@ export default function UnifiedItemCard({
         </div>
       )}
 
-      {/* Calculated value display */}
-      {isCalculated && (
+      {/* Calculated value display (only when no per-year values shown) */}
+      {isCalculated && !computedValueByYear && (
         <div className="ml-5 mt-2 text-xs text-slate-400 italic">
           Value calculated automatically from linked statements
         </div>

@@ -521,7 +521,8 @@ export function computeRevenueProjections(
     result["rev"][year] = totalRevenue;
   }
 
-  // Final pass: ensure product_line/channel sub-rows sum to parent (scale to final total per year)
+  // Final pass: for product_line/channel, let children grow at their configured rates and set parent = sum(children)
+  // (do not rescale children to parent, so X and Y YoY match the configured growth %)
   for (const streamRow of rev.children ?? []) {
     const breakdownList = config.breakdowns?.[streamRow.id] ?? [];
     const toCheck = streamsWithBreakdowns.has(streamRow.id)
@@ -533,28 +534,38 @@ export function computeRevenueProjections(
       const pl = cfg?.inputs as ProductLineInputs | undefined;
       if ((method !== "product_line" && method !== "channel") || !pl?.items?.length) continue;
       const items = pl.items;
-      const n = items.length;
       for (let y = 0; y < projectionYears.length; y++) {
         const year = projectionYears[y];
-        const total = result[b.id]?.[year] ?? 0;
-        let denom = 0;
-        for (const it of items) {
-          const share = (it.sharePercent ?? (n ? 100 / n : 0)) / 100;
-          const g = (it.growthPercent ?? 0) / 100;
-          denom += share * Math.pow(1 + g, y);
-        }
-        if (denom < 1e-9) continue;
+        let sumChildren = 0;
         items.forEach((it, idx) => {
           const raw = it.id ?? (it as { label?: string }).label;
           const lineKey = (raw != null && String(raw).trim() !== "") ? String(raw) : `line-${idx}`;
           const subId = `${b.id}::${lineKey}`;
-          if (!result[subId]) result[subId] = {};
-          const share = (it.sharePercent ?? (n ? 100 / n : 0)) / 100;
-          const g = (it.growthPercent ?? 0) / 100;
-          result[subId][year] = total * (share * Math.pow(1 + g, y)) / denom;
+          sumChildren += result[subId]?.[year] ?? 0;
         });
+        result[b.id][year] = sumChildren;
       }
     }
+  }
+
+  // Recompute stream and rev totals after final pass (breakdown parents were set to sum of children)
+  for (const streamRow of rev.children ?? []) {
+    const breakdownList = config.breakdowns?.[streamRow.id] ?? [];
+    if (breakdownList.length === 0) continue;
+    for (const year of projectionYears) {
+      let sum = 0;
+      breakdownList.forEach((b) => {
+        sum += result[b.id]?.[year] ?? 0;
+      });
+      result[streamRow.id][year] = sum;
+    }
+  }
+  for (const year of projectionYears) {
+    let totalRevenue = 0;
+    for (const sid of streamIds) {
+      totalRevenue += result[sid]?.[year] ?? 0;
+    }
+    result["rev"][year] = totalRevenue;
   }
 
   return result;

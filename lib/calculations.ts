@@ -735,25 +735,31 @@ function findRowValue(rows: Row[], rowId: string, year: string): number {
  * Recompute all calculated rows for a given year
  * This should be called whenever an input value changes
  */
+/** Parent row IDs that have IS Build–only breakdowns; we don't overwrite their value with sum of children so Historicals stays editable. */
+export type ParentIdsWithProjectionBreakdowns = Set<string>;
+
 export function recomputeCalculations(
   rows: Row[],
   year: string,
   statementRows: Row[],
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] },
   sbcBreakdowns?: Record<string, Record<string, number>>,
-  danaBreakdowns?: Record<string, number>
+  danaBreakdowns?: Record<string, number>,
+  parentIdsWithProjectionBreakdowns?: ParentIdsWithProjectionBreakdowns
 ): Row[] {
   // First pass: update all rows and their children
   const updatedRows = rows.map((row) => {
       // Recursively update children first
         const newChildren = row.children
-        ? recomputeCalculations(row.children, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns)
+        ? recomputeCalculations(row.children, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns)
         : undefined;
 
     // CRITICAL: For input rows with children, compute the sum and store it FIRST
-    // This allows formulas to reference the parent (e.g., COGS, SG&A) and get the sum of children
-    // This must happen BEFORE calc rows are computed, so formulas can reference the correct totals
+    // EXCEPT: rows with IS Build–only breakdowns keep their value so Historicals stays editable.
     if (row.kind === "input" && newChildren && newChildren.length > 0) {
+      if (parentIdsWithProjectionBreakdowns?.has(row.id)) {
+        return { ...row, children: newChildren };
+      }
       // Sum all children values (handles nested children recursively)
       const sum = newChildren.reduce((total, child) => {
         // If child has its own children, recursively sum them

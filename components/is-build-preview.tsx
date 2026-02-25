@@ -169,8 +169,10 @@ export default function ISBuildPreview() {
   }, [incomeStatement, revenueProjectionConfig?.breakdowns, projectedValues, allStatements, sbcBreakdowns, danaBreakdowns]);
 
   /**
-   * Methodology: YoY% per year for each line (streams, breakdowns, sub-categories).
-   * For product_line/channel sub-rows we show the configured growth % every year (not calculated YoY from rescaled values).
+   * Methodology: YoY% per year for each line.
+   * - Product_line/channel sub-rows (X, Y): show configured growth % every year.
+   * - Breakdowns with product_line/channel (e.g. Fixed Price): YoY from sum of children so it matches displayed category growth.
+   * - All other rows: YoY from row values.
    */
   const methodologyYoY = useMemo(() => {
     const rows = revenueRows.map(({ row, depth }) => ({ row, depth }));
@@ -204,11 +206,31 @@ export default function ISBuildPreview() {
             yoyByYear[y] = Math.round(10 * configuredGrowth!) / 10;
           });
         } else {
+          // For breakdowns with product_line/channel, use sum of children so Fixed Price YoY = real growth of (X+Y)
+          const cfg = items[row.id];
+          const method = cfg?.method;
+          const pl = cfg?.inputs as { items?: Array<{ id?: string; label?: string }> } | undefined;
+          const useSumOfChildren =
+            (method === "product_line" || method === "channel") &&
+            pl?.items?.length &&
+            projectedValues;
+          const getVal = (year: string): number => {
+            if (useSumOfChildren) {
+              let sum = 0;
+              pl!.items!.forEach((line, lineIdx) => {
+                const raw = line.id ?? line.label;
+                const lineKey = (raw != null && String(raw).trim() !== "") ? String(raw) : `line-${lineIdx}`;
+                sum += projectedValues[`${row.id}::${lineKey}`]?.[year] ?? 0;
+              });
+              return sum;
+            }
+            return getRowValueForYear(row.id, year, row);
+          };
           for (let i = 0; i < projectionYears.length; i++) {
             const y = projectionYears[i];
             const prevYear = orderedYears[i];
-            const currVal = getRowValueForYear(row.id, y, row);
-            const prevVal = prevYear ? getRowValueForYear(row.id, prevYear, row) : 0;
+            const currVal = getVal(y);
+            const prevVal = prevYear ? getVal(prevYear) : 0;
             if (prevVal > 0) {
               yoyByYear[y] = Math.round(10 * ((currVal - prevVal) / prevVal) * 100) / 10;
             } else {
@@ -218,7 +240,7 @@ export default function ISBuildPreview() {
         }
         return { rowId: row.id, label: row.label, depth, yoyByYear };
       });
-  }, [revenueRows, projectionYears, lastHistoricYear, getRowValueForYear, revenueProjectionConfig?.items]);
+  }, [revenueRows, projectionYears, lastHistoricYear, getRowValueForYear, revenueProjectionConfig?.items, projectedValues]);
 
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">

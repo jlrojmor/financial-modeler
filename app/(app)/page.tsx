@@ -5,10 +5,12 @@ import { useModelStore } from "@/store/useModelStore";
 import SidebarSteps from "@/components/sidebar-steps";
 import BuilderPanel from "@/components/builder-panel";
 import ExcelPreview from "@/components/excel-preview";
+import ISBuildPreview from "@/components/is-build-preview";
 import ModelSetup from "@/components/model-setup";
 
 export default function Page() {
   const isInitialized = useModelStore((s) => s.isInitialized);
+  const currentStepId = useModelStore((s) => s.currentStepId);
   const recalculateAll = useModelStore((s) => s.recalculateAll);
   const [isMounted, setIsMounted] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
@@ -55,7 +57,11 @@ export default function Page() {
         <div className="h-full w-full p-4 overflow-hidden">
           <div className="h-full grid grid-cols-[40%_60%] gap-4 overflow-hidden">
             <BuilderPanel />
-            <ExcelPreview />
+            {currentStepId === "is_build" ? (
+              <ISBuildPreview />
+            ) : (
+              <ExcelPreview />
+            )}
           </div>
         </div>
       </div>

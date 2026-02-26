@@ -19,8 +19,13 @@ export async function POST(request: Request) {
       ...(modelState.meta.years.historical || []),
       ...(modelState.meta.years.projection || []),
     ];
-    
-    // Single continuous worksheet - everything flows top to bottom: IS → SBC → BS → CFS
+
+    // IS Build tab: revenue on top, blue assumptions below
+    const { exportISBuildToExcel } = await import("@/lib/excel-export-is-build");
+    const wsISBuild = wb.addWorksheet("IS Build", { properties: { tabColor: { argb: "FF1E3A5F" } } });
+    exportISBuildToExcel(wsISBuild, modelState);
+
+    // Main Financial Model sheet - everything flows top to bottom: IS → SBC → BS → CFS
     const ws = wb.addWorksheet("Financial Model");
     let currentRow = 1;
     

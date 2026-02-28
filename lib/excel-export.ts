@@ -8,9 +8,8 @@
  */
 
 import type { Row } from "@/types/finance";
-import type { CurrencyUnit } from "@/lib/currency-utils";
-import { generateExcelFormula, getCellName, getColumnLetter } from "./excel-formulas";
-import { storedToDisplay, getUnitLabel } from "./currency-utils";
+import { generateExcelFormula, getCellName, getColumnLetter, sanitizeIdForExcel } from "./excel-formulas";
+import { storedToDisplay, getUnitLabel, type CurrencyUnit } from "./currency-utils";
 import { findCFIItem } from "./cfi-intelligence";
 import { findCFFItem } from "./cff-intelligence";
 import { computeRowValue } from "@/lib/calculations";
@@ -311,10 +310,25 @@ function defineCellName(
  * Export Income Statement to Excel worksheet.
  * When wb and statementPrefix are provided, defines names for each data cell and formulas use those names (robust to reorder).
  */
+/** Ref map from IS Build export so Financial Model can link projection-year Revenue/COGS by name */
+export type ISBuildRefMap = {
+  sheetName: string;
+  revenueRowByRowId: Record<string, number>;
+  cogsSection: { revenueTotalRow: number; totalCogsRow: number; grossProfitRow: number; grossMarginRow: number };
+  streamIdToCogsRows: Record<string, number[]>;
+  streamIdToCogsLineIds: Record<string, string[]>;
+};
+
 export type ExportStatementContext = {
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
   sbcBreakdowns?: Record<string, Record<string, number>>;
   danaBreakdowns?: Record<string, number>;
+  isBuildRefs?: ISBuildRefMap;
+};
+
+export type ExportStatementResult = {
+  nextRow: number;
+  rowIdToExcelRow?: Record<string, number>;
 };
 
 export function exportStatementToExcel(
@@ -328,12 +342,12 @@ export function exportStatementToExcel(
   wb?: any,
   statementPrefix?: string,
   context?: ExportStatementContext
-): number {
+): ExportStatementResult {
   if (!rows || rows.length === 0) {
-    return startRow;
+    return { nextRow: startRow };
   }
   if (!years || years.length === 0) {
-    return startRow;
+    return { nextRow: startRow };
   }
   
   // Detect statement type based on label or row IDs
@@ -416,6 +430,9 @@ export function exportStatementToExcel(
     startRow += 1;
   }
   
+  // For Income Statement: build rowId -> Excel row map so IS Build sheet can reference historic values
+  const rowIdToExcelRow: Record<string, number> = {};
+
   // Track section and category changes for headers/subtitles
   const categoryLabels: Record<string, string> = {
     current_assets: "Current assets",
@@ -550,6 +567,7 @@ export function exportStatementToExcel(
     
     // Now write the actual item row (after headers/subtitles/blank rows if any)
     const excelRow = baseRow + rowOffset;
+    if (forStatement === "income") rowIdToExcelRow[row.id] = excelRow;
     const isInput = row.kind === "input";
     const isGrossMargin = row.id === "gross_margin";
     const isEbitMargin = row.id === "ebit_margin";
@@ -628,6 +646,56 @@ export function exportStatementToExcel(
     // Values for each year (use same computation as preview when allStatements provided)
     years.forEach((year, yearIdx) => {
       const col = 2 + yearIdx;
+      const colLetter = getColumnLetter(col);
+      const isProjectionYear = !year.endsWith("A");
+      const refs = context?.isBuildRefs;
+
+      // Financial Model projection years: Revenue and COGS reference IS Build by name; Gross Profit/Margin use same-sheet formulas
+      let isBuildFormula: string | null = null;
+      if (forStatement === "income" && refs && isProjectionYear) {
+        if (row.id === "rev" && refs.revenueRowByRowId.rev != null) {
+          isBuildFormula = "=" + getCellName("ISBuild", "rev", colLetter);
+        } else if (refs.revenueRowByRowId[row.id] != null) {
+          isBuildFormula = "=" + getCellName("ISBuild", row.id, colLetter);
+        } else if (row.id === "cogs" && refs.cogsSection.totalCogsRow) {
+          isBuildFormula = "=" + getCellName("ISBuild", "TotalCOGS", colLetter);
+        } else if (parentId === "cogs" && refs.streamIdToCogsLineIds) {
+          const cogsRow = rows.find((r: Row) => r.id === "cogs");
+          const revRow = rows.find((r: Row) => r.id === "rev");
+          const cogsChildren = cogsRow?.children ?? [];
+          const revChildren = revRow?.children ?? [];
+          const cogsChildIndex = cogsChildren.findIndex((c: Row) => c.id === row.id);
+          const streamId = cogsChildIndex >= 0 ? revChildren[cogsChildIndex]?.id : undefined;
+          const lineIds = streamId != null ? refs.streamIdToCogsLineIds[streamId] : undefined;
+          if (lineIds?.length) {
+            const nameRefs = lineIds.map((lid) => getCellName("ISBuild", "COGS_" + sanitizeIdForExcel(lid), colLetter));
+            isBuildFormula = "=SUM(" + nameRefs.join(",") + ")";
+          }
+        }
+      }
+
+      if (isBuildFormula) {
+        ws.getCell(excelRow, col).value = { formula: isBuildFormula };
+        if (useNames && row.id) defineCellName(wb, sheetName, prefix, row.id, col, excelRow);
+        if (row.id === "gross_margin") {
+          ws.getCell(excelRow, col).numFmt = "0.00%";
+        } else {
+          ws.getCell(excelRow, col).numFmt = '"$"#,##0_);("$"#,##0)';
+        }
+        const isParentWithChildren = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
+        ws.getCell(excelRow, col).font = {
+          color: { argb: "FF000000" },
+          bold: isParentWithChildren || row.id === "cogs" || row.id === "gross_profit" || row.id === "gross_margin",
+        };
+        if (row.id === "gross_margin") {
+          const currentFont = ws.getCell(excelRow, col).font || {};
+          ws.getCell(excelRow, col).font = { ...currentFont, italic: true, size: 10 };
+        }
+        ws.getCell(excelRow, col).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFFF" } };
+        ws.getCell(excelRow, col).alignment = { horizontal: "right", vertical: "middle" };
+        return;
+      }
+
       const allStatements = context?.allStatements;
       const sbcBreakdowns = context?.sbcBreakdowns ?? {};
       const danaBreakdowns = context?.danaBreakdowns;
@@ -637,7 +705,14 @@ export function exportStatementToExcel(
           : (row.values?.[year] ?? 0);
       const isLink = row.excelFormula?.includes("!") || false; // Links reference other sheets
       // hasChildren is already defined above for this row
-      
+
+      // Convert to display units so Excel is homogeneous (e.g. all in millions when currencyUnit is "millions")
+      const toExcelValue = (v: number): number => {
+        if (isPercent) return v / 100;
+        if (isCurrency && currencyUnit && currencyUnit !== "units") return storedToDisplay(v, currencyUnit as CurrencyUnit);
+        return v;
+      };
+
       // CRITICAL: Generate formula for ANY row that should be calculated (calc rows OR input rows with children)
       // Input rows with children (Revenue, COGS, SG&A when broken down) should show SUM formulas, not hardcoded values
       const shouldHaveFormula = (!isInput && (row.kind === "calc" || row.kind === "subtotal" || row.kind === "total")) ||
@@ -699,14 +774,14 @@ export function exportStatementToExcel(
               }
             } else {
               if (typeof value === "number") {
-                const excelValue = isPercent ? value / 100 : value;
+                const excelValue = toExcelValue(value);
                 ws.getCell(excelRow, col).value = excelValue;
                 if (useNames && row.id) defineCellName(wb, sheetName, prefix, row.id, col, excelRow);
               }
             }
           } else {
             if (typeof value === "number") {
-              const excelValue = isPercent ? value / 100 : value;
+              const excelValue = toExcelValue(value);
               ws.getCell(excelRow, col).value = excelValue;
               if (useNames && row.id) defineCellName(wb, sheetName, prefix, row.id, col, excelRow);
             }
@@ -714,13 +789,13 @@ export function exportStatementToExcel(
         } catch (formulaError) {
           console.error(`Error generating formula for row ${row.id}, year ${year}:`, formulaError);
           if (typeof value === "number") {
-            const excelValue = isPercent ? value / 100 : value;
+            const excelValue = toExcelValue(value);
             ws.getCell(excelRow, col).value = excelValue;
             if (useNames && row.id) defineCellName(wb, sheetName, prefix, row.id, col, excelRow);
           }
         }
       } else if (typeof value === "number") {
-        const excelValue = isPercent ? value / 100 : value;
+        const excelValue = toExcelValue(value);
         ws.getCell(excelRow, col).value = excelValue;
         if (useNames && row.id) defineCellName(wb, sheetName, prefix, row.id, col, excelRow);
         
@@ -767,7 +842,7 @@ export function exportStatementToExcel(
           };
         }
       } else {
-        ws.getCell(excelRow, col).value = typeof value === "number" ? value : null;
+        ws.getCell(excelRow, col).value = typeof value === "number" ? toExcelValue(value) : null;
         ws.getCell(excelRow, col).font = {
           color: { argb: isInputOnly ? "FF1E3A5F" : "FF0066CC" }
         };
@@ -808,27 +883,24 @@ export function exportStatementToExcel(
   });
   
   // Return the final row number (accounting for section headers and category subtitles)
-  // Also return a map of rowId -> actual Excel row number for Balance Check
+  // Also return a map of rowId -> actual Excel row number for Balance Check (BS) or IS Build refs (IS)
   const finalRow = startRow + 1 + flattened.length + rowOffset;
-  
+
   // Build rowId -> Excel row number map for Balance Check (if Balance Sheet)
-  const rowIdToExcelRow: Record<string, number> = {};
   if (isBalanceSheet) {
     flattened.forEach((item, i) => {
       const actualRow = startRow + 1 + i + (rowOffsets[i] || 0);
       rowIdToExcelRow[item.row.id] = actualRow;
     });
-  }
-  
-  // Store the map in a way that exportBalanceCheckToExcel can access it
-  // We'll pass it as a return value or store it on the worksheet
-  if (isBalanceSheet && rowIdToExcelRow) {
-    // Store in worksheet metadata (ExcelJS allows custom properties)
+    // Store in worksheet metadata for exportBalanceCheckToExcel
     (ws as any)._balanceSheetRowMap = rowIdToExcelRow;
     (ws as any)._balanceSheetHeaderRow = startRow;
   }
-  
-  return finalRow;
+
+  return {
+    nextRow: finalRow,
+    rowIdToExcelRow: forStatement === "income" || isBalanceSheet ? rowIdToExcelRow : undefined,
+  };
 }
 
 /**

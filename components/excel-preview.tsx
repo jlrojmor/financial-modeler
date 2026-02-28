@@ -286,7 +286,9 @@ function StatementTable({
   allStatements,
   sbcBreakdowns,
   danaBreakdowns,
-  projectedRevenue
+  projectedRevenue,
+  projectedCogs,
+  projectedCogsByCogsChild,
 }: { 
   rows: Row[]; 
   label: string; 
@@ -300,6 +302,10 @@ function StatementTable({
   danaBreakdowns?: Record<string, number>;
   /** For Income Statement: rev and its direct children use this for projection years (sum of IS Build breakdowns). */
   projectedRevenue?: Record<string, Record<string, number>>;
+  /** For Income Statement: total COGS per projection year from revenue × COGS % per line. */
+  projectedCogs?: Record<string, number>;
+  /** For Income Statement: projected COGS per fixed/mother child row (stream-level from IS Build). */
+  projectedCogsByCogsChild?: Record<string, Record<string, number>>;
 }) {
   const forStatement: FlattenOptions["forStatement"] =
     label === "Cash Flow Statement" ? "cashflow" : label === "Balance Sheet" ? "balance" : "income";
@@ -525,6 +531,26 @@ function StatementTable({
               if (label === "Income Statement" && projectedRevenue && isProjectionYear && isRevenueRow) {
                 storedValue = projectedRevenue[row.id]?.[y] ?? storedValue;
               }
+              // INCOME STATEMENT COGS: projection years use revenue × COGS % per line when projectedCogs is set
+              if (label === "Income Statement" && row.id === "cogs" && isProjectionYear && projectedCogs?.[y] != null) {
+                storedValue = projectedCogs[y];
+              }
+              // INCOME STATEMENT COGS CHILDREN (fixed/mother): use IS Build stream-level projection only
+              if (
+                label === "Income Statement" &&
+                parentId === "cogs" &&
+                isProjectionYear &&
+                projectedCogsByCogsChild?.[row.id]?.[y] != null
+              ) {
+                storedValue = projectedCogsByCogsChild[row.id][y];
+              }
+              // INCOME STATEMENT GROSS PROFIT / GROSS MARGIN: use computed values when we have projectedCogs
+              if (label === "Income Statement" && isProjectionYear && projectedRevenue && projectedCogs?.[y] != null) {
+                const rev = projectedRevenue["rev"]?.[y] ?? 0;
+                const cogs = projectedCogs[y];
+                if (row.id === "gross_profit") storedValue = rev - cogs;
+                if (row.id === "gross_margin") storedValue = rev > 0 ? ((rev - cogs) / rev) * 100 : 0;
+              }
               
               // FOR BALANCE SHEET TOTALS: ALWAYS RECALCULATE ON THE FLY
               // This ensures totals reflect ONLY items that are actually in the builder
@@ -697,6 +723,9 @@ export default function ExcelPreview() {
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
+  const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
+  const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
+  const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -779,6 +808,128 @@ export default function ExcelPreview() {
     danaBreakdowns,
     meta?.currencyUnit,
   ]);
+
+  const projectedCogs = useMemo(() => {
+    const hasAnyCogs =
+      Object.keys(cogsPctByRevenueLine).length > 0 ||
+      Object.keys(cogsPctByRevenueLineByYear).length > 0;
+    if (!projectedRevenue || !hasAnyCogs) return undefined;
+    const out: Record<string, number> = {};
+    const projYears = meta?.years?.projection ?? [];
+    const allLineIds = new Set([
+      ...Object.keys(cogsPctByRevenueLine),
+      ...Object.keys(cogsPctByRevenueLineByYear),
+    ]);
+    for (const y of projYears) {
+      let total = 0;
+      for (const lineId of allLineIds) {
+        const mode = cogsPctModeByRevenueLine[lineId] ?? "constant";
+        const pct =
+          mode === "custom" && cogsPctByRevenueLineByYear[lineId]?.[y] != null
+            ? cogsPctByRevenueLineByYear[lineId][y]
+            : cogsPctByRevenueLine[lineId] ?? 0;
+        const rev = projectedRevenue[lineId]?.[y] ?? 0;
+        total += rev * (pct / 100);
+      }
+      out[y] = total;
+    }
+    return out;
+  }, [
+    projectedRevenue,
+    cogsPctByRevenueLine,
+    cogsPctModeByRevenueLine,
+    cogsPctByRevenueLineByYear,
+    meta?.years?.projection,
+  ]);
+
+  /** lineId -> streamId (rev child id) for aggregating COGS by fixed/mother category */
+  const lineIdToStreamId = useMemo(() => {
+    const rev = incomeStatement?.find((r) => r.id === "rev");
+    const streams = rev?.children ?? [];
+    const breakdowns = revenueProjectionConfig?.breakdowns ?? {};
+    const items = revenueProjectionConfig?.items ?? {};
+    const out: Record<string, string> = {};
+    for (const stream of streams) {
+      out[stream.id] = stream.id;
+      const children = breakdowns[stream.id] ?? [];
+      for (const b of children) {
+        out[b.id] = stream.id;
+        const cfg = items[b.id];
+        const pl = cfg?.inputs as { items?: Array<{ id?: string; label?: string }> } | undefined;
+        if ((cfg?.method === "product_line" || cfg?.method === "channel") && pl?.items?.length) {
+          pl.items.forEach((it, idx) => {
+            const raw = it.id ?? it.label;
+            const lineKey = (raw != null && String(raw).trim() !== "") ? String(raw) : `line-${idx}`;
+            out[`${b.id}::${lineKey}`] = stream.id;
+          });
+        }
+      }
+    }
+    return out;
+  }, [incomeStatement, revenueProjectionConfig]);
+
+  /** COGS by line by year (for mapping to fixed COGS children) */
+  const cogsByLineByYear = useMemo(() => {
+    const hasAnyCogs =
+      Object.keys(cogsPctByRevenueLine).length > 0 ||
+      Object.keys(cogsPctByRevenueLineByYear).length > 0;
+    if (!projectedRevenue || !hasAnyCogs) return {};
+    const projYears = meta?.years?.projection ?? [];
+    const allLineIds = new Set([
+      ...Object.keys(cogsPctByRevenueLine),
+      ...Object.keys(cogsPctByRevenueLineByYear),
+    ]);
+    const out: Record<string, Record<string, number>> = {};
+    for (const lineId of allLineIds) {
+      out[lineId] = {};
+      const mode = cogsPctModeByRevenueLine[lineId] ?? "constant";
+      for (const y of projYears) {
+        const pct =
+          mode === "custom" && cogsPctByRevenueLineByYear[lineId]?.[y] != null
+            ? cogsPctByRevenueLineByYear[lineId][y]
+            : cogsPctByRevenueLine[lineId] ?? 0;
+        const rev = projectedRevenue[lineId]?.[y] ?? 0;
+        out[lineId][y] = rev * (pct / 100);
+      }
+    }
+    return out;
+  }, [
+    projectedRevenue,
+    cogsPctByRevenueLine,
+    cogsPctModeByRevenueLine,
+    cogsPctByRevenueLineByYear,
+    meta?.years?.projection,
+  ]);
+
+  /** Projected COGS per historical/fixed COGS child row (stream-level): cogsChildId -> year -> value. Only IS Build results for those fixed categories. */
+  const projectedCogsByCogsChild = useMemo(() => {
+    const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+    const cogsChildren = cogsRow?.children ?? [];
+    if (cogsChildren.length === 0 || Object.keys(cogsByLineByYear).length === 0) return {};
+    const rev = incomeStatement?.find((r) => r.id === "rev");
+    const streams = (rev?.children ?? []) as { id: string; label: string }[];
+    const projYears = meta?.years?.projection ?? [];
+    const out: Record<string, Record<string, number>> = {};
+    for (const cogsChild of cogsChildren) {
+      const childLabel = (cogsChild.label ?? "").trim();
+      const stream = streams.find(
+        (s) =>
+          childLabel === `${s.label} COGS` ||
+          childLabel === `${s.label}s COGS` ||
+          childLabel.toLowerCase().includes(s.label.toLowerCase())
+      );
+      if (!stream) continue;
+      out[cogsChild.id] = {};
+      for (const y of projYears) {
+        let sum = 0;
+        for (const [lineId, streamId] of Object.entries(lineIdToStreamId)) {
+          if (streamId === stream.id) sum += cogsByLineByYear[lineId]?.[y] ?? 0;
+        }
+        out[cogsChild.id][y] = sum;
+      }
+    }
+    return out;
+  }, [incomeStatement, cogsByLineByYear, lineIdToStreamId, meta?.years?.projection]);
 
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
@@ -866,6 +1017,8 @@ export default function ExcelPreview() {
               sbcBreakdowns={sbcBreakdowns}
               danaBreakdowns={danaBreakdowns}
               projectedRevenue={projectedRevenue}
+              projectedCogs={projectedCogs}
+              projectedCogsByCogsChild={projectedCogsByCogsChild}
             />
 
             {/* Stock-Based Compensation Disclosure */}

@@ -20,15 +20,11 @@ export async function POST(request: Request) {
       ...(modelState.meta.years.projection || []),
     ];
 
-    // IS Build tab: revenue on top, blue assumptions below
+    // IS Build sheet first so Financial Model can reference it for projection-year Revenue/COGS
     const { exportISBuildToExcel } = await import("@/lib/excel-export-is-build");
     const wsISBuild = wb.addWorksheet("IS Build", { properties: { tabColor: { argb: "FF1E3A5F" } } });
-    exportISBuildToExcel(wsISBuild, modelState);
+    const isBuildResult = exportISBuildToExcel(wsISBuild, modelState, undefined, wb);
 
-    // Main Financial Model sheet - everything flows top to bottom: IS → SBC → BS → CFS
-    const ws = wb.addWorksheet("Financial Model");
-    let currentRow = 1;
-    
     const allStatements = {
       incomeStatement: modelState.incomeStatement ?? [],
       balanceSheet: modelState.balanceSheet ?? [],
@@ -36,15 +32,19 @@ export async function POST(request: Request) {
     };
     const sbcBreakdowns = modelState.sbcBreakdowns ?? {};
     const danaBreakdowns = modelState.danaBreakdowns ?? {};
-    
     const exportContext: ExportStatementContext = {
       allStatements,
       sbcBreakdowns,
       danaBreakdowns,
+      isBuildRefs: isBuildResult.refMap,
     };
 
+    // Financial Model sheet: Income Statement references IS Build for projection-year Revenue/COGS
+    const ws = wb.addWorksheet("Financial Model");
+    let currentRow = 1;
+
     // Income Statement (first statement - includes currency note and headers)
-    currentRow = exportStatementToExcel(
+    const isResult = exportStatementToExcel(
       ws,
       modelState.incomeStatement,
       years,
@@ -56,8 +56,20 @@ export async function POST(request: Request) {
       "IS",
       exportContext
     );
+    currentRow = isResult.nextRow;
+
+    // Re-export IS Build so historic cells can reference Financial Model (now that FM exists)
+    const isRowMap = isResult.rowIdToExcelRow ?? null;
+    exportISBuildToExcel(
+      wsISBuild,
+      modelState,
+      isRowMap
+        ? { historicalSheetName: "Financial Model", historicalRowMap: isRowMap, years }
+        : undefined,
+      wb
+    );
     
-    // Add SBC Disclosure section below Income Statement
+    // Add SBC Disclosure section below Income Statement (still on Financial Model sheet)
     if (modelState.sbcBreakdowns) {
       currentRow = exportSbcDisclosureToExcel(
         ws,
@@ -68,10 +80,10 @@ export async function POST(request: Request) {
         modelState.meta.currencyUnit
       );
     }
-    
+
     // Balance Sheet (below SBC - add statement header)
     if (modelState.balanceSheet && modelState.balanceSheet.length > 0) {
-      currentRow = exportStatementToExcel(
+      const bsResult = exportStatementToExcel(
         ws,
         modelState.balanceSheet,
         years,
@@ -83,6 +95,7 @@ export async function POST(request: Request) {
         "BS",
         exportContext
       );
+      currentRow = bsResult.nextRow;
       currentRow = exportBalanceCheckToExcel(
         ws,
         modelState.balanceSheet,
@@ -96,7 +109,7 @@ export async function POST(request: Request) {
     
     // Cash Flow Statement (below Balance Sheet - add statement header)
     if (modelState.cashFlow && modelState.cashFlow.length > 0) {
-      currentRow = exportStatementToExcel(
+      const cfsResult = exportStatementToExcel(
         ws,
         modelState.cashFlow,
         years,
@@ -108,6 +121,7 @@ export async function POST(request: Request) {
         "CFS",
         exportContext
       );
+      currentRow = cfsResult.nextRow;
     }
     
     const buffer = await wb.xlsx.writeBuffer();

@@ -220,6 +220,12 @@ export type ProjectSnapshot = {
   wcExcludedIds: string[];
   /** IS Build: how each revenue stream/sub-item is forecasted (method + inputs) */
   revenueProjectionConfig: RevenueProjectionConfig;
+  /** IS Build: COGS as % of revenue per projected revenue line id (0–100). Constant mode. */
+  cogsPctByRevenueLine: Record<string, number>;
+  /** IS Build: 'constant' = one % for all years, 'custom' = per-year %. */
+  cogsPctModeByRevenueLine: Record<string, "constant" | "custom">;
+  /** IS Build: when mode is 'custom', lineId -> year -> pct (0–100). */
+  cogsPctByRevenueLineByYear: Record<string, Record<string, number>>;
 };
 
 export type ProjectMeta = {
@@ -273,6 +279,12 @@ export type ModelState = {
   wcExcludedIds: string[];
   /** IS Build: revenue projection method + inputs per stream/sub-item */
   revenueProjectionConfig: RevenueProjectionConfig;
+  /** IS Build: COGS % of revenue per projected revenue line id (0–100). Constant mode. */
+  cogsPctByRevenueLine: Record<string, number>;
+  /** IS Build: 'constant' | 'custom' per line. */
+  cogsPctModeByRevenueLine: Record<string, "constant" | "custom">;
+  /** IS Build: custom COGS % by line and year. */
+  cogsPctByRevenueLineByYear: Record<string, Record<string, number>>;
 };
 
 export type ModelActions = {
@@ -338,6 +350,10 @@ export type ModelActions = {
   // IS Build: revenue projection config (method + inputs per stream/sub-item)
   setRevenueProjectionMethod: (itemId: string, method: RevenueProjectionMethod) => void;
   setRevenueProjectionInputs: (itemId: string, inputs: RevenueProjectionInputs) => void;
+  /** IS Build: set COGS as % of revenue (0–100) for a projected revenue line. */
+  setCogsPctForRevenueLine: (revenueLineId: string, pct: number) => void;
+  setCogsPctModeForRevenueLine: (revenueLineId: string, mode: "constant" | "custom") => void;
+  setCogsPctForRevenueLineYear: (revenueLineId: string, year: string, pct: number) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -449,6 +465,9 @@ const defaultState: ModelState = {
   confirmedRowIds: {},
   wcExcludedIds: [],
   revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+  cogsPctByRevenueLine: {},
+  cogsPctModeByRevenueLine: {},
+  cogsPctByRevenueLineByYear: {},
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -471,6 +490,9 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     confirmedRowIds: state.confirmedRowIds,
     wcExcludedIds: state.wcExcludedIds,
     revenueProjectionConfig: state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
+    cogsPctByRevenueLine: state.cogsPctByRevenueLine ?? {},
+    cogsPctModeByRevenueLine: state.cogsPctModeByRevenueLine ?? {},
+    cogsPctByRevenueLineByYear: state.cogsPctByRevenueLineByYear ?? {},
   };
 }
 
@@ -497,6 +519,9 @@ function applyProjectSnapshot(
     confirmedRowIds: snapshot.confirmedRowIds,
     wcExcludedIds: snapshot.wcExcludedIds ?? [],
     revenueProjectionConfig: snapshot.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
+    cogsPctByRevenueLine: snapshot.cogsPctByRevenueLine ?? {},
+    cogsPctModeByRevenueLine: snapshot.cogsPctModeByRevenueLine ?? {},
+    cogsPctByRevenueLineByYear: snapshot.cogsPctByRevenueLineByYear ?? {},
   }));
 }
 
@@ -2615,6 +2640,34 @@ export const useModelStore = create<ModelState & ModelActions>()(
           ...config,
           items: { ...config.items, [itemId]: { ...existing, inputs } },
         },
+      };
+    });
+  },
+
+  setCogsPctForRevenueLine: (revenueLineId, pct) => {
+    set((state) => ({
+      cogsPctByRevenueLine: {
+        ...(state.cogsPctByRevenueLine ?? {}),
+        [revenueLineId]: Math.max(0, Math.min(100, pct)),
+      },
+    }));
+  },
+
+  setCogsPctModeForRevenueLine: (revenueLineId, mode) => {
+    set((state) => ({
+      cogsPctModeByRevenueLine: {
+        ...(state.cogsPctModeByRevenueLine ?? {}),
+        [revenueLineId]: mode,
+      },
+    }));
+  },
+
+  setCogsPctForRevenueLineYear: (revenueLineId, year, pct) => {
+    set((state) => {
+      const byLine = state.cogsPctByRevenueLineByYear ?? {};
+      const byYear = { ...(byLine[revenueLineId] ?? {}), [year]: Math.max(0, Math.min(100, pct)) };
+      return {
+        cogsPctByRevenueLineByYear: { ...byLine, [revenueLineId]: byYear },
       };
     });
   },

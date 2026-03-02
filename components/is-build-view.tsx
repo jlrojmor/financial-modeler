@@ -45,6 +45,36 @@ export default function ISBuildView() {
   const [confirmedBreakdowns, setConfirmedBreakdowns] = useState<Set<string>>(new Set());
   const [breakdownsExpanded, setBreakdownsExpanded] = useState<Set<string>>(new Set());
 
+  // Forecast helper (historicals) – independent advisory tool
+  type HelperMode = "growth" | "pct_of_ref";
+  type GrowthRow = { year: string; value: string };
+  type PctRow = { year: string; value: string; reference: string };
+
+  const [helperMode, setHelperMode] = useState<HelperMode>("growth");
+  const [helperOpen, setHelperOpen] = useState<boolean>(true);
+  const [growthRows, setGrowthRows] = useState<GrowthRow[]>([
+    { year: "", value: "" },
+    { year: "", value: "" },
+    { year: "", value: "" },
+  ]);
+  const [pctRows, setPctRows] = useState<PctRow[]>([
+    { year: "", value: "", reference: "" },
+    { year: "", value: "", reference: "" },
+    { year: "", value: "", reference: "" },
+  ]);
+  const [pctItemLabel, setPctItemLabel] = useState<string>("");
+  const [pctReferenceLabel, setPctReferenceLabel] = useState<string>("");
+
+  const copyToClipboard = async (text: string) => {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // ignore clipboard errors
+      }
+    }
+  };
+
   const expandAllStreams = () => {
     setExpandedItems(new Set(streams.map((s) => s.id)));
     setBreakdownsExpanded(new Set()); // show all breakdown blocks
@@ -172,6 +202,599 @@ export default function ISBuildView() {
         <p className="text-xs text-blue-300/80">
           First, identify your revenue streams (from Historicals). You can add a breakdown under any stream. Then choose how to forecast each item. The preview on the right shows historic + projected values and the methodology.
         </p>
+      </div>
+
+      {/* Forecast helper (historicals) – standalone advisory tool at top */}
+      <div className="rounded-lg border border-indigo-500/70 bg-indigo-950/40 p-3 sm:p-4 space-y-3 shadow-sm">
+        <div className="flex items-start justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setHelperOpen((v) => !v)}
+            className="flex flex-1 items-start gap-3 text-left"
+          >
+            <div className="mt-1 text-indigo-200">
+              {helperOpen ? "▾" : "▸"}
+            </div>
+            <div>
+              <div className="mb-0.5 inline-flex items-center gap-2 rounded-full border border-indigo-400/60 bg-indigo-950/80 px-2 py-0.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-indigo-300" />
+                <span className="text-[10px] font-medium uppercase tracking-wide text-indigo-200">
+                  Helper tool (no impact on model)
+                </span>
+              </div>
+              <h3 className="mt-1 text-sm font-semibold text-slate-50">Forecast helper — historical guidance</h3>
+              <p className="text-[11px] text-slate-200/80">
+                Paste or type historic values to see past growth or % of a reference line. Use the suggestions as
+                starting points for your projections; you will manually decide what to input in the builder.
+              </p>
+            </div>
+          </button>
+          <div className="mt-2 flex gap-2 sm:mt-0">
+            <button
+              type="button"
+              onClick={() => setHelperMode("growth")}
+              className={`rounded-full px-3 py-1 text-[11px] border ${
+                helperMode === "growth"
+                  ? "border-blue-400 bg-blue-950 text-blue-100"
+                  : "border-slate-700 bg-slate-900 text-slate-300"
+              }`}
+            >
+              Growth rates
+            </button>
+            <button
+              type="button"
+              onClick={() => setHelperMode("pct_of_ref")}
+              className={`rounded-full px-3 py-1 text-[11px] border ${
+                helperMode === "pct_of_ref"
+                  ? "border-emerald-400 bg-emerald-950 text-emerald-100"
+                  : "border-slate-700 bg-slate-900 text-slate-300"
+              }`}
+            >
+              % of reference
+            </button>
+          </div>
+        </div>
+
+        {helperOpen && (
+          helperMode === "growth" ? (
+          <div className="space-y-3">
+            <p className="text-[11px] text-slate-300">
+              Use this for any series (revenue, price, volume, users, etc.). Enter at least two years to see
+              year-over-year growth and suggested ranges (conservative / base / aggressive).
+            </p>
+            <div className="overflow-x-auto rounded-md border border-slate-800 bg-slate-950/60">
+              <table className="min-w-full border-collapse text-[11px] text-slate-200">
+                <thead className="bg-slate-900/80">
+                  <tr>
+                    <th className="px-2 py-1 text-left font-medium text-slate-300">Year</th>
+                    <th className="px-2 py-1 text-right font-medium text-slate-300">Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {growthRows.map((row, idx) => (
+                    <tr key={idx} className="border-t border-slate-800">
+                          <td className="px-2 py-1">
+                        <input
+                          type="text"
+                          className="w-20 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px]"
+                          value={row.year}
+                          onChange={(e) => {
+                            const next = [...growthRows];
+                            next[idx] = { ...next[idx], year: e.target.value };
+                            setGrowthRows(next);
+                          }}
+                          placeholder="2022"
+                        />
+                      </td>
+                          <td className="px-2 py-1 text-right">
+                        <input
+                          type="number"
+                          className="w-28 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px]"
+                          value={row.value}
+                          onChange={(e) => {
+                            const next = [...growthRows];
+                            next[idx] = { ...next[idx], value: e.target.value };
+                            setGrowthRows(next);
+                          }}
+                          placeholder="e.g. 1200"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setGrowthRows((rows) => [...rows, { year: "", value: "" }])}
+                className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200 hover:border-slate-500"
+              >
+                + Add year
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setGrowthRows([
+                    { year: "", value: "" },
+                    { year: "", value: "" },
+                    { year: "", value: "" },
+                  ])
+                }
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-[11px] text-slate-400 hover:text-slate-200"
+              >
+                Clear
+              </button>
+            </div>
+
+            {(() => {
+              const parsed = growthRows
+                .map((r) => ({
+                  year: r.year.trim(),
+                  value: Number(r.value),
+                }))
+                .filter((r) => r.year && !Number.isNaN(r.value));
+              if (parsed.length < 2) {
+                return (
+                  <p className="text-[11px] text-slate-500">
+                    Enter at least two non-empty years to see growth calculations.
+                  </p>
+                );
+              }
+              const rowsWithGrowth: { year: string; value: number; yoy?: number }[] = [];
+              for (let i = 0; i < parsed.length; i++) {
+                const current = parsed[i];
+                const prev = i > 0 ? parsed[i - 1] : null;
+                const yoy = prev && prev.value !== 0 ? current.value / prev.value - 1 : undefined;
+                rowsWithGrowth.push({ year: current.year, value: current.value, yoy });
+              }
+              const yoyValues = rowsWithGrowth
+                .map((r) => r.yoy)
+                .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+              const avgYoY =
+                yoyValues.length > 0 ? yoyValues.reduce((sum, v) => sum + v, 0) / yoyValues.length : undefined;
+              const last3 = yoyValues.slice(-3);
+              const last3Avg =
+                last3.length > 0 ? last3.reduce((sum, v) => sum + v, 0) / last3.length : undefined;
+              const first = parsed[0];
+              const last = parsed[parsed.length - 1];
+              const periods = parsed.length - 1;
+              const cagr =
+                periods > 0 && first.value > 0 ? Math.pow(last.value / first.value, 1 / periods) - 1 : undefined;
+
+              const baseGrowth = typeof last3Avg === "number" ? last3Avg : avgYoY;
+              const conservativeGrowth =
+                typeof baseGrowth === "number" ? baseGrowth * 0.8 : undefined;
+              const aggressiveGrowth =
+                typeof baseGrowth === "number" ? baseGrowth * 1.2 : undefined;
+
+              return (
+                <div className="space-y-3">
+                  <div className="overflow-x-auto rounded-md border border-slate-800 bg-slate-950/60">
+                    <table className="min-w-full border-collapse text-[11px] text-slate-200">
+                      <thead className="bg-slate-900/80">
+                        <tr>
+                          <th className="px-2 py-1 text-left font-medium text-slate-300">Year</th>
+                          <th className="px-2 py-1 text-right font-medium text-slate-300">Value</th>
+                          <th className="px-2 py-1 text-right font-medium text-slate-300">YoY %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rowsWithGrowth.map((r) => (
+                          <tr key={r.year} className="border-t border-slate-800">
+                            <td className="px-2 py-1">{r.year}</td>
+                            <td className="px-2 py-1 text-right">
+                              {r.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-2 py-1 text-right text-slate-300">
+                              {typeof r.yoy === "number" ? `${(r.yoy * 100).toFixed(2)}%` : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="space-y-1 text-[11px] text-slate-300">
+                    {typeof avgYoY === "number" && (
+                      <div className="flex items-center gap-2">
+                        <span>
+                          Average YoY growth: <span className="font-semibold">{(avgYoY * 100).toFixed(2)}%</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard((avgYoY * 100).toFixed(2))}
+                          className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                        >
+                          Copy %
+                        </button>
+                      </div>
+                    )}
+                    {typeof last3Avg === "number" && (
+                      <div className="flex items-center gap-2">
+                        <span>
+                          Last 3 years average:{" "}
+                          <span className="font-semibold">{(last3Avg * 100).toFixed(2)}%</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard((last3Avg * 100).toFixed(2))}
+                          className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                        >
+                          Copy %
+                        </button>
+                      </div>
+                    )}
+                    {typeof cagr === "number" && Number.isFinite(cagr) && (
+                      <div className="flex items-center gap-2">
+                        <span>
+                          CAGR (first to last):{" "}
+                          <span className="font-semibold">{(cagr * 100).toFixed(2)}%</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard((cagr * 100).toFixed(2))}
+                          className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                        >
+                          Copy %
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {typeof baseGrowth === "number" && (
+                    <div className="mt-1 rounded-md border border-indigo-700/70 bg-indigo-950/60 px-2 py-2 text-[11px] text-slate-100">
+                      <div className="mb-1 font-semibold text-indigo-100">AI-style guidance (you still decide):</div>
+                      <div className="space-y-1">
+                        {typeof conservativeGrowth === "number" && (
+                          <div className="flex items-center gap-2">
+                            <span>
+                              Conservative (slower than history):{" "}
+                              <span className="font-semibold">
+                                {(conservativeGrowth * 100).toFixed(2)}%
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => copyToClipboard((conservativeGrowth * 100).toFixed(2))}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                            >
+                              Copy %
+                            </button>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <span>
+                            Base (close to recent trend):{" "}
+                            <span className="font-semibold">{(baseGrowth * 100).toFixed(2)}%</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard((baseGrowth * 100).toFixed(2))}
+                            className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                          >
+                            Copy %
+                          </button>
+                        </div>
+                        {typeof aggressiveGrowth === "number" && (
+                          <div className="flex items-center gap-2">
+                            <span>
+                              Aggressive (faster than history):{" "}
+                              <span className="font-semibold">
+                                {(aggressiveGrowth * 100).toFixed(2)}%
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => copyToClipboard((aggressiveGrowth * 100).toFixed(2))}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                            >
+                              Copy %
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+          ) : (
+          <div className="space-y-3">
+            <p className="text-[11px] text-slate-300">
+              Use this to understand an item as % of a reference (e.g. COGS as % of revenue, Marketing as % of total
+              opex). Enter both series for each year. If you tell us what the item and reference represent, we can
+              suggest conservative/base/aggressive % values.
+            </p>
+            <div className="flex flex-wrap gap-3 text-[11px]">
+              <label className="flex flex-1 min-w-[160px] flex-col gap-1">
+                <span className="text-slate-300">What is the item?</span>
+                <input
+                  type="text"
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-100"
+                  value={pctItemLabel}
+                  onChange={(e) => setPctItemLabel(e.target.value)}
+                  placeholder="e.g. COGS, Marketing, SG&A"
+                />
+              </label>
+              <label className="flex flex-1 min-w-[160px] flex-col gap-1">
+                <span className="text-slate-300">What is the reference?</span>
+                <input
+                  type="text"
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-100"
+                  value={pctReferenceLabel}
+                  onChange={(e) => setPctReferenceLabel(e.target.value)}
+                  placeholder="e.g. Revenue, Total opex"
+                />
+              </label>
+            </div>
+            <div className="overflow-x-auto rounded-md border border-slate-800 bg-slate-950/60">
+              <table className="min-w-full border-collapse text-[11px] text-slate-200">
+                <thead className="bg-slate-900/80">
+                  <tr>
+                    <th className="px-2 py-1 text-left font-medium text-slate-300">Year</th>
+                    <th className="px-2 py-1 text-right font-medium text-slate-300">Item</th>
+                    <th className="px-2 py-1 text-right font-medium text-slate-300">Reference</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pctRows.map((row, idx) => (
+                    <tr key={idx} className="border-t border-slate-800">
+                          <td className="px-2 py-1">
+                        <input
+                          type="text"
+                          className="w-20 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px]"
+                          value={row.year}
+                          onChange={(e) => {
+                            const next = [...pctRows];
+                            next[idx] = { ...next[idx], year: e.target.value };
+                            setPctRows(next);
+                          }}
+                          placeholder="2022"
+                        />
+                      </td>
+                          <td className="px-2 py-1 text-right">
+                        <input
+                          type="number"
+                          className="w-28 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px]"
+                          value={row.value}
+                          onChange={(e) => {
+                            const next = [...pctRows];
+                            next[idx] = { ...next[idx], value: e.target.value };
+                            setPctRows(next);
+                          }}
+                          placeholder="Item (e.g. COGS)"
+                        />
+                      </td>
+                          <td className="px-2 py-1 text-right">
+                        <input
+                          type="number"
+                          className="w-28 rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px]"
+                          value={row.reference}
+                          onChange={(e) => {
+                            const next = [...pctRows];
+                            next[idx] = { ...next[idx], reference: e.target.value };
+                            setPctRows(next);
+                          }}
+                          placeholder="Reference (e.g. Revenue)"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPctRows((rows) => [...rows, { year: "", value: "", reference: "" }])}
+                className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-200 hover:border-slate-500"
+              >
+                + Add year
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setPctRows([
+                    { year: "", value: "", reference: "" },
+                    { year: "", value: "", reference: "" },
+                    { year: "", value: "", reference: "" },
+                  ])
+                }
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-[11px] text-slate-400 hover:text-slate-200"
+              >
+                Clear
+              </button>
+            </div>
+
+            {(() => {
+              const parsed = pctRows
+                .map((r) => ({
+                  year: r.year.trim(),
+                  value: Number(r.value),
+                  reference: Number(r.reference),
+                }))
+                .filter(
+                  (r) =>
+                    r.year &&
+                    !Number.isNaN(r.value) &&
+                    !Number.isNaN(r.reference) &&
+                    r.reference !== 0
+                );
+              if (parsed.length === 0) {
+                return (
+                  <p className="text-[11px] text-slate-500">
+                    Enter item and reference values (reference ≠ 0) to see % of reference.
+                  </p>
+                );
+              }
+              const rowsWithPct = parsed.map((r) => ({
+                year: r.year,
+                value: r.value,
+                reference: r.reference,
+                pct: r.value / r.reference,
+              }));
+              const pctValues = rowsWithPct.map((r) => r.pct).filter((v) => Number.isFinite(v));
+              const avgPct =
+                pctValues.length > 0 ? pctValues.reduce((sum, v) => sum + v, 0) / pctValues.length : undefined;
+              const last3 = pctValues.slice(-3);
+              const last3Avg =
+                last3.length > 0 ? last3.reduce((sum, v) => sum + v, 0) / last3.length : undefined;
+              const minPct = pctValues.length > 0 ? Math.min(...pctValues) : undefined;
+              const maxPct = pctValues.length > 0 ? Math.max(...pctValues) : undefined;
+
+              const basePct = typeof last3Avg === "number" ? last3Avg : avgPct;
+
+              // Only make directional suggestions when user has told us what the item and reference are
+              const hasLabels =
+                pctItemLabel.trim().length > 0 && pctReferenceLabel.trim().length > 0 && typeof basePct === "number";
+              const labelLower = pctItemLabel.trim().toLowerCase();
+              const isCostLike =
+                /cogs|cost|expense|opex|operating expense|marketing|selling|s&m|sg&a|g&a|overhead|rent|payroll|salary|wage/.test(
+                  labelLower
+                );
+              const conservativePct =
+                hasLabels && typeof basePct === "number"
+                  ? basePct * (isCostLike ? 1.05 : 0.95)
+                  : undefined;
+              const aggressivePct =
+                hasLabels && typeof basePct === "number"
+                  ? basePct * (isCostLike ? 0.95 : 1.05)
+                  : undefined;
+
+              return (
+                <div className="space-y-3">
+                  <div className="overflow-x-auto rounded-md border border-slate-800 bg-slate-950/60">
+                    <table className="min-w-full border-collapse text-[11px] text-slate-200">
+                      <thead className="bg-slate-900/80">
+                        <tr>
+                          <th className="px-2 py-1 text-left font-medium text-slate-300">Year</th>
+                          <th className="px-2 py-1 text-right font-medium text-slate-300">Item</th>
+                          <th className="px-2 py-1 text-right font-medium text-slate-300">Reference</th>
+                          <th className="px-2 py-1 text-right font-medium text-slate-300">% of reference</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rowsWithPct.map((r) => (
+                          <tr key={r.year} className="border-t border-slate-800">
+                            <td className="px-2 py-1">{r.year}</td>
+                            <td className="px-2 py-1 text-right">
+                              {r.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-2 py-1 text-right">
+                              {r.reference.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-2 py-1 text-right text-slate-300">
+                              {(r.pct * 100).toFixed(2)}%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="space-y-1 text-[11px] text-slate-300">
+                    {typeof avgPct === "number" && (
+                      <div className="flex items-center gap-2">
+                        <span>
+                          Average % of reference:{" "}
+                          <span className="font-semibold">{(avgPct * 100).toFixed(2)}%</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard((avgPct * 100).toFixed(2))}
+                          className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                        >
+                          Copy %
+                        </button>
+                      </div>
+                    )}
+                    {typeof last3Avg === "number" && (
+                      <div className="flex items-center gap-2">
+                        <span>
+                          Last 3 years average:{" "}
+                          <span className="font-semibold">{(last3Avg * 100).toFixed(2)}%</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard((last3Avg * 100).toFixed(2))}
+                          className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                        >
+                          Copy %
+                        </button>
+                      </div>
+                    )}
+                    {typeof minPct === "number" && typeof maxPct === "number" && (
+                      <div className="text-slate-400">
+                        Range across years: {(minPct * 100).toFixed(2)}% – {(maxPct * 100).toFixed(2)}%
+                      </div>
+                    )}
+                  </div>
+
+                  {hasLabels && typeof basePct === "number" && (
+                    <div className="mt-1 rounded-md border border-indigo-700/70 bg-indigo-950/60 px-2 py-2 text-[11px] text-slate-100">
+                      <div className="mb-1 font-semibold text-indigo-100">
+                        Suggested % of reference for {pctItemLabel || "item"} as % of{" "}
+                        {pctReferenceLabel || "reference"}:
+                      </div>
+                      <div className="space-y-1">
+                        {typeof conservativePct === "number" && (
+                          <div className="flex items-center gap-2">
+                            <span>
+                              {isCostLike ? "Conservative (slightly higher cost share): " : "Conservative (slightly lower share): "}
+                              <span className="font-semibold">
+                                {(conservativePct * 100).toFixed(2)}%
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => copyToClipboard((conservativePct * 100).toFixed(2))}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                            >
+                              Copy %
+                            </button>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <span>
+                            Base (close to recent mix):{" "}
+                            <span className="font-semibold">{(basePct * 100).toFixed(2)}%</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard((basePct * 100).toFixed(2))}
+                            className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                          >
+                            Copy %
+                          </button>
+                        </div>
+                        {typeof aggressivePct === "number" && (
+                          <div className="flex items-center gap-2">
+                            <span>
+                              {isCostLike ? "Aggressive (lower cost share): " : "Aggressive (higher share): "}
+                              <span className="font-semibold">
+                                {(aggressivePct * 100).toFixed(2)}%
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => copyToClipboard((aggressivePct * 100).toFixed(2))}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] text-slate-200 hover:border-slate-500"
+                            >
+                              Copy %
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+          )
+        )}
       </div>
 
       {!rev ? (
@@ -645,6 +1268,7 @@ export default function ISBuildView() {
               </div>
             </>
           )}
+
         </div>
       )}
     </div>

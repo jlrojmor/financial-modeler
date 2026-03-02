@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import {
@@ -60,6 +60,12 @@ export default function ISBuildPreview() {
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
   const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
+  const sgaPctByItemId = useModelStore((s) => s.sgaPctByItemId ?? {});
+  const sgaPctModeByItemId = useModelStore((s) => s.sgaPctModeByItemId ?? {});
+  const sgaPctByItemIdByYear = useModelStore((s) => s.sgaPctByItemIdByYear ?? {});
+  const sgaPctOfParentByItemId = useModelStore((s) => s.sgaPctOfParentByItemId ?? {});
+  const sgaPctOfParentModeByItemId = useModelStore((s) => s.sgaPctOfParentModeByItemId ?? {});
+  const sgaPctOfParentByItemIdByYear = useModelStore((s) => s.sgaPctOfParentByItemIdByYear ?? {});
 
   const revenueRows = useMemo(() => {
     const rev = incomeStatement?.find((r) => r.id === "rev");
@@ -120,6 +126,15 @@ export default function ISBuildPreview() {
     });
     return list;
   }, [incomeStatement, revenueProjectionConfig]);
+
+  // UI state: section and row expansion (visual only, does not affect calculations or Excel export)
+  const [revenueSectionOpen, setRevenueSectionOpen] = useState(true);
+  const [revenueCogsSectionOpen, setRevenueCogsSectionOpen] = useState(true);
+  const [revenueMethodSectionOpen, setRevenueMethodSectionOpen] = useState(true);
+  const [cogsMethodSectionOpen, setCogsMethodSectionOpen] = useState(true);
+  const [sgaSectionOpen, setSgaSectionOpen] = useState(true);
+  const [sgaMethodSectionOpen, setSgaMethodSectionOpen] = useState(true);
+  const [collapsedRowIds, setCollapsedRowIds] = useState<Set<string>>(new Set());
 
   const historicalYears = useMemo(() => meta?.years?.historical ?? [], [meta]);
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
@@ -311,6 +326,145 @@ export default function ISBuildPreview() {
       });
   }, [revenueRows, projectionYears, lastHistoricYear, getRowValueForYear, revenueProjectionConfig?.items, projectedValues]);
 
+  /** SG&A: flattened rows under sga (with depth); leaves have no children */
+  const sgaRowsFlat = useMemo(() => {
+    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    if (!sgaRow?.children?.length) return [];
+    const out: Array<{ row: Row; depth: number }> = [];
+    function walk(rows: Row[], depth: number) {
+      for (const r of rows) {
+        out.push({ row: r, depth });
+        if (r.children?.length) walk(r.children, depth + 1);
+      }
+    }
+    walk(sgaRow.children, 0);
+    return out;
+  }, [incomeStatement]);
+
+  /** SG&A % of revenue for a top-level item in a given year */
+  const getSgaPctForItemYear = useMemo(() => {
+    return (itemId: string, year: string): number => {
+      const mode = sgaPctModeByItemId[itemId] ?? "constant";
+      if (mode === "custom") {
+        const pct = sgaPctByItemIdByYear[itemId]?.[year];
+        if (pct != null) return pct;
+      }
+      return sgaPctByItemId[itemId] ?? 0;
+    };
+  }, [sgaPctModeByItemId, sgaPctByItemIdByYear, sgaPctByItemId]);
+
+  /** SG&A % of parent for a sub-item in a given year */
+  const getSgaPctOfParentForItemYear = useMemo(() => {
+    return (itemId: string, year: string): number => {
+      const mode = sgaPctOfParentModeByItemId[itemId] ?? "constant";
+      if (mode === "custom") {
+        const pct = sgaPctOfParentByItemIdByYear[itemId]?.[year];
+        if (pct != null) return pct;
+      }
+      return sgaPctOfParentByItemId[itemId] ?? 0;
+    };
+  }, [sgaPctOfParentModeByItemId, sgaPctOfParentByItemIdByYear, sgaPctOfParentByItemId]);
+
+  /** SG&A leaf rows (no children) */
+  const sgaLeaves = useMemo(
+    () => sgaRowsFlat.filter(({ row }) => !row.children?.length).map(({ row, depth }) => ({ id: row.id, label: row.label, depth })),
+    [sgaRowsFlat]
+  );
+
+  /** SG&A value by row id by year. Top-level: revenue × % of revenue (or sum of children for display). Sub-items: parent × % of parent. */
+  const projectedSgaByRowIdByYear = useMemo(() => {
+    const out: Record<string, Record<string, number>> = {};
+    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    if (!sgaRow?.children?.length) return out;
+
+    function setHistoricForRow(row: Row): void {
+      out[row.id] = out[row.id] ?? {};
+      for (const y of years) {
+        if (!y.endsWith("A")) continue;
+        out[row.id][y] = computeRowValue(row, y, incomeStatement ?? [], incomeStatement ?? [], allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+      }
+      row.children?.forEach((c) => setHistoricForRow(c));
+    }
+    function setProjectionForRow(row: Row, depth: number, parentValueByYear: Record<string, number> | null): void {
+      out[row.id] = out[row.id] ?? {};
+      for (const y of years) {
+        if (y.endsWith("A")) continue;
+        const rev = revenueTotalByYear[y] ?? 0;
+        if (depth === 0) {
+          const pct = getSgaPctForItemYear(row.id, y);
+          out[row.id][y] = rev * (pct / 100);
+        } else {
+          const parentVal = parentValueByYear?.[y] ?? 0;
+          const pct = getSgaPctOfParentForItemYear(row.id, y);
+          out[row.id][y] = parentVal * (pct / 100);
+        }
+      }
+      if (row.children?.length) {
+        const parentByYear: Record<string, number> = {};
+        for (const y of years) {
+          if (!y.endsWith("A")) parentByYear[y] = out[row.id][y];
+        }
+        row.children.forEach((c) => setProjectionForRow(c, depth + 1, parentByYear));
+      }
+    }
+
+    const hasHistoric = years.some((y) => y.endsWith("A"));
+    if (hasHistoric) sgaRow.children.forEach((c) => setHistoricForRow(c));
+    sgaRow.children.forEach((c) => setProjectionForRow(c, 0, null));
+    return out;
+  }, [incomeStatement, years, revenueTotalByYear, getSgaPctForItemYear, getSgaPctOfParentForItemYear, allStatements, sbcBreakdowns, danaBreakdowns]);
+
+  /** SG&A value by leaf by year (for totalSgaByYear and methodology: same as projectedSgaByRowIdByYear for leaves) */
+  const sgaByLeafByYear = useMemo(() => {
+    const out: Record<string, Record<string, number>> = {};
+    for (const { id } of sgaLeaves) {
+      out[id] = projectedSgaByRowIdByYear[id] ?? {};
+    }
+    return out;
+  }, [sgaLeaves, projectedSgaByRowIdByYear]);
+
+  /** Total SG&A per year (historic from IS sga row, projection = sum of leaves) */
+  const totalSgaByYear = useMemo(() => {
+    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    const out: Record<string, number> = {};
+    for (const y of years) {
+      if (y.endsWith("A") && sgaRow) {
+        out[y] = computeRowValue(sgaRow, y, incomeStatement ?? [], incomeStatement ?? [], allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+      } else {
+        let sum = 0;
+        for (const { id } of sgaLeaves) sum += sgaByLeafByYear[id]?.[y] ?? 0;
+        out[y] = sum;
+      }
+    }
+    return out;
+  }, [years, incomeStatement, sgaLeaves, sgaByLeafByYear, allStatements, sbcBreakdowns, danaBreakdowns]);
+
+  /** SG&A forecast methodology: % of revenue (top-level) or % of parent (sub-items) and total SG&A as % of revenue */
+  const methodologySgaPct = useMemo(() => {
+    const lines: Array<{ id: string; label: string; depth: number; pctByYear: Record<string, number | null> }> = [];
+    for (const { id, label, depth } of sgaLeaves) {
+      const pctByYear: Record<string, number | null> = {};
+      const getPct = depth > 0 ? getSgaPctOfParentForItemYear : getSgaPctForItemYear;
+      for (const y of years) {
+        if (y.endsWith("A")) pctByYear[y] = null;
+        else pctByYear[y] = getPct(id, y);
+      }
+      const displayLabel = depth > 0 ? `${label} (% of parent)` : label;
+      lines.push({ id: `sga-${id}`, label: displayLabel, depth, pctByYear });
+    }
+    const totalPctByYear: Record<string, number | null> = {};
+    for (const y of years) {
+      if (y.endsWith("A")) totalPctByYear[y] = null;
+      else {
+        const rev = revenueTotalByYear[y] ?? 0;
+        const sga = totalSgaByYear[y] ?? 0;
+        totalPctByYear[y] = rev > 0 ? Math.round(100 * (sga / rev) * 10) / 10 : null;
+      }
+    }
+    lines.push({ id: "sga-total", label: "Total SG&A as % of Revenue", depth: 0, pctByYear: totalPctByYear });
+    return lines;
+  }, [sgaLeaves, years, getSgaPctForItemYear, getSgaPctOfParentForItemYear, revenueTotalByYear, totalSgaByYear]);
+
   /** COGS forecast methodology: COGS % of revenue by line (the configured %), and total COGS as % of revenue */
   const methodologyCogsPct = useMemo(() => {
     const lines: Array<{ id: string; label: string; depth: number; pctByYear: Record<string, number | null> }> = [];
@@ -397,42 +551,98 @@ export default function ISBuildPreview() {
                 colSpan={1 + years.length}
                 className="px-3 py-3 bg-slate-900/50"
               >
-                <h3 className="text-sm font-bold text-slate-100">
-                  Income Statement — Revenue
-                </h3>
+                <button
+                  type="button"
+                  onClick={() => setRevenueSectionOpen((open) => !open)}
+                  className="flex w-full items-center justify-between text-left"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 text-xs">
+                      {revenueSectionOpen ? "▾" : "▸"}
+                    </span>
+                    <h3 className="text-sm font-bold text-slate-100">
+                      Income Statement — Revenue
+                    </h3>
+                  </div>
+                </button>
               </td>
             </tr>
-            {revenueRows.length === 0 ? (
-              <tr>
-                <td
-                  colSpan={1 + years.length}
-                  className="px-3 py-8 text-center text-slate-500"
-                >
-                  No Revenue line found. Add Revenue in Historicals or IS structure.
-                </td>
-              </tr>
-            ) : (
-              revenueRows.map(({ row, depth }) => {
-                const hasChildren =
-                  Array.isArray(row.children) && row.children.length > 0;
-                const isParentTotal = row.id === "rev" && hasChildren;
-                const labelClass = isParentTotal
-                  ? "text-slate-200 font-bold"
-                  : "text-slate-200";
-                return (
-                  <tr
-                    key={row.id}
-                    className={`border-b border-slate-900 hover:bg-slate-900/40 ${
-                      isParentTotal ? "border-t-2 border-slate-300" : ""
-                    }`}
+            {revenueSectionOpen &&
+              (revenueRows.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={1 + years.length}
+                    className="px-3 py-8 text-center text-slate-500"
                   >
-                    <td
-                      className={`px-3 py-2 ${labelClass}`}
-                      style={{ paddingLeft: 12 + depth * 14 }}
+                    No Revenue line found. Add Revenue in Historicals or IS
+                    structure.
+                  </td>
+                </tr>
+              ) : (
+                revenueRows.map(({ row, depth }, index) => {
+                  // Determine if this row has descendants (for collapse toggle)
+                  let hasDescendants = false;
+                  for (let j = index + 1; j < revenueRows.length; j++) {
+                    if (revenueRows[j].depth <= depth) break;
+                    hasDescendants = true;
+                    break;
+                  }
+                  // Determine if any ancestor is collapsed
+                  let hidden = false;
+                  let currentDepth = depth;
+                  for (let j = index - 1; j >= 0; j--) {
+                    const prev = revenueRows[j];
+                    if (prev.depth < currentDepth) {
+                      if (collapsedRowIds.has(prev.row.id)) {
+                        hidden = true;
+                        break;
+                      }
+                      currentDepth = prev.depth;
+                    }
+                  }
+                  if (hidden) return null;
+
+                  const isParentTotal =
+                    row.id === "rev" ||
+                    hasDescendants;
+                  const labelClass = isParentTotal
+                    ? "text-slate-200 font-bold"
+                    : "text-slate-200";
+                  const isCollapsed = collapsedRowIds.has(row.id);
+
+                  return (
+                    <tr
+                      key={row.id}
+                      className={`border-b border-slate-900 hover:bg-slate-900/40 ${
+                        isParentTotal ? "border-t-2 border-slate-300" : ""
+                      }`}
                     >
-                      {row.label}
-                    </td>
-                    {years.map((y) => {
+                      <td
+                        className={`px-3 py-2 ${labelClass}`}
+                        style={{ paddingLeft: 12 + depth * 14 }}
+                      >
+                        <button
+                          type="button"
+                          className="flex items-center gap-2 text-left w-full"
+                          onClick={() => {
+                            if (!hasDescendants) return;
+                            setCollapsedRowIds((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(row.id)) next.delete(row.id);
+                              else next.add(row.id);
+                              return next;
+                            });
+                          }}
+                        >
+                          {hasDescendants && (
+                            <span className="text-slate-500 text-[10px]">
+                              {isCollapsed ? "▸" : "▾"}
+                            </span>
+                          )}
+                          <span>{row.label}</span>
+                        </button>
+                      </td>
+                      {years.map((y) => {
                       const isHistoric = y.endsWith("A");
                       let stored = 0;
                       
@@ -471,124 +681,45 @@ export default function ISBuildPreview() {
                         >
                           {display}
                         </td>
-                      );
-                    })}
-                  </tr>
-                );
-              })
-            )}
+                        );
+                      })}
+                    </tr>
+                  );
+                })
+              ))}
             {/* Revenue & COGS — automatic calculations from COGS % inputs (visible when editing COGS card) */}
             <tr className="border-t-4 border-slate-700">
               <td
                 colSpan={1 + years.length}
                 className="px-3 py-3 bg-orange-950/30"
               >
-                <h3 className="text-sm font-bold text-orange-200">
-                  Revenue & COGS
-                </h3>
-                <p className="text-xs text-orange-400/90 mt-1">
-                  Total Revenue, COGS (from % of revenue by line), Gross Profit, Gross Margin %
-                </p>
-              </td>
-            </tr>
-            <tr className="border-b border-slate-800 bg-orange-950/20">
-              <td className="px-3 py-2 text-slate-400 text-xs font-medium">
-                Line
-              </td>
-              {years.map((y) => (
-                <td
-                  key={y}
-                  className="px-3 py-2 text-right text-slate-400 text-xs font-medium"
+                <button
+                  type="button"
+                  onClick={() =>
+                    setRevenueCogsSectionOpen((open) => !open)
+                  }
+                  className="flex w-full items-start justify-between text-left"
                 >
-                  {y}
-                </td>
-              ))}
+                  <div className="flex items-center gap-2">
+                    <span className="text-orange-300 text-xs">
+                      {revenueCogsSectionOpen ? "▾" : "▸"}
+                    </span>
+                    <div>
+                      <h3 className="text-sm font-bold text-orange-200">
+                        Revenue & COGS
+                      </h3>
+                      <p className="text-xs text-orange-400/90 mt-1">
+                        Total Revenue, COGS (from % of revenue by line), Gross
+                        Profit, Gross Margin %
+                      </p>
+                    </div>
+                  </div>
+                </button>
+              </td>
             </tr>
-            {/* Revenue total */}
-            <tr className="border-b border-slate-900 hover:bg-slate-900/40">
-              <td className="px-3 py-2 text-slate-200 font-bold">Revenue</td>
-              {years.map((y) => {
-                const value = revenueTotalByYear[y] ?? 0;
-                return (
-                  <td key={y} className="px-3 py-2 text-right text-slate-100 tabular-nums">
-                    {value !== 0 ? formatAccounting(value, unit, showDecimals) : "—"}
-                  </td>
-                );
-              })}
-            </tr>
-            {/* COGS breakdown by revenue line */}
-            {leafRevenueLinesForCogs.map(({ id, label, depth }) => (
-              <tr key={`cogs-${id}`} className="border-b border-slate-900 hover:bg-slate-900/40">
-                <td className="px-3 py-2 text-slate-300" style={{ paddingLeft: 12 + depth * 14 }}>
-                  {label} — COGS
-                </td>
-                {years.map((y) => {
-                  const value = cogsByLineByYear[id]?.[y] ?? 0;
-                  return (
-                    <td key={y} className="px-3 py-2 text-right text-slate-100 tabular-nums">
-                      {value !== 0 ? formatAccounting(value, unit, showDecimals) : "—"}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-            {/* Total COGS */}
-            <tr className="border-b border-slate-900 hover:bg-slate-900/40 bg-orange-950/20">
-              <td className="px-3 py-2 text-orange-200 font-semibold">Cost of Goods Sold (COGS)</td>
-              {years.map((y) => {
-                const value = projectedCogsByYear[y] ?? 0;
-                return (
-                  <td key={y} className="px-3 py-2 text-right text-orange-100 tabular-nums font-medium">
-                    {value !== 0 ? formatAccounting(value, unit, showDecimals) : "—"}
-                  </td>
-                );
-              })}
-            </tr>
-            {/* Gross Profit */}
-            <tr className="border-b border-slate-900 hover:bg-slate-900/40">
-              <td className="px-3 py-2 text-slate-200 font-semibold">Gross Profit</td>
-              {years.map((y) => {
-                const rev = revenueTotalByYear[y] ?? 0;
-                const cogs = projectedCogsByYear[y] ?? 0;
-                const value = rev - cogs;
-                return (
-                  <td key={y} className="px-3 py-2 text-right text-slate-100 tabular-nums">
-                    {value !== 0 ? formatAccounting(value, unit, showDecimals) : "—"}
-                  </td>
-                );
-              })}
-            </tr>
-            {/* Gross Margin % */}
-            <tr className="border-b border-slate-900 hover:bg-slate-900/40">
-              <td className="px-3 py-2 text-slate-200 font-semibold">Gross Margin %</td>
-              {years.map((y) => {
-                const rev = revenueTotalByYear[y] ?? 0;
-                const cogs = projectedCogsByYear[y] ?? 0;
-                const value = rev > 0 ? ((rev - cogs) / rev) * 100 : 0;
-                return (
-                  <td key={y} className="px-3 py-2 text-right text-slate-100 tabular-nums">
-                    {value !== 0 ? `${value.toFixed(2)}%` : "—"}
-                  </td>
-                );
-              })}
-            </tr>
-            {/* Revenue forecast methodology — YoY % per year per line */}
-            {revenueRows.length > 0 && methodologyYoY.length > 0 && (
+            {revenueCogsSectionOpen && (
               <>
-                <tr className="border-t-4 border-slate-700">
-                  <td
-                    colSpan={1 + years.length}
-                    className="px-3 py-3 bg-slate-900/50"
-                  >
-                    <h3 className="text-sm font-bold text-slate-100">
-                      Revenue forecast methodology
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-1">
-                      YoY % by line (projection years)
-                    </p>
-                  </td>
-                </tr>
-                <tr className="border-b border-slate-800 bg-slate-900/30">
+                <tr className="border-b border-slate-800 bg-orange-950/20">
                   <td className="px-3 py-2 text-slate-400 text-xs font-medium">
                     Line
                   </td>
@@ -597,39 +728,238 @@ export default function ISBuildPreview() {
                       key={y}
                       className="px-3 py-2 text-right text-slate-400 text-xs font-medium"
                     >
-                      {y.endsWith("A") ? "—" : `${y} YoY%`}
+                      {y}
                     </td>
                   ))}
                 </tr>
-                {methodologyYoY.map(({ rowId, label, depth, yoyByYear }) => (
-                  <tr
-                    key={`method-${rowId}`}
-                    className="border-b border-slate-900"
-                  >
-                    <td
-                      className="px-3 py-2 text-slate-400 text-xs"
-                      style={{ paddingLeft: 12 + depth * 14 }}
+                {/* Revenue total */}
+                <tr className="border-b border-slate-900 hover:bg-slate-900/40">
+                  <td className="px-3 py-2 text-slate-200 font-bold">
+                    Revenue
+                  </td>
+                  {years.map((y) => {
+                    const value = revenueTotalByYear[y] ?? 0;
+                    return (
+                      <td
+                        key={y}
+                        className="px-3 py-2 text-right text-slate-100 tabular-nums"
+                      >
+                        {value !== 0
+                          ? formatAccounting(value, unit, showDecimals)
+                          : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* COGS breakdown by revenue line (supports collapsing by parent/child depth) */}
+                {leafRevenueLinesForCogs.map(({ id, label, depth }, index) => {
+                  // Determine if this COGS row has descendants (based on depth ordering)
+                  let hasDescendants = false;
+                  for (let j = index + 1; j < leafRevenueLinesForCogs.length; j++) {
+                    const next = leafRevenueLinesForCogs[j];
+                    if (next.depth <= depth) break;
+                    hasDescendants = true;
+                    break;
+                  }
+
+                  // Hide row if any ancestor in Revenue hierarchy is collapsed
+                  let hidden = false;
+                  let currentDepth = depth;
+                  for (let j = index - 1; j >= 0; j--) {
+                    const prev = leafRevenueLinesForCogs[j];
+                    if (prev.depth < currentDepth) {
+                      if (collapsedRowIds.has(prev.id)) {
+                        hidden = true;
+                        break;
+                      }
+                      currentDepth = prev.depth;
+                    }
+                  }
+                  if (hidden) return null;
+
+                  const isCollapsed = collapsedRowIds.has(id);
+
+                  return (
+                    <tr
+                      key={`cogs-${id}`}
+                      className="border-b border-slate-900 hover:bg-slate-900/40"
                     >
-                      <span className="text-slate-300">{label}</span>
-                    </td>
-                    {years.map((y) => {
-                      const isProj = !y.endsWith("A");
-                      const val = isProj ? yoyByYear[y] : null;
-                      const display =
-                        val != null
-                          ? `${val}%`
-                          : "—";
-                      return (
+                      <td
+                        className="px-3 py-2 text-slate-300"
+                        style={{ paddingLeft: 12 + depth * 14 }}
+                      >
+                        <button
+                          type="button"
+                          className="flex items-center gap-2 text-left w-full"
+                          onClick={() => {
+                            if (!hasDescendants) return;
+                            setCollapsedRowIds((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(id)) next.delete(id);
+                              else next.add(id);
+                              return next;
+                            });
+                          }}
+                        >
+                          {hasDescendants && (
+                            <span className="text-slate-500 text-[10px]">
+                              {isCollapsed ? "▸" : "▾"}
+                            </span>
+                          )}
+                          <span>{label} — COGS</span>
+                        </button>
+                      </td>
+                      {years.map((y) => {
+                        const value = cogsByLineByYear[id]?.[y] ?? 0;
+                        return (
+                          <td
+                            key={y}
+                            className="px-3 py-2 text-right text-slate-100 tabular-nums"
+                          >
+                            {value !== 0
+                              ? formatAccounting(value, unit, showDecimals)
+                              : "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+                {/* Total COGS */}
+                <tr className="border-b border-slate-900 hover:bg-slate-900/40 bg-orange-950/20">
+                  <td className="px-3 py-2 text-orange-200 font-semibold">
+                    Cost of Goods Sold (COGS)
+                  </td>
+                  {years.map((y) => {
+                    const value = projectedCogsByYear[y] ?? 0;
+                    return (
+                      <td
+                        key={y}
+                        className="px-3 py-2 text-right text-orange-100 tabular-nums font-medium"
+                      >
+                        {value !== 0
+                          ? formatAccounting(value, unit, showDecimals)
+                          : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Gross Profit */}
+                <tr className="border-b border-slate-900 hover:bg-slate-900/40">
+                  <td className="px-3 py-2 text-slate-200 font-semibold">
+                    Gross Profit
+                  </td>
+                  {years.map((y) => {
+                    const rev = revenueTotalByYear[y] ?? 0;
+                    const cogs = projectedCogsByYear[y] ?? 0;
+                    const value = rev - cogs;
+                    return (
+                      <td
+                        key={y}
+                        className="px-3 py-2 text-right text-slate-100 tabular-nums"
+                      >
+                        {value !== 0
+                          ? formatAccounting(value, unit, showDecimals)
+                          : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Gross Margin % */}
+                <tr className="border-b border-slate-900 hover:bg-slate-900/40">
+                  <td className="px-3 py-2 text-slate-200 font-semibold">
+                    Gross Margin %
+                  </td>
+                  {years.map((y) => {
+                    const rev = revenueTotalByYear[y] ?? 0;
+                    const cogs = projectedCogsByYear[y] ?? 0;
+                    const value = rev > 0 ? ((rev - cogs) / rev) * 100 : 0;
+                    return (
+                      <td
+                        key={y}
+                        className="px-3 py-2 text-right text-slate-100 tabular-nums"
+                      >
+                        {value !== 0 ? `${value.toFixed(2)}%` : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              </>
+            )}
+            {/* Revenue forecast methodology — YoY % per year per line */}
+            {revenueRows.length > 0 && methodologyYoY.length > 0 && (
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td
+                    colSpan={1 + years.length}
+                    className="px-3 py-3 bg-slate-900/50"
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRevenueMethodSectionOpen((open) => !open)
+                      }
+                      className="flex w-full items-start justify-between text-left"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-300 text-xs">
+                          {revenueMethodSectionOpen ? "▾" : "▸"}
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-100">
+                            Revenue forecast methodology
+                          </h3>
+                          <p className="text-xs text-slate-500 mt-1">
+                            YoY % by line (projection years)
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  </td>
+                </tr>
+                {revenueMethodSectionOpen && (
+                  <>
+                    <tr className="border-b border-slate-800 bg-slate-900/30">
+                      <td className="px-3 py-2 text-slate-400 text-xs font-medium">
+                        Line
+                      </td>
+                      {years.map((y) => (
                         <td
                           key={y}
-                          className="px-3 py-2 text-right text-slate-400 text-xs tabular-nums"
+                          className="px-3 py-2 text-right text-slate-400 text-xs font-medium"
                         >
-                          {display}
+                          {y.endsWith("A") ? "—" : `${y} YoY%`}
                         </td>
-                      );
-                    })}
-                  </tr>
-                ))}
+                      ))}
+                    </tr>
+                    {methodologyYoY.map(({ rowId, label, depth, yoyByYear }) => (
+                      <tr
+                        key={`method-${rowId}`}
+                        className="border-b border-slate-900"
+                      >
+                        <td
+                          className="px-3 py-2 text-slate-400 text-xs"
+                          style={{ paddingLeft: 12 + depth * 14 }}
+                        >
+                          <span className="text-slate-300">{label}</span>
+                        </td>
+                        {years.map((y) => {
+                          const isProj = !y.endsWith("A");
+                          const val = isProj ? yoyByYear[y] : null;
+                          const display = val != null ? `${val}%` : "—";
+                          return (
+                            <td
+                              key={y}
+                              className="px-3 py-2 text-right text-slate-400 text-xs tabular-nums"
+                            >
+                              {display}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </>
+                )}
               </>
             )}
             {/* COGS forecast methodology — COGS % of revenue by line (configured %) */}
@@ -640,49 +970,250 @@ export default function ISBuildPreview() {
                     colSpan={1 + years.length}
                     className="px-3 py-3 bg-orange-950/30"
                   >
-                    <h3 className="text-sm font-bold text-orange-200">
-                      COGS forecast methodology
-                    </h3>
-                    <p className="text-xs text-orange-400/90 mt-1">
-                      COGS % of revenue by line (projection years)
-                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCogsMethodSectionOpen((open) => !open)
+                      }
+                      className="flex w-full items-start justify-between text-left"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-orange-300 text-xs">
+                          {cogsMethodSectionOpen ? "▾" : "▸"}
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-bold text-orange-200">
+                            COGS forecast methodology
+                          </h3>
+                          <p className="text-xs text-orange-400/90 mt-1">
+                            COGS % of revenue by line (projection years)
+                          </p>
+                        </div>
+                      </div>
+                    </button>
                   </td>
                 </tr>
-                <tr className="border-b border-slate-800 bg-orange-950/20">
-                  <td className="px-3 py-2 text-orange-300/90 text-xs font-medium">
-                    Line
-                  </td>
-                  {years.map((y) => (
-                    <td
-                      key={y}
-                      className="px-3 py-2 text-right text-orange-300/90 text-xs font-medium"
-                    >
-                      {y}
-                    </td>
-                  ))}
-                </tr>
-                {methodologyCogsPct.map(({ id, label, depth, pctByYear }) => (
-                  <tr key={id} className="border-b border-slate-900">
-                    <td
-                      className="px-3 py-2 text-orange-200/90 text-xs"
-                      style={{ paddingLeft: 12 + depth * 14 }}
-                    >
-                      {label}
-                    </td>
-                    {years.map((y) => {
-                      const val = pctByYear[y];
-                      const display = val != null ? `${val}%` : "—";
-                      return (
+                {cogsMethodSectionOpen && (
+                  <>
+                    <tr className="border-b border-slate-800 bg-orange-950/20">
+                      <td className="px-3 py-2 text-orange-300/90 text-xs font-medium">
+                        Line
+                      </td>
+                      {years.map((y) => (
                         <td
                           key={y}
-                          className="px-3 py-2 text-right text-orange-200/90 text-xs tabular-nums"
+                          className="px-3 py-2 text-right text-orange-300/90 text-xs font-medium"
                         >
-                          {display}
+                          {y}
                         </td>
+                      ))}
+                    </tr>
+                    {methodologyCogsPct.map(
+                      ({ id, label, depth, pctByYear }) => (
+                        <tr key={id} className="border-b border-slate-900">
+                          <td
+                            className="px-3 py-2 text-orange-200/90 text-xs"
+                            style={{ paddingLeft: 12 + depth * 14 }}
+                          >
+                            {label}
+                          </td>
+                          {years.map((y) => {
+                            const val = pctByYear[y];
+                            const display = val != null ? `${val}%` : "—";
+                            return (
+                              <td
+                                key={y}
+                                className="px-3 py-2 text-right text-orange-200/90 text-xs tabular-nums"
+                              >
+                                {display}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      )
+                    )}
+                  </>
+                )}
+              </>
+            )}
+            {/* SG&A — projected amounts by item and total */}
+            {sgaRowsFlat.length > 0 && (
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td
+                    colSpan={1 + years.length}
+                    className="px-3 py-3 bg-purple-950/30"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSgaSectionOpen((open) => !open)}
+                      className="flex w-full items-start justify-between text-left"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-purple-300 text-xs">
+                          {sgaSectionOpen ? "▾" : "▸"}
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-bold text-purple-200">
+                            SG&A
+                          </h3>
+                          <p className="text-xs text-purple-400/90 mt-1">
+                            Revenue, SG&A items (from % of revenue), Total SG&A
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  </td>
+                </tr>
+                {sgaSectionOpen && (
+                  <>
+                    <tr className="border-b border-slate-800 bg-purple-950/20">
+                      <td className="px-3 py-2 text-slate-400 text-xs font-medium">
+                        Line
+                      </td>
+                      {years.map((y) => (
+                        <td
+                          key={y}
+                          className="px-3 py-2 text-right text-slate-400 text-xs font-medium"
+                        >
+                          {y}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr className="border-b border-slate-900 hover:bg-slate-900/40">
+                      <td className="px-3 py-2 text-slate-200 font-bold">
+                        Revenue
+                      </td>
+                      {years.map((y) => {
+                        const value = revenueTotalByYear[y] ?? 0;
+                        return (
+                          <td
+                            key={y}
+                            className="px-3 py-2 text-right text-slate-100 tabular-nums"
+                          >
+                            {value !== 0 ? formatAccounting(value, unit, showDecimals) : "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    {sgaRowsFlat.map(({ row, depth }) => {
+                      const valueByYear = projectedSgaByRowIdByYear[row.id];
+                      if (!valueByYear) return null;
+                      return (
+                        <tr
+                          key={`sga-${row.id}`}
+                          className="border-b border-slate-900 hover:bg-slate-900/40"
+                        >
+                          <td
+                            className="px-3 py-2 text-purple-200/90 text-xs"
+                            style={{ paddingLeft: 12 + depth * 14 }}
+                          >
+                            {row.label}
+                          </td>
+                          {years.map((y) => {
+                            const value = valueByYear[y] ?? 0;
+                            return (
+                              <td
+                                key={y}
+                                className="px-3 py-2 text-right text-slate-100 tabular-nums"
+                              >
+                                {value !== 0 ? formatAccounting(value, unit, showDecimals) : "—"}
+                              </td>
+                            );
+                          })}
+                        </tr>
                       );
                     })}
-                  </tr>
-                ))}
+                    <tr className="border-b border-slate-900 hover:bg-slate-900/40 bg-purple-950/20">
+                      <td className="px-3 py-2 text-purple-200 font-semibold">
+                        Total SG&A
+                      </td>
+                      {years.map((y) => {
+                        const value = totalSgaByYear[y] ?? 0;
+                        return (
+                          <td
+                            key={y}
+                            className="px-3 py-2 text-right text-purple-100 tabular-nums font-medium"
+                          >
+                            {value !== 0 ? formatAccounting(value, unit, showDecimals) : "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </>
+                )}
+              </>
+            )}
+            {/* SG&A forecast methodology — configured % of revenue by item */}
+            {methodologySgaPct.length > 0 && (
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td
+                    colSpan={1 + years.length}
+                    className="px-3 py-3 bg-purple-950/30"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSgaMethodSectionOpen((open) => !open)}
+                      className="flex w-full items-start justify-between text-left"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-purple-300 text-xs">
+                          {sgaMethodSectionOpen ? "▾" : "▸"}
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-bold text-purple-200">
+                            SG&A forecast methodology
+                          </h3>
+                          <p className="text-xs text-purple-400/90 mt-1">
+                            SG&A % of revenue by item (projection years)
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  </td>
+                </tr>
+                {sgaMethodSectionOpen && (
+                  <>
+                    <tr className="border-b border-slate-800 bg-purple-950/20">
+                      <td className="px-3 py-2 text-purple-300/90 text-xs font-medium">
+                        Line
+                      </td>
+                      {years.map((y) => (
+                        <td
+                          key={y}
+                          className="px-3 py-2 text-right text-purple-300/90 text-xs font-medium"
+                        >
+                          {y}
+                        </td>
+                      ))}
+                    </tr>
+                    {methodologySgaPct.map(
+                      ({ id, label, depth: d, pctByYear }) => (
+                        <tr key={id} className="border-b border-slate-900">
+                          <td
+                            className="px-3 py-2 text-purple-200/90 text-xs"
+                            style={{ paddingLeft: 12 + d * 14 }}
+                          >
+                            {label}
+                          </td>
+                          {years.map((y) => {
+                            const val = pctByYear[y];
+                            const display = val != null ? `${Number(val).toFixed(1)}%` : "—";
+                            return (
+                              <td
+                                key={y}
+                                className="px-3 py-2 text-right text-purple-200/90 text-xs tabular-nums"
+                              >
+                                {display}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      )
+                    )}
+                  </>
+                )}
               </>
             )}
           </tbody>

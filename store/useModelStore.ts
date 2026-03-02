@@ -66,6 +66,18 @@ function removeRowDeep(rows: Row[], rowId: string): Row[] {
     });
 }
 
+function renameRowDeep(rows: Row[], rowId: string, label: string): Row[] {
+  return rows.map((r) => {
+    if (r.id === rowId) {
+      return { ...r, label };
+    }
+    if (r.children?.length) {
+      return { ...r, children: renameRowDeep(r.children, rowId, label) };
+    }
+    return r;
+  });
+}
+
 /** Find a row anywhere in the tree by id */
 function findRowDeep(rows: Row[], rowId: string): Row | null {
   for (const r of rows) {
@@ -76,6 +88,18 @@ function findRowDeep(rows: Row[], rowId: string): Row | null {
     }
   }
   return null;
+}
+
+/** Collect ids of rows that have children (so we don't overwrite their values with sum-of-children in recompute). */
+function collectParentIdsWithChildren(rows: Row[]): Set<string> {
+  const set = new Set<string>();
+  for (const r of rows) {
+    if (r.children?.length) {
+      set.add(r.id);
+      collectParentIdsWithChildren(r.children).forEach((id) => set.add(id));
+    }
+  }
+  return set;
 }
 
 /** Add an existing row as child of parentId (for moving into WC, etc.) */
@@ -226,6 +250,20 @@ export type ProjectSnapshot = {
   cogsPctModeByRevenueLine: Record<string, "constant" | "custom">;
   /** IS Build: when mode is 'custom', lineId -> year -> pct (0–100). */
   cogsPctByRevenueLineByYear: Record<string, Record<string, number>>;
+  /** IS Build: SG&A as % of revenue per SG&A item id (0–100). Constant mode. */
+  sgaPctByItemId: Record<string, number>;
+  /** IS Build: 'constant' | 'custom' per SG&A item. */
+  sgaPctModeByItemId: Record<string, "constant" | "custom">;
+  /** IS Build: custom SG&A % by item and year. */
+  sgaPctByItemIdByYear: Record<string, Record<string, number>>;
+  /** IS Build: sub-item (child) % of parent SG&A item (0–100). Used when item has parent in SG&A tree. */
+  sgaPctOfParentByItemId: Record<string, number>;
+  /** IS Build: 'constant' | 'custom' per sub-item for % of parent. */
+  sgaPctOfParentModeByItemId: Record<string, "constant" | "custom">;
+  /** IS Build: custom sub-item % of parent by item and year. */
+  sgaPctOfParentByItemIdByYear: Record<string, Record<string, number>>;
+  /** IS Build: historic amounts per sub-item per year (for breakdown helper Option A). Stored in same unit as IS. */
+  sgaHistoricAmountByItemIdByYear: Record<string, Record<string, number>>;
 };
 
 export type ProjectMeta = {
@@ -281,10 +319,21 @@ export type ModelState = {
   revenueProjectionConfig: RevenueProjectionConfig;
   /** IS Build: COGS % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
-  /** IS Build: 'constant' | 'custom' per line. */
+  /** IS Build: 'constant' | 'custom' per COGS line. */
   cogsPctModeByRevenueLine: Record<string, "constant" | "custom">;
-  /** IS Build: custom COGS % by line and year. */
+  /** IS Build: custom COGS % by COGS line and year. */
   cogsPctByRevenueLineByYear: Record<string, Record<string, number>>;
+  /** IS Build: SG&A % of revenue per SG&A item id (0–100). Constant mode. */
+  sgaPctByItemId: Record<string, number>;
+  /** IS Build: 'constant' | 'custom' per SG&A item. */
+  sgaPctModeByItemId: Record<string, "constant" | "custom">;
+  /** IS Build: custom SG&A % by item and year. */
+  sgaPctByItemIdByYear: Record<string, Record<string, number>>;
+  /** IS Build: sub-item % of parent (0–100). */
+  sgaPctOfParentByItemId: Record<string, number>;
+  sgaPctOfParentModeByItemId: Record<string, "constant" | "custom">;
+  sgaPctOfParentByItemIdByYear: Record<string, Record<string, number>>;
+  sgaHistoricAmountByItemIdByYear: Record<string, Record<string, number>>;
 };
 
 export type ModelActions = {
@@ -300,6 +349,7 @@ export type ModelActions = {
   insertRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", index: number, row: Row) => void;
   moveRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, direction: "up" | "down") => void;
   removeRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string) => void;
+  renameRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, label: string) => void;
   updateRowValue: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, year: string, value: number) => void;
   updateRowKind: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, kind: "input" | "calc" | "subtotal" | "total") => void;
 
@@ -354,6 +404,16 @@ export type ModelActions = {
   setCogsPctForRevenueLine: (revenueLineId: string, pct: number) => void;
   setCogsPctModeForRevenueLine: (revenueLineId: string, mode: "constant" | "custom") => void;
   setCogsPctForRevenueLineYear: (revenueLineId: string, year: string, pct: number) => void;
+  /** IS Build: set SG&A as % of revenue (0–100) for an SG&A item. */
+  setSgaPctForItem: (itemId: string, pct: number) => void;
+  setSgaPctModeForItem: (itemId: string, mode: "constant" | "custom") => void;
+  setSgaPctForItemYear: (itemId: string, year: string, pct: number) => void;
+  /** IS Build: set sub-item % of parent (0–100). */
+  setSgaPctOfParentForItem: (itemId: string, pct: number) => void;
+  setSgaPctOfParentModeForItem: (itemId: string, mode: "constant" | "custom") => void;
+  setSgaPctOfParentForItemYear: (itemId: string, year: string, pct: number) => void;
+  /** IS Build: set historic amount for a sub-item in a year (breakdown helper Option A). */
+  setSgaHistoricAmountForItemYear: (itemId: string, year: string, value: number) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -468,6 +528,13 @@ const defaultState: ModelState = {
   cogsPctByRevenueLine: {},
   cogsPctModeByRevenueLine: {},
   cogsPctByRevenueLineByYear: {},
+  sgaPctByItemId: {},
+  sgaPctModeByItemId: {},
+  sgaPctByItemIdByYear: {},
+  sgaPctOfParentByItemId: {},
+  sgaPctOfParentModeByItemId: {},
+  sgaPctOfParentByItemIdByYear: {},
+  sgaHistoricAmountByItemIdByYear: {},
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -493,6 +560,9 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     cogsPctByRevenueLine: state.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: state.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: state.cogsPctByRevenueLineByYear ?? {},
+    sgaPctByItemId: state.sgaPctByItemId ?? {},
+    sgaPctModeByItemId: state.sgaPctModeByItemId ?? {},
+    sgaPctByItemIdByYear: state.sgaPctByItemIdByYear ?? {},
   };
 }
 
@@ -522,6 +592,13 @@ function applyProjectSnapshot(
     cogsPctByRevenueLine: snapshot.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: snapshot.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: snapshot.cogsPctByRevenueLineByYear ?? {},
+    sgaPctByItemId: snapshot.sgaPctByItemId ?? {},
+    sgaPctModeByItemId: snapshot.sgaPctModeByItemId ?? {},
+    sgaPctByItemIdByYear: snapshot.sgaPctByItemIdByYear ?? {},
+    sgaPctOfParentByItemId: snapshot.sgaPctOfParentByItemId ?? {},
+    sgaPctOfParentModeByItemId: snapshot.sgaPctOfParentModeByItemId ?? {},
+    sgaPctOfParentByItemIdByYear: snapshot.sgaPctOfParentByItemIdByYear ?? {},
+    sgaHistoricAmountByItemIdByYear: snapshot.sgaHistoricAmountByItemIdByYear ?? {},
   }));
 }
 
@@ -1773,9 +1850,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
       console.log("addChildRow: Current rows count:", currentRows.length, "parentId:", parentId);
       console.log("addChildRow: Available row IDs:", currentRows.map(r => r.id));
       
-      // Check if parent exists before trying to add
-      const parentExists = currentRows.some((r) => r.id === parentId) || 
-                          currentRows.some((r) => r.children?.some((c) => c.id === parentId));
+      // Check if parent exists anywhere in the tree (nested parents e.g. SG&A sub-items)
+      const parentExists = findRowDeep(currentRows, parentId) !== null;
       
       if (!parentExists) {
         console.error("addChildRow: Parent row not found!", parentId, "in statement:", statement);
@@ -1786,8 +1862,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
       // Deep clone to avoid mutation issues
       const updated = addChildRow(JSON.parse(JSON.stringify(currentRows)), parentId, child);
       
-      // Verify the child was added
-      const parentRowAfterAdd = updated.find((r) => r.id === parentId);
+      // Verify the child was added (parent may be nested, so find in tree)
+      const parentRowAfterAdd = findRowDeep(updated, parentId);
       console.log("addChildRow: Parent row after add:", parentRowAfterAdd?.id, "children count:", parentRowAfterAdd?.children?.length);
       
       if (!parentRowAfterAdd) {
@@ -1795,7 +1871,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         return state; // Don't update if parent not found
       }
       
-      // If adding first child to Revenue, COGS, or SG&A, convert them to calc
+      // If adding first child to Revenue, COGS, or SG&A (top-level only), convert them to calc
       let finalRows = updated;
       
       if (parentId === "rev" || parentId === "cogs" || parentId === "sga") {
@@ -1819,6 +1895,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
       ];
       
       let recalculatedRows = finalRows;
+      const sgaParentIdsWithBreakdowns =
+        statement === "incomeStatement"
+          ? collectParentIdsWithChildren(
+              recalculatedRows.find((r) => r.id === "sga")?.children ?? []
+            )
+          : new Set<string>();
+      const revBreakdownIds = new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}));
+      const parentIdsWithProjectionBreakdowns =
+        statement === "incomeStatement"
+          ? new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns])
+          : undefined;
       allYears.forEach((year) => {
         const allStatements = {
           incomeStatement: state.incomeStatement,
@@ -1827,17 +1914,35 @@ export const useModelStore = create<ModelState & ModelActions>()(
         };
         const sbcBreakdowns = state.sbcBreakdowns;
         const danaBreakdowns = state.danaBreakdowns;
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns);
+        recalculatedRows = recomputeCalculations(
+          recalculatedRows,
+          year,
+          recalculatedRows,
+          allStatements,
+          sbcBreakdowns,
+          danaBreakdowns,
+          parentIdsWithProjectionBreakdowns
+        );
       });
       
-      // Final verification
-      const finalParentRow = recalculatedRows.find((r) => r.id === parentId);
+      // Final verification (parent may be nested)
+      const finalParentRow = findRowDeep(recalculatedRows, parentId);
       console.log("addChildRow: Final parent row children count:", finalParentRow?.children?.length);
       console.log("addChildRow: Final parent row children:", finalParentRow?.children?.map(c => c.label));
       
       const newState = { ...state, [statement]: recalculatedRows };
       console.log("addChildRow: Returning new state, statement rows count:", newState[statement].length);
       return newState;
+    });
+  },
+
+  renameRow: (statement, rowId, label) => {
+    const trimmed = (label ?? "").trim();
+    if (!trimmed) return;
+    set((state) => {
+      const currentRows = state[statement];
+      const updated = renameRowDeep(currentRows, rowId, trimmed);
+      return { ...state, [statement]: updated };
     });
   },
 
@@ -2053,7 +2158,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const danaBreakdowns = state.danaBreakdowns;
       const parentIdsWithProjectionBreakdowns =
         statement === "incomeStatement"
-          ? new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}))
+          ? new Set([
+              ...Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}),
+              ...collectParentIdsWithChildren(
+                state.incomeStatement.find((r) => r.id === "sga")?.children ?? []
+              ),
+            ])
           : undefined;
       const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns);
       
@@ -2417,15 +2527,27 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
   updateIncomeStatementValue: (rowId, year, value) => {
     set((state) => {
-      // Update the input value
       const updated = updateRowValueDeep(state.incomeStatement, rowId, year, value);
-      
-      // Recompute all calculated rows for this year
-      const recomputed = recomputeCalculations(updated, year, updated);
-      
-      return {
-        incomeStatement: recomputed,
+      const sgaChildren = state.incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+      const parentIdsWithProjectionBreakdowns = new Set([
+        ...Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}),
+        ...collectParentIdsWithChildren(sgaChildren),
+      ]);
+      const allStatements = {
+        incomeStatement: updated,
+        balanceSheet: state.balanceSheet,
+        cashFlow: state.cashFlow,
       };
+      const recomputed = recomputeCalculations(
+        updated,
+        year,
+        updated,
+        allStatements,
+        state.sbcBreakdowns,
+        state.danaBreakdowns,
+        parentIdsWithProjectionBreakdowns
+      );
+      return { incomeStatement: recomputed };
     });
   },
   
@@ -2668,6 +2790,81 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const byYear = { ...(byLine[revenueLineId] ?? {}), [year]: Math.max(0, Math.min(100, pct)) };
       return {
         cogsPctByRevenueLineByYear: { ...byLine, [revenueLineId]: byYear },
+      };
+    });
+  },
+
+  setSgaPctForItem: (itemId, pct) => {
+    set((state) => ({
+      sgaPctByItemId: {
+        ...(state.sgaPctByItemId ?? {}),
+        [itemId]: Math.max(0, Math.min(100, pct)),
+      },
+    }));
+  },
+
+  setSgaPctModeForItem: (itemId, mode) => {
+    set((state) => ({
+      sgaPctModeByItemId: {
+        ...(state.sgaPctModeByItemId ?? {}),
+        [itemId]: mode,
+      },
+    }));
+  },
+
+  setSgaPctForItemYear: (itemId, year, pct) => {
+    set((state) => {
+      const byItem = state.sgaPctByItemIdByYear ?? {};
+      const byYear = {
+        ...(byItem[itemId] ?? {}),
+        [year]: Math.max(0, Math.min(100, pct)),
+      };
+      return {
+        sgaPctByItemIdByYear: { ...byItem, [itemId]: byYear },
+      };
+    });
+  },
+
+  setSgaPctOfParentForItem: (itemId, pct) => {
+    set((state) => ({
+      sgaPctOfParentByItemId: {
+        ...(state.sgaPctOfParentByItemId ?? {}),
+        [itemId]: Math.max(0, Math.min(100, pct)),
+      },
+    }));
+  },
+
+  setSgaPctOfParentModeForItem: (itemId, mode) => {
+    set((state) => ({
+      sgaPctOfParentModeByItemId: {
+        ...(state.sgaPctOfParentModeByItemId ?? {}),
+        [itemId]: mode,
+      },
+    }));
+  },
+
+  setSgaPctOfParentForItemYear: (itemId, year, pct) => {
+    set((state) => {
+      const byItem = state.sgaPctOfParentByItemIdByYear ?? {};
+      const byYear = {
+        ...(byItem[itemId] ?? {}),
+        [year]: Math.max(0, Math.min(100, pct)),
+      };
+      return {
+        sgaPctOfParentByItemIdByYear: { ...byItem, [itemId]: byYear },
+      };
+    });
+  },
+
+  setSgaHistoricAmountForItemYear: (itemId, year, value) => {
+    set((state) => {
+      const byItem = state.sgaHistoricAmountByItemIdByYear ?? {};
+      const byYear = {
+        ...(byItem[itemId] ?? {}),
+        [year]: value,
+      };
+      return {
+        sgaHistoricAmountByItemIdByYear: { ...byItem, [itemId]: byYear },
       };
     });
   },
@@ -3296,12 +3493,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
             });
           }
 
-          // Recalculate all years for all statements
+          // Recalculate all years for all statements. Preserve historical values for rows with IS Build breakdowns (rev/cogs/sga parents and SG&A children like R&D that have sub-items).
+          const sgaChildren = state.incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+          const sgaParentIdsWithBreakdowns = collectParentIdsWithChildren(sgaChildren);
+          const revBreakdownIds = new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}));
+          const parentIdsWithProjectionBreakdowns = new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns]);
+
           allYears.forEach((year) => {
             const allStatements = { incomeStatement, balanceSheet, cashFlow };
             const sbcBreakdowns = state.sbcBreakdowns;
             const danaBreakdowns = state.danaBreakdowns || {};
-            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns);
             balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
             cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
           });

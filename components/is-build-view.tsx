@@ -4,7 +4,8 @@ import { useMemo, useState, useEffect } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import type { RevenueProjectionMethod, RevenueProjectionInputs } from "@/types/revenue-projection";
-import { formatCurrencyDisplay } from "@/lib/currency-utils";
+import { formatCurrencyDisplay, displayToStored, storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
+import { computeRowValue } from "@/lib/calculations";
 import CollapsibleSection from "@/components/collapsible-section";
 import RevenueForecastInputs from "@/components/revenue-forecast-inputs";
 import RevenueBreakdownAllocation from "@/components/revenue-breakdown-allocation";
@@ -23,7 +24,20 @@ const METHOD_LABELS: Record<RevenueProjectionMethod, string> = {
  */
 export default function ISBuildView() {
   const incomeStatement = useModelStore((s) => s.incomeStatement);
+  const balanceSheet = useModelStore((s) => s.balanceSheet);
+  const cashFlow = useModelStore((s) => s.cashFlow);
+  const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns ?? {});
+  const danaBreakdowns = useModelStore((s) => s.danaBreakdowns ?? {});
   const meta = useModelStore((s) => s.meta);
+
+  const allStatements = useMemo(
+    () => ({
+      incomeStatement: incomeStatement ?? [],
+      balanceSheet: balanceSheet ?? [],
+      cashFlow: cashFlow ?? [],
+    }),
+    [incomeStatement, balanceSheet, cashFlow]
+  );
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const setRevenueProjectionMethod = useModelStore((s) => s.setRevenueProjectionMethod);
   const setRevenueProjectionInputs = useModelStore((s) => s.setRevenueProjectionInputs);
@@ -36,12 +50,35 @@ export default function ISBuildView() {
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
   const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
+  const sgaPctByItemId = useModelStore((s) => s.sgaPctByItemId ?? {});
+  const sgaPctModeByItemId = useModelStore((s) => s.sgaPctModeByItemId ?? {});
+  const sgaPctByItemIdByYear = useModelStore((s) => s.sgaPctByItemIdByYear ?? {});
+  const setSgaPctForItem = useModelStore((s) => s.setSgaPctForItem);
+  const setSgaPctModeForItem = useModelStore((s) => s.setSgaPctModeForItem);
+  const setSgaPctForItemYear = useModelStore((s) => s.setSgaPctForItemYear);
+  const sgaPctOfParentByItemId = useModelStore((s) => s.sgaPctOfParentByItemId ?? {});
+  const sgaPctOfParentModeByItemId = useModelStore((s) => s.sgaPctOfParentModeByItemId ?? {});
+  const sgaPctOfParentByItemIdByYear = useModelStore((s) => s.sgaPctOfParentByItemIdByYear ?? {});
+  const sgaHistoricAmountByItemIdByYear = useModelStore((s) => s.sgaHistoricAmountByItemIdByYear ?? {});
+  const setSgaPctOfParentForItem = useModelStore((s) => s.setSgaPctOfParentForItem);
+  const setSgaPctOfParentModeForItem = useModelStore((s) => s.setSgaPctOfParentModeForItem);
+  const setSgaPctOfParentForItemYear = useModelStore((s) => s.setSgaPctOfParentForItemYear);
+  const setSgaHistoricAmountForItemYear = useModelStore((s) => s.setSgaHistoricAmountForItemYear);
+  const addChildRow = useModelStore((s) => s.addChildRow);
+  const removeRow = useModelStore((s) => s.removeRow);
+  const renameRow = useModelStore((s) => s.renameRow);
 
   const [newBreakdownLabel, setNewBreakdownLabel] = useState("");
   const [addingForParent, setAddingForParent] = useState<string | null>(null);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [editingBreakdown, setEditingBreakdown] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
+  const [editingSgaItemId, setEditingSgaItemId] = useState<string | null>(null);
+  const [editSgaLabel, setEditSgaLabel] = useState("");
+  const [confirmedSgaItems, setConfirmedSgaItems] = useState<Set<string>>(new Set());
+  const [addingSgaSubItemParentId, setAddingSgaSubItemParentId] = useState<string | null>(null);
+  const [newSgaSubItemLabel, setNewSgaSubItemLabel] = useState("");
+  const [sgaBreakdownHelperModeByParentId, setSgaBreakdownHelperModeByParentId] = useState<Record<string, "historic_amounts" | "weights">>({});
   const [confirmedBreakdowns, setConfirmedBreakdowns] = useState<Set<string>>(new Set());
   const [breakdownsExpanded, setBreakdownsExpanded] = useState<Set<string>>(new Set());
 
@@ -138,6 +175,7 @@ export default function ISBuildView() {
   const cogsRow = incomeStatement.find((r) => r.id === "cogs");
   const grossProfitRow = incomeStatement.find((r) => r.id === "gross_profit");
   const grossMarginRow = incomeStatement.find((r) => r.id === "gross_margin");
+  const sgaRow = incomeStatement.find((r) => r.id === "sga");
   const hasRevenueStreams = streams.length > 0;
   const years = historicalYears;
 
@@ -1268,6 +1306,776 @@ export default function ISBuildView() {
               </div>
             </>
           )}
+
+          {/* SG&A card – forecast SG&A as % of total revenue by item; supports breakdown (sub-items) */}
+          <CollapsibleSection
+            sectionId="is_build_sga"
+            title="Selling, General & Administrative (SG&A)"
+            description="Project SG&A items as a % of total revenue. Use Break down to add sub-items; only leaf items have a % input (parents = sum of children)."
+            colorClass="purple"
+            defaultExpanded={true}
+          >
+            {!sgaRow || !sgaRow.children || sgaRow.children.length === 0 ? (
+              <div className="rounded-md border border-purple-700/40 bg-purple-950/30 p-3 text-xs text-purple-100">
+                No SG&A items found. Add SG&A breakdowns under the SG&A row in the Historicals Income Statement, then
+                return here to set SG&A % of revenue.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-[11px] text-purple-200/80">
+                  For each <strong>leaf</strong> item below, enter the % of total revenue (0–100) for projection years.
+                  Parent rows are the sum of their sub-items. Use &quot;Break down&quot; to add sub-items to an item.
+                </p>
+                {(() => {
+                  // Flatten SG&A tree into { row, depth } for display; leaves have no children
+                  function flattenSga(rows: Row[], depth: number): Array<{ row: Row; depth: number }> {
+                    const out: Array<{ row: Row; depth: number }> = [];
+                    for (const r of rows) {
+                      out.push({ row: r, depth });
+                      if (r.children?.length) {
+                        out.push(...flattenSga(r.children, depth + 1));
+                      }
+                    }
+                    return out;
+                  }
+                  const sgaFlat = flattenSga(sgaRow.children, 0);
+
+                  const unit = (meta?.currencyUnit ?? "millions") as "units" | "thousands" | "millions";
+
+                  // Find row anywhere in tree by id (for reading canonical fixed-category values)
+                  function findRowDeep(rows: Row[], rowId: string): Row | null {
+                    for (const r of rows) {
+                      if (r.id === rowId) return r;
+                      if (r.children?.length) {
+                        const found = findRowDeep(r.children, rowId);
+                        if (found) return found;
+                      }
+                    }
+                    return null;
+                  }
+
+                  // Find row by label match (e.g. "R&D" or "Research & Development") anywhere in tree
+                  function findRowDeepByLabel(rows: Row[], labelPattern: RegExp): Row | null {
+                    for (const r of rows) {
+                      if (labelPattern.test((r.label ?? "").trim())) return r;
+                      if (r.children?.length) {
+                        const found = findRowDeepByLabel(r.children, labelPattern);
+                        if (found) return found;
+                      }
+                    }
+                    return null;
+                  }
+
+                  // Known fixed SG&A category ids and label patterns (user inputs historic data in Historicals for these)
+                  const FIXED_SGA_LOOKUP: { id: string; labelPattern: RegExp }[] = [
+                    { id: "rd", labelPattern: /r&d|research\s*&\s*development/i },
+                    { id: "other_opex", labelPattern: /other\s*operating|other\s*op\s*ex/i },
+                    { id: "danda", labelPattern: /d&a|depreciation\s*&\s*amortization/i },
+                  ];
+                  function getCanonicalRowForFixedCategory(row: Row, isRows: Row[]): Row | null {
+                    const label = (row.label ?? "").trim().toLowerCase();
+                    if (row.id === "rd" || row.id === "other_opex" || row.id === "danda") {
+                      const found = findRowDeep(isRows, row.id);
+                      if (found) return found;
+                    }
+                    for (const { id, labelPattern } of FIXED_SGA_LOOKUP) {
+                      if (labelPattern.test(row.label ?? "")) {
+                        const byId = findRowDeep(isRows, id);
+                        if (byId) return byId;
+                        const byLabel = findRowDeepByLabel(isRows, labelPattern);
+                        if (byLabel) return byLabel;
+                        return null;
+                      }
+                    }
+                    return null;
+                  }
+
+                  function renderSgaItem(item: Row, depth: number, parentItem: Row | null) {
+                    const isLeaf = !item.children?.length;
+                    const isSubItem = depth > 0;
+                    const mode = isSubItem
+                      ? (sgaPctOfParentModeByItemId[item.id] ?? "constant")
+                      : (sgaPctModeByItemId[item.id] ?? "constant");
+                    const constantPct = isSubItem
+                      ? (sgaPctOfParentByItemId[item.id] ?? 0)
+                      : (sgaPctByItemId[item.id] ?? 0);
+                    const byYear = isSubItem
+                      ? (sgaPctOfParentByItemIdByYear[item.id] ?? {})
+                      : (sgaPctByItemIdByYear[item.id] ?? {});
+                    const isEditing = editingSgaItemId === item.id;
+                    const isConfirmed = confirmedSgaItems.has(item.id);
+                    const breakdownMode = sgaBreakdownHelperModeByParentId[item.id] ?? "weights";
+
+                    // Fixed category amount: always use stored/computed values from the row that has the user's historic input (this row or canonical row by id/label), then sum of children / breakdown helper.
+                    const getFixedCategoryAmount = (row: Row, year: string): number => {
+                      const selfVal = (row.values ?? {})[year] ?? 0;
+                      if (selfVal !== 0) return selfVal;
+                      const canonicalRow = getCanonicalRowForFixedCategory(row, incomeStatement);
+                      if (canonicalRow && canonicalRow.id !== row.id) {
+                        const canonicalStored = (canonicalRow.values ?? {})[year] ?? 0;
+                        if (canonicalStored !== 0) return canonicalStored;
+                        const canonicalComputed = computeRowValue(
+                          canonicalRow,
+                          year,
+                          incomeStatement,
+                          incomeStatement,
+                          allStatements,
+                          sbcBreakdowns,
+                          danaBreakdowns
+                        ) ?? 0;
+                        if (canonicalComputed !== 0) return canonicalComputed;
+                      }
+                      if (row.children?.length) {
+                        const fromIS = row.children.reduce((s, c) => s + ((c.values ?? {})[year] ?? 0), 0);
+                        if (fromIS !== 0) return fromIS;
+                        return row.children.reduce(
+                          (s, c) => s + ((sgaHistoricAmountByItemIdByYear[c.id] ?? {})[year] ?? 0),
+                          0
+                        );
+                      }
+                      return 0;
+                    };
+
+                    // Historic % of revenue: always show the fixed category amount from the IS (informational only).
+                    const histPcts: { year: string; pct: number }[] = [];
+                    if (rev) {
+                      for (const y of historicalYears) {
+                        let itemVal =
+                          depth === 0 ? getFixedCategoryAmount(item, y) : (computeRowValue(
+                                item,
+                                y,
+                                incomeStatement,
+                                incomeStatement,
+                                allStatements,
+                                sbcBreakdowns,
+                                danaBreakdowns
+                              ) ?? 0);
+                        // If fixed amount is 0 (e.g. parent has children, no values on tree), use computed row value so R&D etc. show historic %
+                        if (depth === 0 && itemVal === 0) {
+                          itemVal = computeRowValue(
+                            item,
+                            y,
+                            incomeStatement,
+                            incomeStatement,
+                            allStatements,
+                            sbcBreakdowns,
+                            danaBreakdowns
+                          ) ?? 0;
+                        }
+                        const revVal =
+                          computeRowValue(
+                            rev,
+                            y,
+                            incomeStatement,
+                            incomeStatement,
+                            allStatements,
+                            sbcBreakdowns,
+                            danaBreakdowns
+                          ) ?? 0;
+                        if (revVal !== 0) {
+                          const pct = (itemVal / revVal) * 100;
+                          histPcts.push({ year: y, pct });
+                        }
+                      }
+                    }
+                    const pctValues = histPcts.map((p) => p.pct);
+                    const avg = pctValues.length > 0 ? pctValues.reduce((s, v) => s + v, 0) / pctValues.length : undefined;
+                    const last3 = pctValues.slice(-3);
+                    const last3Avg = last3.length > 0 ? last3.reduce((s, v) => s + v, 0) / last3.length : undefined;
+
+                    return (
+                      <div
+                        key={item.id}
+                        className="rounded-md border border-purple-700/50 bg-purple-950/40 p-3 space-y-2"
+                        style={{ marginLeft: depth * 12 }}
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          {isEditing ? (
+                            <div className="flex gap-2 items-center flex-1 min-w-0">
+                              <input
+                                type="text"
+                                className="flex-1 rounded border border-purple-700 bg-purple-950 px-2 py-1 text-xs text-purple-100 min-w-0"
+                                value={editSgaLabel}
+                                onChange={(e) => setEditSgaLabel(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    const trimmed = editSgaLabel.trim();
+                                    if (trimmed) renameRow("incomeStatement", item.id, trimmed);
+                                    setEditingSgaItemId(null);
+                                  }
+                                  if (e.key === "Escape") setEditingSgaItemId(null);
+                                }}
+                                autoFocus
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const trimmed = editSgaLabel.trim();
+                                  if (trimmed) renameRow("incomeStatement", item.id, trimmed);
+                                  setEditingSgaItemId(null);
+                                }}
+                                className="text-[10px] text-blue-300 hover:text-blue-200"
+                              >
+                                Save
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingSgaItemId(null)}
+                                className="text-[10px] text-purple-300/70"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-xs font-medium text-purple-50">{item.label}</span>
+                          )}
+                          {!isEditing && (
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {(isLeaf || depth === 0) && (
+                                <div className="flex items-center gap-2 text-[10px]">
+                                  <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name={`sga-mode-${item.id}`}
+                                      checked={mode === "constant"}
+                                      onChange={() =>
+                                        isSubItem
+                                          ? setSgaPctOfParentModeForItem(item.id, "constant")
+                                          : setSgaPctModeForItem(item.id, "constant")
+                                      }
+                                      className="rounded border-purple-700"
+                                    />
+                                    <span className="text-purple-200">Constant %</span>
+                                  </label>
+                                  <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <input
+                                      type="radio"
+                                      name={`sga-mode-${item.id}`}
+                                      checked={mode === "custom"}
+                                      onChange={() =>
+                                        isSubItem
+                                          ? setSgaPctOfParentModeForItem(item.id, "custom")
+                                          : setSgaPctModeForItem(item.id, "custom")
+                                      }
+                                      className="rounded border-purple-700"
+                                    />
+                                    <span className="text-purple-200">Different each year</span>
+                                  </label>
+                                </div>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setAddingSgaSubItemParentId(item.id);
+                                  setNewSgaSubItemLabel("");
+                                }}
+                                className="text-[10px] text-purple-400 hover:text-purple-300"
+                              >
+                                {isLeaf ? "+ Break down" : "+ Add sub-item"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingSgaItemId(item.id);
+                                  setEditSgaLabel(item.label);
+                                }}
+                                className="text-[10px] text-blue-300 hover:text-blue-200"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setConfirmedSgaItems((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(item.id)) next.delete(item.id);
+                                    else next.add(item.id);
+                                    return next;
+                                  })
+                                }
+                                className={`text-[10px] ${
+                                  isConfirmed ? "text-green-400" : "text-purple-300/80 hover:text-purple-100"
+                                }`}
+                              >
+                                {isConfirmed ? "Confirmed" : "Confirm"}
+                              </button>
+                              {depth > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeRow("incomeStatement", item.id)}
+                                  className="text-[10px] text-red-400 hover:text-red-300"
+                                >
+                                  Remove
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {addingSgaSubItemParentId === item.id && (
+                          <div className="mt-2 rounded-md border border-purple-600/50 bg-purple-950/50 p-2 flex flex-wrap items-center gap-2">
+                            <label className="text-[10px] text-purple-300">Sub-item name</label>
+                            <input
+                              type="text"
+                              value={newSgaSubItemLabel}
+                              onChange={(e) => setNewSgaSubItemLabel(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  const trimmed = newSgaSubItemLabel.trim();
+                                  if (trimmed) {
+                                    addChildRow("incomeStatement", item.id, trimmed);
+                                    setAddingSgaSubItemParentId(null);
+                                    setNewSgaSubItemLabel("");
+                                  }
+                                }
+                                if (e.key === "Escape") {
+                                  setAddingSgaSubItemParentId(null);
+                                  setNewSgaSubItemLabel("");
+                                }
+                              }}
+                              placeholder="New sub-item"
+                              className="flex-1 min-w-[120px] rounded border border-purple-700 bg-purple-950 px-2 py-1 text-xs text-purple-100 placeholder:text-purple-500"
+                              autoFocus
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const trimmed = newSgaSubItemLabel.trim();
+                                if (trimmed) {
+                                  addChildRow("incomeStatement", item.id, trimmed);
+                                  setAddingSgaSubItemParentId(null);
+                                  setNewSgaSubItemLabel("");
+                                }
+                              }}
+                              className="text-[10px] text-purple-200 bg-purple-800/80 hover:bg-purple-700/80 px-2 py-1 rounded"
+                            >
+                              Add
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAddingSgaSubItemParentId(null);
+                                setNewSgaSubItemLabel("");
+                              }}
+                              className="text-[10px] text-purple-400 hover:text-purple-200"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+
+                        {(isLeaf || depth === 0) && (
+                          <>
+                            {mode === "constant" ? (
+                              <div className="mt-2 flex flex-wrap items-center gap-3">
+                                <label className="flex items-center gap-2">
+                                  <span className="text-[10px] text-purple-300">
+                                    {isSubItem ? `% of ${parentItem?.label ?? "parent"}` : "SG&A % of Revenue"}
+                                  </span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={100}
+                                    step={0.1}
+                                    className="w-20 rounded-md border border-purple-800 bg-purple-950 px-2 py-1 text-xs text-purple-50"
+                                    value={constantPct === 0 ? "" : (isSubItem ? Number(constantPct).toFixed(1) : constantPct)}
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      if (v === "" || v === "-") {
+                                        if (isSubItem) setSgaPctOfParentForItem(item.id, 0);
+                                        else setSgaPctForItem(item.id, 0);
+                                        return;
+                                      }
+                                      const n = Number(v);
+                                      if (!Number.isNaN(n)) {
+                                        if (isSubItem) setSgaPctOfParentForItem(item.id, Math.round(n * 10) / 10);
+                                        else setSgaPctForItem(item.id, n);
+                                      }
+                                    }}
+                                    onBlur={(e) => {
+                                      if (e.target.value === "") {
+                                        if (isSubItem) setSgaPctOfParentForItem(item.id, 0);
+                                        else setSgaPctForItem(item.id, 0);
+                                      }
+                                    }}
+                                    placeholder="0"
+                                  />
+                                  <span className="text-[10px] text-purple-400">%</span>
+                                </label>
+                                {!isSubItem && (
+                                  <div className="text-[10px] text-purple-300 space-x-2">
+                                    {typeof avg === "number" && (
+                                      <span>
+                                        Avg hist: <span className="font-semibold">{avg.toFixed(2)}%</span>
+                                      </span>
+                                    )}
+                                    {typeof last3Avg === "number" && (
+                                      <span>
+                                        Last 3y: <span className="font-semibold">{last3Avg.toFixed(2)}%</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="mt-2 space-y-1">
+                                <div className="text-[10px] text-purple-300">
+                                  {isSubItem ? `% of ${parentItem?.label ?? "parent"} by year` : "SG&A % of Revenue by projection year"}
+                                </div>
+                                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                                  {projectionYears.map((y) => {
+                                    const pct = byYear[y] ?? 0;
+                                    return (
+                                      <label key={y} className="flex items-center gap-1.5">
+                                        <span className="text-[10px] text-purple-300 w-10">{y}</span>
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          max={100}
+                                          step={0.1}
+                                          className="w-16 rounded border border-purple-800 bg-purple-950 px-1.5 py-0.5 text-xs text-purple-50"
+                                          value={pct === 0 ? "" : pct}
+                                          onChange={(e) => {
+                                            const v = e.target.value;
+                                            if (v === "" || v === "-") {
+                                              if (isSubItem) setSgaPctOfParentForItemYear(item.id, y, 0);
+                                              else setSgaPctForItemYear(item.id, y, 0);
+                                              return;
+                                            }
+                                            const n = Number(v);
+                                            if (!Number.isNaN(n)) {
+                                              if (isSubItem) setSgaPctOfParentForItemYear(item.id, y, n);
+                                              else setSgaPctForItemYear(item.id, y, n);
+                                            }
+                                          }}
+                                          onBlur={(e) => {
+                                            if (e.target.value === "") {
+                                              if (isSubItem) setSgaPctOfParentForItemYear(item.id, y, 0);
+                                              else setSgaPctForItemYear(item.id, y, 0);
+                                            }
+                                          }}
+                                          placeholder="0"
+                                        />
+                                        <span className="text-[10px] text-purple-400">%</span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                                {!isSubItem && histPcts.length > 0 && (
+                                  <div className="mt-1 text-[10px] text-purple-300">
+                                    Hist % of Revenue:{" "}
+                                    {histPcts.map((p) => `${p.year}: ${p.pct.toFixed(2)}%`).join(" · ")}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {mode === "constant" && !isSubItem && histPcts.length > 0 && (
+                              <div className="mt-1 text-[10px] text-purple-300">
+                                Hist % of Revenue:{" "}
+                                {histPcts.map((p) => `${p.year}: ${p.pct.toFixed(2)}%`).join(" · ")}
+                              </div>
+                            )}
+                          </>
+                        )}
+
+                        {!isLeaf && item.children && item.children.length > 0 && (
+                          <>
+                            <div className="mt-3 rounded-md border border-purple-600/60 bg-purple-950/60 p-3 space-y-3">
+                              <div className="text-[11px] font-medium text-purple-200">Breakdown helper</div>
+                              <p className="text-[10px] text-purple-300/90">
+                                Set the category total as % of revenue above. Then split that total between sub-items using historic amounts or weights.
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {historicalYears.map((y) => {
+                                  let parentStored = getFixedCategoryAmount(item, y);
+                                  if (parentStored === 0) {
+                                    parentStored = computeRowValue(item, y, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+                                  }
+                                  const displayVal = storedToDisplay(parentStored, unit);
+                                  return (
+                                    <span key={y} className="text-[10px] text-purple-400">
+                                      {y}:{" "}
+                                      <span className="font-semibold text-purple-200">
+                                        {displayVal.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                      </span>
+                                      {getUnitLabel(unit) ? ` ${getUnitLabel(unit)}` : ""}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setSgaBreakdownHelperModeByParentId((prev) => ({ ...prev, [item.id]: "historic_amounts" }))}
+                                  className={`text-[10px] px-2 py-1 rounded ${breakdownMode === "historic_amounts" ? "bg-purple-700 text-purple-100" : "bg-purple-900/80 text-purple-300 hover:bg-purple-800"}`}
+                                >
+                                  Split by historic amounts
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSgaBreakdownHelperModeByParentId((prev) => ({ ...prev, [item.id]: "weights" }))}
+                                  className={`text-[10px] px-2 py-1 rounded ${breakdownMode === "weights" ? "bg-purple-700 text-purple-100" : "bg-purple-900/80 text-purple-300 hover:bg-purple-800"}`}
+                                >
+                                  Split by % weights
+                                </button>
+                              </div>
+                              {breakdownMode === "historic_amounts" && (
+                                <div className="space-y-2">
+                                  {(() => {
+                                    const parentTotalsByYear: Record<string, number> = {};
+                                    const childSumsByYear: Record<string, number> = {};
+                                    for (const y of historicalYears) {
+                                      let fixedCategoryTotal = getFixedCategoryAmount(item, y);
+                                      if (fixedCategoryTotal === 0) {
+                                        fixedCategoryTotal = computeRowValue(item, y, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+                                      }
+                                      let sum = 0;
+                                      for (const c of item.children ?? []) {
+                                        sum += (sgaHistoricAmountByItemIdByYear[c.id] ?? {})[y] ?? 0;
+                                      }
+                                      parentTotalsByYear[y] = fixedCategoryTotal;
+                                      childSumsByYear[y] = sum;
+                                    }
+
+                                    // Pick the most recent year where the user entered any child amounts and parent total exists
+                                    let impliedYear: string | null = null;
+                                    for (let i = historicalYears.length - 1; i >= 0; i--) {
+                                      const y = historicalYears[i];
+                                      if ((childSumsByYear[y] ?? 0) > 0) {
+                                        impliedYear = y;
+                                        break;
+                                      }
+                                    }
+
+                                    const unitLabel = getUnitLabel(unit);
+
+                                    const toleranceFor = (parentTotal: number) =>
+                                      Math.max(1, Math.abs(parentTotal) * 0.001); // 0.1% or $1 (stored)
+
+                                    return (
+                                      <div className="rounded-md border border-purple-700/40 bg-purple-950/40 p-2">
+                                        <div className="text-[10px] text-purple-300">
+                                          Validation (child totals vs fixed category total)
+                                        </div>
+                                        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                                          {historicalYears.map((y) => {
+                                            const parentTotal = parentTotalsByYear[y] ?? 0;
+                                            const childSum = childSumsByYear[y] ?? 0;
+                                            const diff = childSum - parentTotal;
+                                            const ok = Math.abs(diff) <= toleranceFor(parentTotal);
+                                            const parentDisp = storedToDisplay(parentTotal, unit);
+                                            const childDisp = storedToDisplay(childSum, unit);
+                                            const diffDisp = storedToDisplay(diff, unit);
+                                            return (
+                                              <div key={y} className="text-[10px]">
+                                                <span className="text-purple-400">{y}:</span>{" "}
+                                                <span className={ok ? "text-green-300" : "text-amber-300"}>
+                                                  Sum {childDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                                  {unitLabel ? ` ${unitLabel}` : ""}{" "}
+                                                  / Total {parentDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                                  {unitLabel ? ` ${unitLabel}` : ""}
+                                                  {parentTotal > 0 && (childSum > 0 || parentTotal > 0) && (
+                                                    <>
+                                                      {" "}
+                                                      (Diff {diffDisp.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                                                      {unitLabel ? ` ${unitLabel}` : ""})
+                                                    </>
+                                                  )}
+                                                </span>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                        <div className="mt-1 text-[10px] text-purple-400/90">
+                                          Implied % is based on{" "}
+                                          <span className="font-semibold text-purple-200">
+                                            {impliedYear ?? "the latest year with inputs"}
+                                          </span>
+                                          .
+                                        </div>
+                                      </div>
+                                    );
+                                  })()}
+                                  <div className="overflow-x-auto rounded border border-purple-700/50">
+                                    <table className="w-full text-[10px]">
+                                      <thead>
+                                        <tr className="border-b border-purple-700/50">
+                                          <th className="text-left py-1.5 px-2 text-purple-300">Sub-item</th>
+                                          {historicalYears.map((y) => (
+                                            <th key={y} className="text-right py-1.5 px-2 text-purple-300">{y}</th>
+                                          ))}
+                                          <th className="text-right py-1.5 px-2 text-purple-300">Implied %</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {item.children.map((child) => {
+                                          // Implied % should be based on the most recent year the user actually entered data for
+                                          let impliedYear: string | null = null;
+                                          const childAmounts = sgaHistoricAmountByItemIdByYear[child.id] ?? {};
+                                          for (let i = historicalYears.length - 1; i >= 0; i--) {
+                                            const y = historicalYears[i];
+                                            const amt = childAmounts[y] ?? 0;
+                                            if (amt > 0) {
+                                              impliedYear = y;
+                                              break;
+                                            }
+                                          }
+
+                                          const impliedAmount = impliedYear ? (childAmounts[impliedYear] ?? 0) : 0;
+                                          const totalChildrenForImpliedYear =
+                                            impliedYear && item.children
+                                              ? item.children.reduce(
+                                                  (sum, c) =>
+                                                    sum +
+                                                    ((sgaHistoricAmountByItemIdByYear[c.id] ?? {})[impliedYear] ?? 0),
+                                                  0
+                                                )
+                                              : 0;
+                                          const rawParentImplied = impliedYear
+                                            ? computeRowValue(item, impliedYear, incomeStatement, incomeStatement) ?? 0
+                                            : 0;
+                                          const denom =
+                                            rawParentImplied > 0 ? rawParentImplied : totalChildrenForImpliedYear;
+                                          const impliedPct = denom > 0 ? (impliedAmount / denom) * 100 : 0;
+                                          return (
+                                            <tr key={child.id} className="border-b border-purple-800/50">
+                                              <td className="py-1.5 px-2 text-purple-200">{child.label}</td>
+                                              {historicalYears.map((y) => {
+                                                const stored = (childAmounts[y] ?? 0);
+                                                const display = storedToDisplay(stored, unit);
+                                                const parentTotalY = getFixedCategoryAmount(item, y);
+                                                const pctOfTotal = parentTotalY > 0 && stored > 0 ? (stored / parentTotalY) * 100 : null;
+                                                return (
+                                                  <td key={y} className="py-1 px-2 text-right">
+                                                    <div className="flex flex-col items-end gap-0.5">
+                                                      <input
+                                                        type="number"
+                                                        step="any"
+                                                        className="w-16 rounded border border-purple-700 bg-purple-950 px-1 py-0.5 text-right text-purple-100 text-[10px]"
+                                                        value={display === 0 ? "" : display}
+                                                        onChange={(e) => {
+                                                          const v = e.target.value;
+                                                          if (v === "" || v === "-") {
+                                                            setSgaHistoricAmountForItemYear(child.id, y, 0);
+                                                            return;
+                                                          }
+                                                          const n = Number(v);
+                                                          if (!Number.isNaN(n)) setSgaHistoricAmountForItemYear(child.id, y, displayToStored(n, unit));
+                                                        }}
+                                                        placeholder="0"
+                                                      />
+                                                      {pctOfTotal != null && (
+                                                        <span className="text-[9px] text-purple-400 tabular-nums">
+                                                          {pctOfTotal.toFixed(1)}% of total
+                                                        </span>
+                                                      )}
+                                                    </div>
+                                                  </td>
+                                                );
+                                              })}
+                                              <td className="py-1.5 px-2 text-right text-purple-300 tabular-nums">
+                                                {impliedPct > 0 ? `${impliedPct.toFixed(1)}%` : "—"}
+                                              </td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const lastY = historicalYears[historicalYears.length - 1];
+                                        if (!lastY) return;
+                                        const parentLast = getFixedCategoryAmount(item, lastY);
+                                        if (parentLast <= 0) return;
+                                        item.children?.forEach((c) => {
+                                          const amt = (sgaHistoricAmountByItemIdByYear[c.id] ?? {})[lastY] ?? 0;
+                                          const pct = (amt / parentLast) * 100;
+                                          setSgaPctOfParentForItem(c.id, Math.round(pct * 10) / 10);
+                                        });
+                                      }}
+                                      className="text-[10px] text-purple-200 bg-purple-800/80 hover:bg-purple-700/80 px-2 py-1 rounded"
+                                    >
+                                      Apply last year mix
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        let totalParent = 0;
+                                        const sums: Record<string, number> = {};
+                                        item.children?.forEach((c) => { sums[c.id] = 0; });
+                                        historicalYears.forEach((y) => {
+                                          totalParent += getFixedCategoryAmount(item, y);
+                                          item.children?.forEach((c) => {
+                                            sums[c.id] = (sums[c.id] ?? 0) + ((sgaHistoricAmountByItemIdByYear[c.id] ?? {})[y] ?? 0);
+                                          });
+                                        });
+                                        if (totalParent <= 0) return;
+                                        item.children?.forEach((c) => {
+                                          const sum = sums[c.id] ?? 0;
+                                          const pct = (sum / totalParent) * 100;
+                                          setSgaPctOfParentForItem(c.id, Math.round(pct * 10) / 10);
+                                        });
+                                      }}
+                                      className="text-[10px] text-purple-200 bg-purple-800/80 hover:bg-purple-700/80 px-2 py-1 rounded"
+                                    >
+                                      Apply avg mix
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                              {breakdownMode === "weights" && (
+                                <div className="space-y-1">
+                                  {item.children.map((c) => {
+                                    const pct = sgaPctOfParentByItemId[c.id] ?? 0;
+                                    return (
+                                      <div key={c.id} className="flex items-center gap-2 text-[10px]">
+                                        <span className="text-purple-300 w-32 truncate">{c.label}</span>
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          max={100}
+                                          step={0.1}
+                                          className="w-14 rounded border border-purple-700 bg-purple-950 px-1.5 py-0.5 text-purple-100 text-right"
+                                          value={pct === 0 ? "" : Number(pct).toFixed(1)}
+                                          onChange={(e) => {
+                                            const v = e.target.value;
+                                            if (v === "" || v === "-") { setSgaPctOfParentForItem(c.id, 0); return; }
+                                            const n = Number(v);
+                                            if (!Number.isNaN(n)) setSgaPctOfParentForItem(c.id, Math.round(n * 10) / 10);
+                                          }}
+                                        />
+                                        <span className="text-purple-400">% of {item.label}</span>
+                                      </div>
+                                    );
+                                  })}
+                                  {(() => {
+                                    const total = (item.children ?? []).reduce((s, c) => s + (sgaPctOfParentByItemId[c.id] ?? 0), 0);
+                                    return (
+                                      <p className={`text-[10px] mt-1 ${Math.abs(total - 100) < 0.01 ? "text-green-400" : "text-amber-400"}`}>
+                                        Sub-items total: {total.toFixed(1)}% {Math.abs(total - 100) >= 0.01 ? "(should be 100%)" : ""}
+                                      </p>
+                                    );
+                                  })()}
+                                </div>
+                              )}
+                            </div>
+                            <div className="mt-2 space-y-2 border-l-2 border-purple-700/40 pl-3">
+                              {item.children.map((child) => renderSgaItem(child, depth + 1, item))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  return <>{sgaRow.children.map((item) => renderSgaItem(item, 0, null))}</>;
+                })()}
+              </div>
+            )}
+          </CollapsibleSection>
 
         </div>
       )}

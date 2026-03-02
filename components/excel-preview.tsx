@@ -176,10 +176,12 @@ function flattenRows(
   rows: Row[],
   depth = 0,
   expandedRows: Set<string> | null = null,
-  options?: FlattenOptions
+  options?: FlattenOptions,
+  parentId?: string
 ): Array<{ row: Row; depth: number; parentId?: string }> {
   const out: Array<{ row: Row; depth: number; parentId?: string }> = [];
   const forCashFlow = options?.forStatement === "cashflow";
+  const forIncome = options?.forStatement === "income";
 
   for (const r of rows) {
     // Skip EBITDA, EBITDA Margin, and SBC only for Income Statement (SBC stays in CFS)
@@ -197,8 +199,12 @@ function flattenRows(
     ) {
       continue;
     }
-    out.push({ row: r, depth });
-    if (Array.isArray(r.children) && r.children.length > 0 && (expandedRows === null || expandedRows.has(r.id))) {
+    out.push({ row: r, depth, parentId });
+    // INCOME STATEMENT: do not expand children of SG&A in the main preview. Historicals show R&D, Sales & Marketing, etc. as single lines with the user's fixed values; IS Build breakdown (e.g. R&D → 1, 2) must not appear here.
+    const skipExpandUnderSga = forIncome && parentId === "sga";
+    if (skipExpandUnderSga) {
+      // Show this row only; do not recurse into its children
+    } else if (Array.isArray(r.children) && r.children.length > 0 && (expandedRows === null || expandedRows.has(r.id))) {
       const filteredChildren = r.children.filter((child) => {
         const childLabelLower = child.label.toLowerCase();
         const skipChildSbc =
@@ -215,9 +221,9 @@ function flattenRows(
       });
       if (filteredChildren.length > 0) {
         out.push(
-          ...flattenRows(filteredChildren, depth + 1, expandedRows, options).map((item) => ({
+          ...flattenRows(filteredChildren, depth + 1, expandedRows, options, r.id).map((item) => ({
             ...item,
-            parentId: r.id,
+            parentId: item.parentId ?? r.id,
           }))
         );
       }

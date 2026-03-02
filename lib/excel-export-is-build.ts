@@ -155,6 +155,12 @@ export function exportISBuildToExcel(
     cogsPctByRevenueLine?: Record<string, number>;
     cogsPctModeByRevenueLine?: Record<string, "constant" | "custom">;
     cogsPctByRevenueLineByYear?: Record<string, Record<string, number>>;
+    sgaPctByItemId?: Record<string, number>;
+    sgaPctModeByItemId?: Record<string, "constant" | "custom">;
+    sgaPctByItemIdByYear?: Record<string, Record<string, number>>;
+    sgaPctOfParentByItemId?: Record<string, number>;
+    sgaPctOfParentModeByItemId?: Record<string, "constant" | "custom">;
+    sgaPctOfParentByItemIdByYear?: Record<string, Record<string, number>>;
   },
   options?: ISBuildExportOptions,
   wb?: any
@@ -177,6 +183,12 @@ export function exportISBuildToExcel(
   const cogsPctByRevenueLine = modelState.cogsPctByRevenueLine ?? {};
   const cogsPctModeByRevenueLine = modelState.cogsPctModeByRevenueLine ?? {};
   const cogsPctByRevenueLineByYear = modelState.cogsPctByRevenueLineByYear ?? {};
+  const sgaPctByItemId = modelState.sgaPctByItemId ?? {};
+  const sgaPctModeByItemId = modelState.sgaPctModeByItemId ?? {};
+  const sgaPctByItemIdByYear = modelState.sgaPctByItemIdByYear ?? {};
+  const sgaPctOfParentByItemId = modelState.sgaPctOfParentByItemId ?? {};
+  const sgaPctOfParentModeByItemId = modelState.sgaPctOfParentModeByItemId ?? {};
+  const sgaPctOfParentByItemIdByYear = modelState.sgaPctOfParentByItemIdByYear ?? {};
 
   if (years.length === 0 || projectionYears.length === 0) {
     ws.getCell(1, 1).value = "IS Build (no years configured)";
@@ -472,7 +484,98 @@ export function exportISBuildToExcel(
     }
   }
 
-  const assumStartRow = grossMarginExcelRow + 3;
+  // SG&A section: Revenue ref + SG&A items (sga.children only, no sub-expansion) + Total SG&A
+  const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+  const sgaChildren = sgaRow?.children ?? [];
+  const getSgaPctForYear = (itemId: string, year: string, depth: number): number => {
+    if (depth === 0) {
+      const mode = sgaPctModeByItemId[itemId] ?? "constant";
+      if (mode === "custom") return (sgaPctByItemIdByYear[itemId] ?? {})[year] ?? (sgaPctByItemId[itemId] ?? 0);
+      return sgaPctByItemId[itemId] ?? 0;
+    }
+    const mode = sgaPctOfParentModeByItemId[itemId] ?? "constant";
+    if (mode === "custom") return (sgaPctOfParentByItemIdByYear[itemId] ?? {})[year] ?? (sgaPctOfParentByItemId[itemId] ?? 0);
+    return sgaPctOfParentByItemId[itemId] ?? 0;
+  };
+  let sgaSectionStart = grossMarginExcelRow + 1;
+  let sgaRevRow = 0;
+  let sgaItemStartRow = 0;
+  if (sgaChildren.length > 0) {
+    sgaSectionStart += 1;
+    const sgaTitleRow = grossMarginExcelRow + 1;
+    sgaRevRow = sgaTitleRow + 1;
+    sgaItemStartRow = sgaRevRow + 1;
+    ws.getCell(sgaTitleRow, 1).value = "SG&A";
+    ws.getCell(sgaTitleRow, 1).font = { bold: true, size: 11, color: { argb: "FF000000" }, name: "Calibri" };
+    ws.getCell(sgaTitleRow, 1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7E6E6" } };
+    ws.getCell(sgaTitleRow, 1).border = borderAll;
+    for (let idx = 0; idx < years.length; idx++) {
+      const c = ws.getCell(sgaTitleRow, 2 + idx);
+      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7E6E6" } };
+      c.border = borderAll;
+    }
+    const sgaTotalExcelRow = sgaItemStartRow + sgaChildren.length;
+    ws.getCell(sgaRevRow, 1).value = "Revenue";
+    ws.getCell(sgaRevRow, 1).font = { size: 10, name: "Calibri", color: { argb: "FF000000" } };
+    ws.getCell(sgaRevRow, 1).border = borderAll;
+    for (let y = 0; y < years.length; y++) {
+      const col = 2 + y;
+      const colLetter = getColumnLetter(col);
+      ws.getCell(sgaRevRow, col).value = { formula: `=${colLetter}$${revenueTotalExcelRow}` };
+      ws.getCell(sgaRevRow, col).numFmt = "#,##0";
+      ws.getCell(sgaRevRow, col).fill = years[y].endsWith("A") ? { type: "pattern", pattern: "solid", fgColor: { argb: IB_HISTORIC_GRAY } } : {};
+    }
+    for (let i = 0; i < sgaChildren.length; i++) {
+      const child = sgaChildren[i];
+      const excelRow = sgaItemStartRow + i;
+      const labelCell = ws.getCell(excelRow, 1);
+      labelCell.value = child.label;
+      labelCell.font = { size: 10, name: "Calibri", color: { argb: "FF000000" } };
+      labelCell.border = borderAll;
+      for (let yearIdx = 0; yearIdx < years.length; yearIdx++) {
+        const year = years[yearIdx];
+        const col = 2 + yearIdx;
+        const colLetter = getColumnLetter(col);
+        const cell = ws.getCell(excelRow, col);
+        cell.font = { size: 10, name: "Calibri", color: { argb: "FF000000" } };
+        cell.border = borderAll;
+        if (year.endsWith("A")) {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_HISTORIC_GRAY } };
+          const val = computeRowValue(child, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+          cell.value = storedToDisplay(val, currencyUnit);
+          cell.numFmt = "#,##0";
+        } else {
+          // Formula filled in later loop after SG&A assumption rows exist
+          cell.numFmt = "#,##0";
+        }
+      }
+    }
+    const totalLabelCell = ws.getCell(sgaTotalExcelRow, 1);
+    totalLabelCell.value = "Total SG&A";
+    totalLabelCell.font = { size: 10, name: "Calibri", color: { argb: "FF000000" }, bold: true };
+    totalLabelCell.border = borderAll;
+    for (let yearIdx = 0; yearIdx < years.length; yearIdx++) {
+      const year = years[yearIdx];
+      const col = 2 + yearIdx;
+      const colLetter = getColumnLetter(col);
+      const cell = ws.getCell(sgaTotalExcelRow, col);
+      cell.font = { size: 10, name: "Calibri", color: { argb: "FF000000" }, bold: true };
+      cell.border = borderAll;
+      if (year.endsWith("A")) {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_HISTORIC_GRAY } };
+        const val = computeRowValue(sgaRow!, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+        cell.value = storedToDisplay(val, currencyUnit);
+        cell.numFmt = "#,##0";
+      } else {
+        const childRefs = sgaChildren.map((_, idx) => `${colLetter}$${sgaItemStartRow + idx}`);
+        cell.value = { formula: `SUM(${childRefs.join(",")})` };
+        cell.numFmt = "#,##0";
+      }
+    }
+    sgaSectionStart = sgaTotalExcelRow + 1;
+  }
+
+  const assumStartRow = sgaSectionStart + 2;
   let assumRow = assumStartRow;
 
   ws.getCell(assumRow, 1).value = "Assumptions (edit blue cells to change projections)";
@@ -803,6 +906,40 @@ export function exportISBuildToExcel(
     }
   }
 
+  // SG&A assumptions: one row per item (% of Revenue for top-level), rounded to 1 decimal
+  if (sgaChildren.length > 0) {
+    for (let i = 0; i < sgaChildren.length; i++) {
+      const child = sgaChildren[i];
+      const depth = 0;
+      const isSubItem = false;
+      const mode = isSubItem ? (sgaPctOfParentModeByItemId[child.id] ?? "constant") : (sgaPctModeByItemId[child.id] ?? "constant");
+      const constantPct = isSubItem ? (Math.round((sgaPctOfParentByItemId[child.id] ?? 0) * 10) / 10) / 100 : (Math.round((sgaPctByItemId[child.id] ?? 0) * 10) / 10) / 100;
+      const byYear = isSubItem ? (sgaPctOfParentByItemIdByYear[child.id] ?? {}) : (sgaPctByItemIdByYear[child.id] ?? {});
+      const label = isSubItem ? `${child.label} — % of parent` : `${child.label} — SG&A % of Revenue`;
+      if (mode === "custom") {
+        for (let yi = 0; yi < projectionYears.length; yi++) {
+          const y = projectionYears[yi];
+          const pctVal = (Math.round((byYear[y] ?? (isSubItem ? sgaPctOfParentByItemId[child.id] : sgaPctByItemId[child.id]) ?? 0) * 10) / 10) / 100;
+          ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${child.label} — ${y} %`;
+          ws.getCell(assumRow, ASSUM_VALUE_COL).value = pctVal;
+          ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0.0%";
+          ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          assumMap.set(`sga_pct_${child.id}_${y}`, assumRow);
+          assumRow += 1;
+        }
+      } else {
+        ws.getCell(assumRow, ASSUM_LABEL_COL).value = label;
+        ws.getCell(assumRow, ASSUM_VALUE_COL).value = constantPct;
+        ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0.0%";
+        ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        assumMap.set(`sga_pct_${child.id}`, assumRow);
+        assumRow += 1;
+      }
+    }
+  }
+
   // Match web preview: first projection year = one year of growth from last historic (exponent 1), not base (exponent 0)
   const yearIndexFormulaGrowth = `COLUMN()-${firstProjCol1Based}+1`;
   // Product-line/channel sub-rows: engine uses exponent 0 for first proj year (base*share*(1+g)^0)
@@ -952,6 +1089,27 @@ export function exportISBuildToExcel(
       formula: `=IF(${colLetter}$${revenueTotalExcelRow}=0,0,(${colLetter}$${revenueTotalExcelRow}-${colLetter}$${totalCogsExcelRow})/${colLetter}$${revenueTotalExcelRow})`,
     };
     ws.getCell(grossMarginExcelRow, col).numFmt = "0.00%";
+  }
+
+  // SG&A projection formulas (reference assumption cells)
+  if (sgaChildren.length > 0) {
+    for (let yearIdx = 0; yearIdx < years.length; yearIdx++) {
+      const year = years[yearIdx];
+      if (year.endsWith("A")) continue;
+      const col = 2 + yearIdx;
+      const colLetter = getColumnLetter(col);
+      for (let i = 0; i < sgaChildren.length; i++) {
+        const child = sgaChildren[i];
+        const excelRow = sgaItemStartRow + i;
+        const pctRowConstant = assumMap.get(`sga_pct_${child.id}`);
+        const pctRowForYear = assumMap.get(`sga_pct_${child.id}_${year}`);
+        const pctRef = pctRowForYear != null ? assumRef(pctRowForYear) : pctRowConstant != null ? assumRef(pctRowConstant) : null;
+        if (pctRef != null) {
+          ws.getCell(excelRow, col).value = { formula: `=${colLetter}$${sgaRevRow}*${pctRef}` };
+          ws.getCell(excelRow, col).numFmt = "#,##0";
+        }
+      }
+    }
   }
 
   return { lastRow: assumRow + 2, refMap };

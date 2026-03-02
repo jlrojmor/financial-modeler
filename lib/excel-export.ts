@@ -22,10 +22,12 @@ function flattenRows(
   rows: Row[],
   depth = 0,
   options?: FlattenOptions,
-  expandedRows: Set<string> | null = null // Always expand all for Excel export (null = all expanded)
+  expandedRows: Set<string> | null = null, // Always expand all for Excel export (null = all expanded)
+  parentId?: string
 ): Array<{ row: Row; depth: number; parentId?: string }> {
   const out: Array<{ row: Row; depth: number; parentId?: string }> = [];
   const forCashFlow = options?.forStatement === "cashflow";
+  const forIncome = options?.forStatement === "income";
 
   for (const r of rows) {
     // Skip EBITDA, EBITDA Margin, and SBC only for Income Statement (SBC stays in CFS)
@@ -43,9 +45,12 @@ function flattenRows(
     ) {
       continue;
     }
-    out.push({ row: r, depth, parentId: undefined });
-    // Always expand children for Excel export (expandedRows === null means all expanded)
-    if (Array.isArray(r.children) && r.children.length > 0 && (expandedRows === null || expandedRows.has(r.id))) {
+    out.push({ row: r, depth, parentId });
+    // Income Statement: do not expand children of SG&A in the Financial Model sheet. Historicals stay as the user entered them (R&D, Sales & Marketing, etc. as single lines). IS Build breakdown (e.g. R&D → 1, 2) appears only in the IS Build sheet.
+    const skipExpandUnderSga = forIncome && parentId === "sga";
+    if (skipExpandUnderSga) {
+      // Include this row only; do not recurse into its children
+    } else if (Array.isArray(r.children) && r.children.length > 0 && (expandedRows === null || expandedRows.has(r.id))) {
       const filteredChildren = r.children.filter((child) => {
         const childLabelLower = child.label.toLowerCase();
         const skipChildSbc =
@@ -62,9 +67,9 @@ function flattenRows(
       });
       if (filteredChildren.length > 0) {
         out.push(
-          ...flattenRows(filteredChildren, depth + 1, options, expandedRows).map((item) => ({
+          ...flattenRows(filteredChildren, depth + 1, options, expandedRows, r.id).map((item) => ({
             ...item,
-            parentId: r.id,
+            parentId: item.parentId ?? r.id,
           }))
         );
       }

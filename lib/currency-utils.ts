@@ -73,9 +73,21 @@ export function getCurrencySymbol(currency: string): string {
     USD: "$",
     EUR: "€",
     GBP: "£",
+    MXN: "MX$",
     JPY: "¥",
     CAD: "C$",
     AUD: "A$",
   };
   return symbols[currency] || currency;
 }
+
+/** Supported currency codes for model setup (code -> display label with symbol) */
+export const CURRENCY_OPTIONS: { value: string; label: string }[] = [
+  { value: "USD", label: "US Dollar ($)" },
+  { value: "EUR", label: "Euro (€)" },
+  { value: "GBP", label: "British Pound (£)" },
+  { value: "MXN", label: "Mexican Peso (MX$)" },
+  { value: "JPY", label: "Japanese Yen (¥)" },
+  { value: "CAD", label: "Canadian Dollar (C$)" },
+  { value: "AUD", label: "Australian Dollar (A$)" },
+];

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useModelStore, type ModelType, type CurrencyUnit, type ModelMeta } from "@/store/useModelStore";
 import type { CompanyType } from "@/types/finance";
+import { CURRENCY_OPTIONS } from "@/lib/currency-utils";
 
 interface ModelSetupProps {
   /** When provided (e.g. from landing), create project and redirect instead of only initializing */
@@ -201,13 +202,13 @@ export default function ModelSetup({ onCreateProject }: ModelSetupProps = {}) {
                 }
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none"
               >
-                <option value="USD">USD ($)</option>
-                <option value="EUR">EUR (€)</option>
-                <option value="GBP">GBP (£)</option>
-                <option value="JPY">JPY (¥)</option>
-                <option value="CAD">CAD (C$)</option>
-                <option value="AUD">AUD (A$)</option>
+                {CURRENCY_OPTIONS.map(({ value, label }) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
               </select>
+              <p className="mt-1 text-xs text-slate-500">
+                All amounts will be shown in this currency
+              </p>
             </div>
 
             <div>
@@ -223,10 +224,14 @@ export default function ModelSetup({ onCreateProject }: ModelSetupProps = {}) {
               >
                 <option value="millions">Millions (M)</option>
                 <option value="thousands">Thousands (K)</option>
-                <option value="units">Units</option>
+                <option value="units">Actual ($) — no scaling</option>
               </select>
               <p className="mt-1 text-xs text-slate-500">
-                Enter values in {formData.currencyUnit === "millions" ? "millions" : formData.currencyUnit === "thousands" ? "thousands" : "units"}
+                {formData.currencyUnit === "millions"
+                  ? "Enter values in millions (e.g. 1 = $1M)"
+                  : formData.currencyUnit === "thousands"
+                    ? "Enter values in thousands (e.g. 1 = $1,000)"
+                    : "Enter values in actual currency (e.g. 1,000 = $1,000)"}
               </p>
             </div>
 

@@ -656,7 +656,9 @@ export function exportStatementToExcel(
       const isProjectionYear = !year.endsWith("A");
       const refs = context?.isBuildRefs;
 
-      // Financial Model projection years: Revenue and COGS reference IS Build by name; Gross Profit/Margin use same-sheet formulas
+      // Financial Model projection years: Revenue, COGS, and SG&A reference IS Build by named ranges; Gross Profit/Margin/EBIT use same-sheet formulas.
+      // REVERT: set to false to stop linking SG&A from IS Build and use stored/computed values only.
+      const USE_SGA_FROM_ISBUILD = true;
       let isBuildFormula: string | null = null;
       if (forStatement === "income" && refs && isProjectionYear) {
         if (row.id === "rev" && refs.revenueRowByRowId.rev != null) {
@@ -677,6 +679,12 @@ export function exportStatementToExcel(
             const nameRefs = lineIds.map((lid) => getCellName("ISBuild", "COGS_" + sanitizeIdForExcel(lid), colLetter));
             isBuildFormula = "=SUM(" + nameRefs.join(",") + ")";
           }
+        } else if (USE_SGA_FROM_ISBUILD && row.id === "sga") {
+          // Total SG&A: pull from IS Build sheet (named range SGA_Total per column)
+          isBuildFormula = "=" + getCellName("ISBuild", "SGA_Total", colLetter);
+        } else if (USE_SGA_FROM_ISBUILD && parentId === "sga") {
+          // Fixed SG&A categories (R&D, Other OpEx, etc.): pull from IS Build (named range SGA_<rowId> per column)
+          isBuildFormula = "=" + getCellName("ISBuild", "SGA_" + sanitizeIdForExcel(row.id), colLetter);
         }
       }
 
@@ -752,8 +760,10 @@ export function exportStatementToExcel(
                   bold: shouldBeBold
                 };
               } else if (isLink) {
+                // Green only for totals/calculations that link to other sheets; regular items (e.g. SG&A line items) stay black for homogeneous format
+                const isTotalOrCalculation = ["rev", "cogs", "sga", "gross_profit", "ebit", "ebt", "net_income"].includes(row.id);
                 ws.getCell(excelRow, col).font = { 
-                  color: { argb: "FF22C55E" }, // Green for links
+                  color: { argb: isTotalOrCalculation ? "FF22C55E" : "FF000000" }, // Green for link totals only
                   bold: shouldBeBold
                 };
               } else if (isPercent) {
@@ -822,8 +832,9 @@ export function exportStatementToExcel(
             bold: shouldBeBold
           };
         } else if (isLink) {
+          const isTotalOrCalculation = ["rev", "cogs", "sga", "gross_profit", "ebit", "ebt", "net_income"].includes(row.id);
           ws.getCell(excelRow, col).font = { 
-            color: { argb: "FF22C55E" },
+            color: { argb: isTotalOrCalculation ? "FF22C55E" : "FF000000" },
             bold: shouldBeBold
           };
         } else if (isPercent) {

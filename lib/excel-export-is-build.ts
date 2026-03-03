@@ -268,10 +268,12 @@ export function exportISBuildToExcel(
   const unitDivisor = currencyUnit === "millions" ? 1_000_000 : currencyUnit === "thousands" ? 1_000 : 1;
   const isFixedRevenueRow = (id: string) =>
     id === "rev" || (!id.includes("::") && rev?.children?.some((s) => s.id === id));
+  // Financial Model sheet already has values in display units (millions/thousands); reference as-is so historicals show correctly
   const histRefFormula = (rowId: string, col: number, isPercent: boolean) => {
     if (!histSheetRef || !histMap || histMap[rowId] == null) return null;
     const base = `${histSheetRef}!${getColumnLetter(col)}$${histMap[rowId]}`;
-    return isPercent ? base : unitDivisor === 1 ? base : `${base}/${unitDivisor}`;
+    if (isPercent) return base;
+    return base; // FM sheet is in display units; do not divide by unitDivisor (would show zeros)
   };
 
   for (let idx = 0; idx < revenueRows.length; idx++) {
@@ -328,6 +330,31 @@ export function exportISBuildToExcel(
   const grossMarginRow = incomeStatement?.find((r) => r.id === "gross_margin");
 
   const leafRevenueLinesForCogs = revenueRows.filter((r) => r.id !== "rev");
+  // Try to map each revenue stream to a matching COGS breakdown row by label (e.g. "Subscription" ↔ "Subscription COGS").
+  const cogsChildren = cogsRow?.children ?? [];
+  const cogsChildByLineId = new Map<string, Row>();
+  if (rev?.children && cogsChildren.length > 0) {
+    const revChildren = rev.children;
+    for (const line of leafRevenueLinesForCogs) {
+      const labelLower = line.label.toLowerCase();
+      // First, try label-based match: child label contains stream label and "cogs".
+      let match = cogsChildren.find((child) => {
+        const cl = child.label.toLowerCase();
+        return cl.includes("cogs") && cl.includes(labelLower);
+      });
+      // Fallback: align by index (position) between rev children and cogs children.
+      if (!match) {
+        const streamIndex = revChildren.findIndex((s) => s.id === line.id);
+        if (streamIndex >= 0 && streamIndex < cogsChildren.length) {
+          match = cogsChildren[streamIndex];
+        }
+      }
+      if (match) {
+        cogsChildByLineId.set(line.id, match);
+      }
+    }
+  }
+
   const cogsSectionStart = headerRow + revenueRows.length + 1;
   const revenueTotalExcelRow = cogsSectionStart + 1;
   const cogsLineExcelRowByLineId = new Map<string, number>();
@@ -417,7 +444,8 @@ export function exportISBuildToExcel(
     if (isHistoric) {
       if (histSheetRef && histMap) {
         if (histMap.rev != null) {
-          const revFormula = unitDivisor === 1 ? `${histSheetRef}!${colLetter}$${histMap.rev}` : `${histSheetRef}!${colLetter}$${histMap.rev}/${unitDivisor}`;
+          // FM sheet is in display units; reference as-is (no division)
+          const revFormula = `${histSheetRef}!${colLetter}$${histMap.rev}`;
           ws.getCell(revenueTotalExcelRow, col).value = { formula: revFormula };
           ws.getCell(revenueTotalExcelRow, col).numFmt = "#,##0";
         } else {
@@ -430,13 +458,23 @@ export function exportISBuildToExcel(
         ws.getCell(revenueTotalExcelRow, col).value = storedToDisplay(revVal, currencyUnit);
         ws.getCell(revenueTotalExcelRow, col).numFmt = "#,##0";
       }
+      // Historic COGS breakdown by stream: if a matching COGS child exists for this revenue stream,
+      // pull its historical value from the Income Statement; otherwise show 0.
       for (let i = 0; i < leafRevenueLinesForCogs.length; i++) {
-        ws.getCell(revenueTotalExcelRow + 1 + i, col).value = 0;
-        ws.getCell(revenueTotalExcelRow + 1 + i, col).numFmt = "#,##0";
+        const line = leafRevenueLinesForCogs[i];
+        const cellRow = revenueTotalExcelRow + 1 + i;
+        const cell = ws.getCell(cellRow, col);
+        const cogsChild = cogsChildByLineId.get(line.id);
+        let val = 0;
+        if (cogsChild) {
+          val = computeRowValue(cogsChild, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+        }
+        cell.value = storedToDisplay(val, currencyUnit);
+        cell.numFmt = "#,##0";
       }
       if (histSheetRef && histMap) {
         if (histMap.cogs != null) {
-          const cogsFormula = unitDivisor === 1 ? `${histSheetRef}!${colLetter}$${histMap.cogs}` : `${histSheetRef}!${colLetter}$${histMap.cogs}/${unitDivisor}`;
+          const cogsFormula = `${histSheetRef}!${colLetter}$${histMap.cogs}`;
           ws.getCell(totalCogsExcelRow, col).value = { formula: cogsFormula };
           ws.getCell(totalCogsExcelRow, col).numFmt = "#,##0";
         } else {
@@ -445,7 +483,7 @@ export function exportISBuildToExcel(
           ws.getCell(totalCogsExcelRow, col).numFmt = "#,##0";
         }
         if (histMap.gross_profit != null) {
-          const gpFormula = unitDivisor === 1 ? `${histSheetRef}!${colLetter}$${histMap.gross_profit}` : `${histSheetRef}!${colLetter}$${histMap.gross_profit}/${unitDivisor}`;
+          const gpFormula = `${histSheetRef}!${colLetter}$${histMap.gross_profit}`;
           ws.getCell(grossProfitExcelRow, col).value = { formula: gpFormula };
           ws.getCell(grossProfitExcelRow, col).numFmt = "#,##0";
         } else {

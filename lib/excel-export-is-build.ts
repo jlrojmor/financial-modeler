@@ -21,6 +21,8 @@ import type {
 
 const IB_DARK_BLUE = "FF1E3A5F";
 const IB_INPUT_BLUE = "FFD6E4F0";
+/** Blue font for all input cells so users can clearly identify inputs */
+const IB_INPUT_FONT_BLUE = "FF0066CC";
 const IB_HISTORIC_GRAY = "FFE7E6E6";
 const IB_BORDER_GRAY = "FFADADAD";
 const ASSUM_LABEL_COL = 1;
@@ -487,24 +489,28 @@ export function exportISBuildToExcel(
   // SG&A section: Revenue ref + SG&A items (sga.children only, no sub-expansion) + Total SG&A
   const sgaRow = incomeStatement?.find((r) => r.id === "sga");
   const sgaChildren = sgaRow?.children ?? [];
-  const getSgaPctForYear = (itemId: string, year: string, depth: number): number => {
-    if (depth === 0) {
-      const mode = sgaPctModeByItemId[itemId] ?? "constant";
-      if (mode === "custom") return (sgaPctByItemIdByYear[itemId] ?? {})[year] ?? (sgaPctByItemId[itemId] ?? 0);
-      return sgaPctByItemId[itemId] ?? 0;
+  type SgaFlatItem = { row: Row; depth: number; parentId: string | null };
+  const sgaRowsFlat: SgaFlatItem[] = [];
+  function walkSga(rows: Row[], depth: number, parentId: string | null) {
+    for (const r of rows) {
+      sgaRowsFlat.push({ row: r, depth, parentId });
+      if (r.children?.length) walkSga(r.children, depth + 1, r.id);
     }
-    const mode = sgaPctOfParentModeByItemId[itemId] ?? "constant";
-    if (mode === "custom") return (sgaPctOfParentByItemIdByYear[itemId] ?? {})[year] ?? (sgaPctOfParentByItemId[itemId] ?? 0);
-    return sgaPctOfParentByItemId[itemId] ?? 0;
-  };
+  }
+  walkSga(sgaChildren, 0, null);
+  const sgaLeaves = sgaRowsFlat.filter(({ row }) => !row.children?.length);
+  const sgaRowIdToExcelRow = new Map<string, number>();
+
   let sgaSectionStart = grossMarginExcelRow + 1;
   let sgaRevRow = 0;
   let sgaItemStartRow = 0;
-  if (sgaChildren.length > 0) {
+  let sgaTotalExcelRow = 0;
+  if (sgaRowsFlat.length > 0) {
     sgaSectionStart += 1;
     const sgaTitleRow = grossMarginExcelRow + 1;
     sgaRevRow = sgaTitleRow + 1;
     sgaItemStartRow = sgaRevRow + 1;
+    sgaTotalExcelRow = sgaItemStartRow + sgaRowsFlat.length;
     ws.getCell(sgaTitleRow, 1).value = "SG&A";
     ws.getCell(sgaTitleRow, 1).font = { bold: true, size: 11, color: { argb: "FF000000" }, name: "Calibri" };
     ws.getCell(sgaTitleRow, 1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7E6E6" } };
@@ -514,7 +520,6 @@ export function exportISBuildToExcel(
       c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7E6E6" } };
       c.border = borderAll;
     }
-    const sgaTotalExcelRow = sgaItemStartRow + sgaChildren.length;
     ws.getCell(sgaRevRow, 1).value = "Revenue";
     ws.getCell(sgaRevRow, 1).font = { size: 10, name: "Calibri", color: { argb: "FF000000" } };
     ws.getCell(sgaRevRow, 1).border = borderAll;
@@ -525,17 +530,18 @@ export function exportISBuildToExcel(
       ws.getCell(sgaRevRow, col).numFmt = "#,##0";
       ws.getCell(sgaRevRow, col).fill = years[y].endsWith("A") ? { type: "pattern", pattern: "solid", fgColor: { argb: IB_HISTORIC_GRAY } } : {};
     }
-    for (let i = 0; i < sgaChildren.length; i++) {
-      const child = sgaChildren[i];
+    for (let i = 0; i < sgaRowsFlat.length; i++) {
+      const { row: child, depth } = sgaRowsFlat[i];
       const excelRow = sgaItemStartRow + i;
+      sgaRowIdToExcelRow.set(child.id, excelRow);
+      const indent = "  ".repeat(depth);
       const labelCell = ws.getCell(excelRow, 1);
-      labelCell.value = child.label;
-      labelCell.font = { size: 10, name: "Calibri", color: { argb: "FF000000" } };
+      labelCell.value = indent + child.label;
+      labelCell.font = { size: 10, name: "Calibri", color: { argb: "FF000000" }, bold: !!child.children?.length };
       labelCell.border = borderAll;
       for (let yearIdx = 0; yearIdx < years.length; yearIdx++) {
         const year = years[yearIdx];
         const col = 2 + yearIdx;
-        const colLetter = getColumnLetter(col);
         const cell = ws.getCell(excelRow, col);
         cell.font = { size: 10, name: "Calibri", color: { argb: "FF000000" } };
         cell.border = borderAll;
@@ -545,7 +551,6 @@ export function exportISBuildToExcel(
           cell.value = storedToDisplay(val, currencyUnit);
           cell.numFmt = "#,##0";
         } else {
-          // Formula filled in later loop after SG&A assumption rows exist
           cell.numFmt = "#,##0";
         }
       }
@@ -567,12 +572,24 @@ export function exportISBuildToExcel(
         cell.value = storedToDisplay(val, currencyUnit);
         cell.numFmt = "#,##0";
       } else {
-        const childRefs = sgaChildren.map((_, idx) => `${colLetter}$${sgaItemStartRow + idx}`);
-        cell.value = { formula: `SUM(${childRefs.join(",")})` };
+        const leafRefs = sgaLeaves.map(({ row }) => sgaRowIdToExcelRow.get(row.id)).filter((r): r is number => r != null);
+        cell.value = { formula: leafRefs.length > 0 ? `SUM(${leafRefs.map((r) => `${colLetter}$${r}`).join(",")})` : "0" };
         cell.numFmt = "#,##0";
       }
     }
     sgaSectionStart = sgaTotalExcelRow + 1;
+  }
+
+  if (wb && sgaRowsFlat.length > 0) {
+    for (let yearIdx = 0; yearIdx < years.length; yearIdx++) {
+      const col = 2 + yearIdx;
+      defineISBuildCellName(wb, sheetName, "SGA_Revenue", col, sgaRevRow);
+      for (const { row } of sgaRowsFlat) {
+        const excelR = sgaRowIdToExcelRow.get(row.id);
+        if (excelR != null) defineISBuildCellName(wb, sheetName, "SGA_" + sanitizeIdForExcel(row.id), col, excelR);
+      }
+      defineISBuildCellName(wb, sheetName, "SGA_Total", col, sgaTotalExcelRow);
+    }
   }
 
   const assumStartRow = sgaSectionStart + 2;
@@ -598,7 +615,7 @@ export function exportISBuildToExcel(
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Base (${currencyUnit === "millions" ? "M" : "K"})`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = baseDisplay;
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`growth_base_${stream.id}`, assumRow);
         assumRow += 1;
         const isCustomPerYear = (inp?.growthType ?? "constant") === "custom_per_year";
@@ -610,7 +627,7 @@ export function exportISBuildToExcel(
             ws.getCell(assumRow, ASSUM_VALUE_COL).value = (ratesByYear[y] ?? inp?.ratePercent ?? 0) / 100;
             ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
             ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
             assumMap.set(`growth_pct_${stream.id}_${y}`, assumRow);
             assumRow += 1;
           }
@@ -619,7 +636,7 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.ratePercent ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`growth_pct_${stream.id}`, assumRow);
           assumRow += 1;
         }
@@ -628,33 +645,33 @@ export function exportISBuildToExcel(
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Price`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.price ?? 0;
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`pv_price_${stream.id}`, assumRow);
         assumRow += 1;
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Volume`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.volume ?? 0;
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`pv_volume_${stream.id}`, assumRow);
         assumRow += 1;
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Price Growth %`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.priceGrowthPercent ?? 0) / 100;
         ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`pv_price_growth_${stream.id}`, assumRow);
         assumRow += 1;
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Volume Growth %`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.volumeGrowthPercent ?? 0) / 100;
         ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`pv_volume_growth_${stream.id}`, assumRow);
         assumRow += 1;
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Annualize (1 or 12)`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.annualizeFromMonthly ? 12 : 1;
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`pv_mult_${stream.id}`, assumRow);
         assumRow += 1;
       } else if (cfg?.method === "customers_arpu") {
@@ -662,27 +679,27 @@ export function exportISBuildToExcel(
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Customers`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.customers ?? 0;
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`ca_customers_${stream.id}`, assumRow);
         assumRow += 1;
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ARPU`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.arpu ?? 0;
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`ca_arpu_${stream.id}`, assumRow);
         assumRow += 1;
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Customer Growth %`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.customerGrowthPercent ?? 0) / 100;
         ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`ca_customer_growth_${stream.id}`, assumRow);
         assumRow += 1;
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ARPU Growth %`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.arpuGrowthPercent ?? 0) / 100;
         ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`ca_arpu_growth_${stream.id}`, assumRow);
         assumRow += 1;
       } else if (cfg?.method === "pct_of_total") {
@@ -692,7 +709,7 @@ export function exportISBuildToExcel(
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.pctOfTotal ?? 0) / 100;
         ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`pct_${stream.id}`, assumRow);
         assumRow += 1;
       } else if (cfg?.method === "product_line" || cfg?.method === "channel") {
@@ -701,7 +718,7 @@ export function exportISBuildToExcel(
         ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — Base (${currencyUnit === "millions" ? "M" : "K"})`;
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = baseDisplay;
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`channel_base_${stream.id}`, assumRow);
         assumRow += 1;
         const lineItems = inp?.items ?? [];
@@ -713,14 +730,14 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (line.sharePercent ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0.00%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`channel_share_${stream.id}_${lineKey}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${line.label} — Growth %`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (line.growthPercent ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`channel_growth_${stream.id}_${lineKey}`, assumRow);
           assumRow += 1;
         }
@@ -741,7 +758,7 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Base (${currencyUnit === "millions" ? "M" : "K"})`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = baseDisplay;
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`growth_base_${b.id}`, assumRow);
           assumRow += 1;
           const isCustomPerYear = (inp?.growthType ?? "constant") === "custom_per_year";
@@ -753,7 +770,7 @@ export function exportISBuildToExcel(
               ws.getCell(assumRow, ASSUM_VALUE_COL).value = (ratesByYear[y] ?? inp?.ratePercent ?? 0) / 100;
               ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
               ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-              ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+              ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
               assumMap.set(`growth_pct_${b.id}_${y}`, assumRow);
               assumRow += 1;
             }
@@ -762,7 +779,7 @@ export function exportISBuildToExcel(
             ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.ratePercent ?? 0) / 100;
             ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
             ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
             assumMap.set(`growth_pct_${b.id}`, assumRow);
             assumRow += 1;
           }
@@ -771,33 +788,33 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Price`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.price ?? 0;
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`pv_price_${b.id}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Volume`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.volume ?? 0;
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`pv_volume_${b.id}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Price Growth %`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.priceGrowthPercent ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`pv_price_growth_${b.id}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Volume Growth %`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.volumeGrowthPercent ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`pv_volume_growth_${b.id}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Annualize (1 or 12)`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.annualizeFromMonthly ? 12 : 1;
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`pv_mult_${b.id}`, assumRow);
           assumRow += 1;
         } else if (cfg.method === "customers_arpu") {
@@ -805,27 +822,27 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Customers`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.customers ?? 0;
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`ca_customers_${b.id}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — ARPU`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = inp?.arpu ?? 0;
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`ca_arpu_${b.id}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Customer Growth %`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.customerGrowthPercent ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`ca_customer_growth_${b.id}`, assumRow);
           assumRow += 1;
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — ARPU Growth %`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.arpuGrowthPercent ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`ca_arpu_growth_${b.id}`, assumRow);
           assumRow += 1;
         } else if (cfg.method === "pct_of_total") {
@@ -835,7 +852,7 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (inp?.pctOfTotal ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`pct_${b.id}`, assumRow);
           assumRow += 1;
         } else if (cfg.method === "product_line" || cfg.method === "channel") {
@@ -844,7 +861,7 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — Base (${currencyUnit === "millions" ? "M" : "K"})`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = baseDisplay;
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`channel_base_${b.id}`, assumRow);
           assumRow += 1;
           const lineItems = inp?.items ?? [];
@@ -856,14 +873,14 @@ export function exportISBuildToExcel(
             ws.getCell(assumRow, ASSUM_VALUE_COL).value = (line.sharePercent ?? 0) / 100;
             ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0.00%";
             ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
             assumMap.set(`channel_share_${b.id}_${lineKey}`, assumRow);
             assumRow += 1;
             ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${stream.label} — ${b.label} — ${line.label} — Growth %`;
             ws.getCell(assumRow, ASSUM_VALUE_COL).value = (line.growthPercent ?? 0) / 100;
             ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0.00%";
             ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+            ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
             assumMap.set(`channel_growth_${b.id}_${lineKey}`, assumRow);
             assumRow += 1;
           }
@@ -890,7 +907,7 @@ export function exportISBuildToExcel(
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = (byYear[y] ?? 0) / 100;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
           assumMap.set(`cogs_pct_${line.id}_${y}`, assumRow);
           assumRow += 1;
         }
@@ -899,33 +916,36 @@ export function exportISBuildToExcel(
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = constantPct;
         ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0%";
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
         assumMap.set(`cogs_pct_${line.id}`, assumRow);
         assumRow += 1;
       }
     }
   }
 
-  // SG&A assumptions: one row per item (% of Revenue for top-level), rounded to 1 decimal
-  if (sgaChildren.length > 0) {
-    for (let i = 0; i < sgaChildren.length; i++) {
-      const child = sgaChildren[i];
-      const depth = 0;
-      const isSubItem = false;
-      const mode = isSubItem ? (sgaPctOfParentModeByItemId[child.id] ?? "constant") : (sgaPctModeByItemId[child.id] ?? "constant");
-      const constantPct = isSubItem ? (Math.round((sgaPctOfParentByItemId[child.id] ?? 0) * 10) / 10) / 100 : (Math.round((sgaPctByItemId[child.id] ?? 0) * 10) / 10) / 100;
-      const byYear = isSubItem ? (sgaPctOfParentByItemIdByYear[child.id] ?? {}) : (sgaPctByItemIdByYear[child.id] ?? {});
-      const label = isSubItem ? `${child.label} — % of parent` : `${child.label} — SG&A % of Revenue`;
+  // SG&A assumptions: one row per LEAF only (original format). % of Revenue or % of parent, rounded to 1 decimal.
+  if (sgaLeaves.length > 0) {
+    assumRow += 2;
+    ws.getCell(assumRow, 1).value = "Assumptions (SG&A) — edit blue cells to change % of Revenue or % of parent";
+    ws.getCell(assumRow, 1).font = { bold: true, size: 11, name: "Calibri", color: { argb: "FF000000" } };
+    assumRow += 2;
+    for (let i = 0; i < sgaLeaves.length; i++) {
+      const { row: leaf, depth } = sgaLeaves[i];
+      const isSubItem = depth > 0;
+      const mode = isSubItem ? (sgaPctOfParentModeByItemId[leaf.id] ?? "constant") : (sgaPctModeByItemId[leaf.id] ?? "constant");
+      const constantPct = isSubItem ? (Math.round((sgaPctOfParentByItemId[leaf.id] ?? 0) * 10) / 10) / 100 : (Math.round((sgaPctByItemId[leaf.id] ?? 0) * 10) / 10) / 100;
+      const byYear = isSubItem ? (sgaPctOfParentByItemIdByYear[leaf.id] ?? {}) : (sgaPctByItemIdByYear[leaf.id] ?? {});
+      const label = isSubItem ? `${leaf.label} — % of parent` : `${leaf.label} — SG&A % of Revenue`;
       if (mode === "custom") {
         for (let yi = 0; yi < projectionYears.length; yi++) {
           const y = projectionYears[yi];
-          const pctVal = (Math.round((byYear[y] ?? (isSubItem ? sgaPctOfParentByItemId[child.id] : sgaPctByItemId[child.id]) ?? 0) * 10) / 10) / 100;
-          ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${child.label} — ${y} %`;
+          const pctVal = (Math.round((byYear[y] ?? (isSubItem ? sgaPctOfParentByItemId[leaf.id] : sgaPctByItemId[leaf.id]) ?? 0) * 10) / 10) / 100;
+          ws.getCell(assumRow, ASSUM_LABEL_COL).value = `${leaf.label} — ${y} %`;
           ws.getCell(assumRow, ASSUM_VALUE_COL).value = pctVal;
           ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0.0%";
           ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
-          assumMap.set(`sga_pct_${child.id}_${y}`, assumRow);
+          ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
+          assumMap.set(`sga_pct_${leaf.id}_${y}`, assumRow);
           assumRow += 1;
         }
       } else {
@@ -933,8 +953,8 @@ export function exportISBuildToExcel(
         ws.getCell(assumRow, ASSUM_VALUE_COL).value = constantPct;
         ws.getCell(assumRow, ASSUM_VALUE_COL).numFmt = "0.0%";
         ws.getCell(assumRow, ASSUM_VALUE_COL).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_INPUT_BLUE } };
-        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: "FF1E3A5F" } };
-        assumMap.set(`sga_pct_${child.id}`, assumRow);
+        ws.getCell(assumRow, ASSUM_VALUE_COL).font = { color: { argb: IB_INPUT_FONT_BLUE } };
+        assumMap.set(`sga_pct_${leaf.id}`, assumRow);
         assumRow += 1;
       }
     }
@@ -1091,24 +1111,50 @@ export function exportISBuildToExcel(
     ws.getCell(grossMarginExcelRow, col).numFmt = "0.00%";
   }
 
-  // SG&A projection formulas (reference assumption cells)
-  if (sgaChildren.length > 0) {
+  // SG&A projection formulas: same as web app — depth 0 = Revenue×pct; depth > 0 = Parent×pct. Parents with children use stored % (no extra assumption row) to avoid circular ref and keep original format.
+  if (sgaRowsFlat.length > 0) {
     for (let yearIdx = 0; yearIdx < years.length; yearIdx++) {
       const year = years[yearIdx];
       if (year.endsWith("A")) continue;
       const col = 2 + yearIdx;
       const colLetter = getColumnLetter(col);
-      for (let i = 0; i < sgaChildren.length; i++) {
-        const child = sgaChildren[i];
+      for (let i = 0; i < sgaRowsFlat.length; i++) {
+        const { row, depth, parentId } = sgaRowsFlat[i];
         const excelRow = sgaItemStartRow + i;
-        const pctRowConstant = assumMap.get(`sga_pct_${child.id}`);
-        const pctRowForYear = assumMap.get(`sga_pct_${child.id}_${year}`);
-        const pctRef = pctRowForYear != null ? assumRef(pctRowForYear) : pctRowConstant != null ? assumRef(pctRowConstant) : null;
-        if (pctRef != null) {
-          ws.getCell(excelRow, col).value = { formula: `=${colLetter}$${sgaRevRow}*${pctRef}` };
-          ws.getCell(excelRow, col).numFmt = "#,##0";
+        if (depth === 0) {
+          const pctRowConstant = assumMap.get(`sga_pct_${row.id}`);
+          const pctRowForYear = assumMap.get(`sga_pct_${row.id}_${year}`);
+          const pctRef = pctRowForYear != null ? assumRef(pctRowForYear) : pctRowConstant != null ? assumRef(pctRowConstant) : null;
+          if (pctRef != null) {
+            ws.getCell(excelRow, col).value = { formula: `=${colLetter}$${sgaRevRow}*${pctRef}` };
+            ws.getCell(excelRow, col).numFmt = "#,##0";
+          } else if (row.children?.length) {
+            const mode = sgaPctModeByItemId[row.id] ?? "constant";
+            const pct = mode === "custom" ? ((sgaPctByItemIdByYear[row.id] ?? {})[year] ?? (sgaPctByItemId[row.id] ?? 0)) : (sgaPctByItemId[row.id] ?? 0);
+            const pctDec = Math.round(pct * 10) / 10 / 100;
+            ws.getCell(excelRow, col).value = { formula: `=${colLetter}$${sgaRevRow}*${pctDec}` };
+            ws.getCell(excelRow, col).numFmt = "#,##0";
+          }
+        } else {
+          const pctRowConstant = assumMap.get(`sga_pct_${row.id}`);
+          const pctRowForYear = assumMap.get(`sga_pct_${row.id}_${year}`);
+          const pctRef = pctRowForYear != null ? assumRef(pctRowForYear) : pctRowConstant != null ? assumRef(pctRowConstant) : null;
+          if (pctRef != null) {
+            const parentExcelRow = parentId != null ? sgaRowIdToExcelRow.get(parentId) : null;
+            if (parentExcelRow != null) {
+              ws.getCell(excelRow, col).value = { formula: `=${colLetter}$${parentExcelRow}*${pctRef}` };
+              ws.getCell(excelRow, col).numFmt = "#,##0";
+            }
+          }
         }
       }
+    }
+  }
+
+  if (wb) {
+    for (const [key, rowNum] of assumMap) {
+      const safeKey = sanitizeIdForExcel(key);
+      defineISBuildCellName(wb, sheetName, "Assum_" + safeKey, ASSUM_VALUE_COL, rowNum);
     }
   }
 

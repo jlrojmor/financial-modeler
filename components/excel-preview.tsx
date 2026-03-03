@@ -295,6 +295,7 @@ function StatementTable({
   projectedRevenue,
   projectedCogs,
   projectedCogsByCogsChild,
+  projectedSgaBySgaChild,
 }: { 
   rows: Row[]; 
   label: string; 
@@ -312,6 +313,8 @@ function StatementTable({
   projectedCogs?: Record<string, number>;
   /** For Income Statement: projected COGS per fixed/mother child row (stream-level from IS Build). */
   projectedCogsByCogsChild?: Record<string, Record<string, number>>;
+  /** For Income Statement: projected SG&A per fixed category (sum of IS Build for that row + breakdown). */
+  projectedSgaBySgaChild?: Record<string, Record<string, number>>;
 }) {
   const forStatement: FlattenOptions["forStatement"] =
     label === "Cash Flow Statement" ? "cashflow" : label === "Balance Sheet" ? "balance" : "income";
@@ -550,12 +553,52 @@ function StatementTable({
               ) {
                 storedValue = projectedCogsByCogsChild[row.id][y];
               }
+              // INCOME STATEMENT SG&A FIXED CATEGORIES: projection years use IS Build totals (row + breakdown)
+              if (
+                label === "Income Statement" &&
+                parentId === "sga" &&
+                isProjectionYear &&
+                projectedSgaBySgaChild?.[row.id]?.[y] != null
+              ) {
+                storedValue = projectedSgaBySgaChild[row.id][y];
+              }
+              // INCOME STATEMENT TOTAL SG&A: projection years = sum of fixed categories from IS Build
+              if (
+                label === "Income Statement" &&
+                row.id === "sga" &&
+                isProjectionYear &&
+                projectedSgaBySgaChild != null
+              ) {
+                const sgaChildIds = Object.keys(projectedSgaBySgaChild);
+                if (sgaChildIds.length > 0) {
+                  let total = 0;
+                  for (const childId of sgaChildIds) {
+                    total += projectedSgaBySgaChild[childId]?.[y] ?? 0;
+                  }
+                  storedValue = total;
+                }
+              }
               // INCOME STATEMENT GROSS PROFIT / GROSS MARGIN: use computed values when we have projectedCogs
               if (label === "Income Statement" && isProjectionYear && projectedRevenue && projectedCogs?.[y] != null) {
                 const rev = projectedRevenue["rev"]?.[y] ?? 0;
                 const cogs = projectedCogs[y];
                 if (row.id === "gross_profit") storedValue = rev - cogs;
                 if (row.id === "gross_margin") storedValue = rev > 0 ? ((rev - cogs) / rev) * 100 : 0;
+              }
+              // INCOME STATEMENT EBIT & EBIT MARGIN: projection years = Gross Profit - SG&A, then EBIT/Revenue
+              if (label === "Income Statement" && isProjectionYear && projectedRevenue && projectedCogs?.[y] != null) {
+                const rev = projectedRevenue["rev"]?.[y] ?? 0;
+                const cogs = projectedCogs[y];
+                const grossProfit = rev - cogs;
+                let sgaTotal = 0;
+                if (projectedSgaBySgaChild && Object.keys(projectedSgaBySgaChild).length > 0) {
+                  for (const childId of Object.keys(projectedSgaBySgaChild)) {
+                    sgaTotal += projectedSgaBySgaChild[childId]?.[y] ?? 0;
+                  }
+                }
+                const ebit = grossProfit - sgaTotal;
+                if (row.id === "ebit") storedValue = ebit;
+                if (row.id === "ebit_margin") storedValue = rev > 0 ? (ebit / rev) * 100 : 0;
               }
               
               // FOR BALANCE SHEET TOTALS: ALWAYS RECALCULATE ON THE FLY
@@ -732,6 +775,12 @@ export default function ExcelPreview() {
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
   const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
+  const sgaPctByItemId = useModelStore((s) => s.sgaPctByItemId ?? {});
+  const sgaPctModeByItemId = useModelStore((s) => s.sgaPctModeByItemId ?? {});
+  const sgaPctByItemIdByYear = useModelStore((s) => s.sgaPctByItemIdByYear ?? {});
+  const sgaPctOfParentByItemId = useModelStore((s) => s.sgaPctOfParentByItemId ?? {});
+  const sgaPctOfParentModeByItemId = useModelStore((s) => s.sgaPctOfParentModeByItemId ?? {});
+  const sgaPctOfParentByItemIdByYear = useModelStore((s) => s.sgaPctOfParentByItemIdByYear ?? {});
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -937,6 +986,82 @@ export default function ExcelPreview() {
     return out;
   }, [incomeStatement, cogsByLineByYear, lineIdToStreamId, meta?.years?.projection]);
 
+  /** Projected SG&A by row id (projection years only). Same logic as IS Build: top-level = revenue × % of revenue, sub = parent × % of parent. */
+  const projectedSgaByRowIdByYear = useMemo(() => {
+    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    if (!sgaRow?.children?.length || !projectedRevenue) return {};
+    const projYears = meta?.years?.projection ?? [];
+    const revenueTotalByYear: Record<string, number> = {};
+    for (const y of projYears) revenueTotalByYear[y] = projectedRevenue["rev"]?.[y] ?? 0;
+    const getPct = (itemId: string, year: string, depth: number): number => {
+      if (depth === 0) {
+        const mode = sgaPctModeByItemId[itemId] ?? "constant";
+        if (mode === "custom") return (sgaPctByItemIdByYear[itemId] ?? {})[year] ?? (sgaPctByItemId[itemId] ?? 0);
+        return sgaPctByItemId[itemId] ?? 0;
+      }
+      const mode = sgaPctOfParentModeByItemId[itemId] ?? "constant";
+      if (mode === "custom") return (sgaPctOfParentByItemIdByYear[itemId] ?? {})[year] ?? (sgaPctOfParentByItemId[itemId] ?? 0);
+      return sgaPctOfParentByItemId[itemId] ?? 0;
+    };
+    const out: Record<string, Record<string, number>> = {};
+    function setProjectionForRow(row: Row, depth: number, parentValueByYear: Record<string, number> | null): void {
+      out[row.id] = out[row.id] ?? {};
+      for (const y of projYears) {
+        if (depth === 0) {
+          const pct = getPct(row.id, y, 0);
+          out[row.id][y] = (revenueTotalByYear[y] ?? 0) * (pct / 100);
+        } else {
+          const parentVal = parentValueByYear?.[y] ?? 0;
+          const pct = getPct(row.id, y, depth);
+          out[row.id][y] = parentVal * (pct / 100);
+        }
+      }
+      if (row.children?.length) {
+        const parentByYear: Record<string, number> = {};
+        for (const y of projYears) parentByYear[y] = out[row.id][y] ?? 0;
+        row.children.forEach((c) => setProjectionForRow(c, depth + 1, parentByYear));
+      }
+    }
+    sgaRow.children.forEach((c) => setProjectionForRow(c, 0, null));
+    return out;
+  }, [
+    incomeStatement,
+    projectedRevenue,
+    meta?.years?.projection,
+    sgaPctByItemId,
+    sgaPctModeByItemId,
+    sgaPctByItemIdByYear,
+    sgaPctOfParentByItemId,
+    sgaPctOfParentModeByItemId,
+    sgaPctOfParentByItemIdByYear,
+  ]);
+
+  /** Projected SG&A per fixed SG&A category for Historicals: sum of LEAVES only under each fixed category (avoids double-counting parent + children). */
+  const projectedSgaBySgaChild = useMemo(() => {
+    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    const sgaChildren = sgaRow?.children ?? [];
+    if (sgaChildren.length === 0 || Object.keys(projectedSgaByRowIdByYear).length === 0) return {};
+    const projYears = meta?.years?.projection ?? [];
+    function sumLeavesOnly(row: Row): Record<string, number> {
+      const byYear: Record<string, number> = {};
+      for (const y of projYears) byYear[y] = 0;
+      if (row.children?.length) {
+        for (const c of row.children) {
+          const childSum = sumLeavesOnly(c);
+          for (const y of projYears) byYear[y] = (byYear[y] ?? 0) + (childSum[y] ?? 0);
+        }
+      } else {
+        for (const y of projYears) byYear[y] = projectedSgaByRowIdByYear[row.id]?.[y] ?? 0;
+      }
+      return byYear;
+    }
+    const out: Record<string, Record<string, number>> = {};
+    for (const child of sgaChildren) {
+      out[child.id] = sumLeavesOnly(child);
+    }
+    return out;
+  }, [incomeStatement, projectedSgaByRowIdByYear, meta?.years?.projection]);
+
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
       {/* Header - Fixed */}
@@ -1025,6 +1150,7 @@ export default function ExcelPreview() {
               projectedRevenue={projectedRevenue}
               projectedCogs={projectedCogs}
               projectedCogsByCogsChild={projectedCogsByCogsChild}
+              projectedSgaBySgaChild={projectedSgaBySgaChild}
             />
 
             {/* Stock-Based Compensation Disclosure */}

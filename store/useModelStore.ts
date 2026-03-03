@@ -1080,17 +1080,20 @@ export const useModelStore = create<ModelState & ModelActions>()(
         });
       }
 
-      // Recalculate all years for all statements
+      // Recalculate all years for all statements. Preserve values for rows with IS Build breakdowns (e.g. R&D with sub-items).
       const allYears = [...(meta.years.historical || []), ...(meta.years.projection || [])];
+      const sgaChildrenForInit = incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+      const sgaParentIdsInit = collectParentIdsWithChildren(sgaChildrenForInit);
+      const revBreakdownIdsInit = new Set(Object.keys(get().revenueProjectionConfig?.breakdowns ?? {}));
+      const parentIdsWithProjectionBreakdownsInit = new Set([...revBreakdownIdsInit, ...sgaParentIdsInit]);
       allYears.forEach((year) => {
         const sbcBreakdowns = get().sbcBreakdowns;
         const danaBreakdowns = get().danaBreakdowns;
-        // Update allStatements after each recalculation to ensure we use the latest values
         let allStatements = { incomeStatement, balanceSheet, cashFlow };
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
-        allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after IS
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsInit);
+        allStatements = { incomeStatement, balanceSheet, cashFlow };
         balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
-        allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after BS
+        allStatements = { incomeStatement, balanceSheet, cashFlow };
         cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
       });
 
@@ -1733,17 +1736,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
       });
     }
 
-    // Recalculate all years for all statements
-    // Pass all statements so CFS can access IS/BS values, and sbcBreakdowns for SBC calculation
+    // Recalculate all years for all statements. Preserve values for rows with IS Build breakdowns (e.g. R&D with sub-items).
+    const sgaChildrenRecalc = incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+    const sgaParentIdsRecalc = collectParentIdsWithChildren(sgaChildrenRecalc);
+    const revBreakdownIdsRecalc = new Set(Object.keys(get().revenueProjectionConfig?.breakdowns ?? {}));
+    const parentIdsWithProjectionBreakdownsRecalc = new Set([...revBreakdownIdsRecalc, ...sgaParentIdsRecalc]);
     allYears.forEach((year) => {
       const sbcBreakdowns = get().sbcBreakdowns;
       const danaBreakdowns = get().danaBreakdowns;
-      // Update allStatements after each recalculation to ensure we use the latest values
       let allStatements = { incomeStatement, balanceSheet, cashFlow };
-      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
-      allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after IS
+      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsRecalc);
+      allStatements = { incomeStatement, balanceSheet, cashFlow };
       balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
-      allStatements = { incomeStatement, balanceSheet, cashFlow }; // Update after BS
+      allStatements = { incomeStatement, balanceSheet, cashFlow };
       cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
     });
 
@@ -2612,12 +2617,16 @@ export const useModelStore = create<ModelState & ModelActions>()(
         newSbcBreakdowns[categoryId] = newCategoryBreakdowns;
       });
       
-      // Recalculate all formulas for all new years
+      // Recalculate all formulas for all new years. Preserve historical values for rows with IS Build breakdowns (e.g. R&D with sub-items).
       const sbcBreakdowns = state.sbcBreakdowns;
       const danaBreakdowns = state.danaBreakdowns;
+      const sgaChildren = incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+      const sgaParentIdsWithBreakdowns = collectParentIdsWithChildren(sgaChildren);
+      const revBreakdownIds = new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}));
+      const parentIdsWithProjectionBreakdowns = new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns]);
       allNewYears.forEach((year) => {
         const allStatements = { incomeStatement, balanceSheet, cashFlow };
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns);
         balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
         cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
       });

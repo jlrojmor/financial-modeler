@@ -369,11 +369,12 @@ export function exportStatementToExcel(
   // Always expand all rows for Excel export (null = all expanded, matching preview when expandedRows === null)
   const flattened = flattenRows(rows, 0, { forStatement }, null);
   
-  // IB-grade colors (dark blue headers, light green sections, light blue inputs)
+  // IB-grade colors (dark blue headers, light green sections, light blue inputs, blue font for inputs)
   const IB_DARK_BLUE = "FF1E3A5F";
   const IB_LIGHT_GREEN = "FFD4EDDA";
   const IB_LIGHT_GREEN_SUB = "FFE8F5E9";
   const IB_INPUT_FILL = "FFD6E4F0";
+  const IB_INPUT_FONT_BLUE = "FF0066CC";
 
   // Add statement label header if provided and not first statement
   if (statementLabel && !isFirstStatement) {
@@ -747,7 +748,7 @@ export function exportStatementToExcel(
               
               if (isInput && hasChildren) {
                 ws.getCell(excelRow, col).font = { 
-                  color: { argb: "FF1E3A5F" },
+                  color: { argb: IB_INPUT_FONT_BLUE },
                   bold: shouldBeBold
                 };
               } else if (isLink) {
@@ -812,12 +813,12 @@ export function exportStatementToExcel(
         
         if (isInput && hasChildren) {
           ws.getCell(excelRow, col).font = { 
-            color: { argb: "FF1E3A5F" },
+            color: { argb: IB_INPUT_FONT_BLUE },
             bold: shouldBeBold
           };
         } else if (isInputOnly) {
           ws.getCell(excelRow, col).font = {
-            color: { argb: "FF1E3A5F" },
+            color: { argb: IB_INPUT_FONT_BLUE },
             bold: shouldBeBold
           };
         } else if (isLink) {
@@ -849,7 +850,7 @@ export function exportStatementToExcel(
       } else {
         ws.getCell(excelRow, col).value = typeof value === "number" ? toExcelValue(value) : null;
         ws.getCell(excelRow, col).font = {
-          color: { argb: isInputOnly ? "FF1E3A5F" : "FF0066CC" }
+          color: { argb: isInputOnly ? IB_INPUT_FONT_BLUE : "FF0066CC" }
         };
         if (useNames && row.id) defineCellName(wb, sheetName, prefix, row.id, col, excelRow);
       }
@@ -919,6 +920,7 @@ export function exportSbcDisclosureToExcel(
   startRow: number,
   currencyUnit?: string
 ): number {
+  const IB_DARK_BLUE = "FF1E3A5F";
   const sgaRow = incomeStatement.find((r) => r.id === "sga");
   const cogsRow = incomeStatement.find((r) => r.id === "cogs");
   const rdRow = incomeStatement.find((r) => r.id === "rd");
@@ -965,27 +967,30 @@ export function exportSbcDisclosureToExcel(
   // Add spacing
   startRow += 2;
   
-  // Title
+  // Title (IB: bold black)
   ws.getCell(startRow, 1).value = "Stock-Based Compensation Expense";
-  ws.getCell(startRow, 1).font = { bold: true, size: 11, color: { argb: "FFFFD700" } };
+  ws.getCell(startRow, 1).font = { bold: true, size: 11, color: { argb: "FF000000" } };
   startRow += 1;
   
-  // Note
+  // Note (IB: gray italic)
   ws.getCell(startRow, 1).value = "Amounts include stock-based compensation expense, as follows:";
-  ws.getCell(startRow, 1).font = { italic: true, size: 10, color: { argb: "FFFFD700" } };
+  ws.getCell(startRow, 1).font = { italic: true, size: 10, color: { argb: "FF64748B" } };
   startRow += 1;
   
-  // Headers
+  // Headers (IB: dark blue, white text)
   ws.getCell(startRow, 1).value = "Category";
   years.forEach((year, idx) => {
     ws.getCell(startRow, 2 + idx).value = year;
   });
-  ws.getRow(startRow).font = { bold: true, color: { argb: "FFFFD700" } };
+  ws.getRow(startRow).font = { bold: true, color: { argb: "FFFFFFFF" }, size: 10 };
   ws.getRow(startRow).fill = {
     type: "pattern",
     pattern: "solid",
-    fgColor: { argb: "FF78350F" }, // Dark amber background
+    fgColor: { argb: IB_DARK_BLUE },
   };
+  years.forEach((_, idx) => {
+    ws.getCell(startRow, 2 + idx).fill = { type: "pattern", pattern: "solid", fgColor: { argb: IB_DARK_BLUE } };
+  });
   startRow += 1;
   
   // Track row numbers for SBC components to build formulas
@@ -1017,7 +1022,7 @@ export function exportSbcDisclosureToExcel(
           ws.getCell(startRow, 2 + idx).value = displayValue;
           ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0_);("$"#,##0)';
         });
-        ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+        ws.getRow(startRow).font = { color: { argb: "FF000000" }, size: 10 };
         sbcComponentRows.push(startRow); // Track this row for total formula
         startRow += 1;
       }
@@ -1034,7 +1039,7 @@ export function exportSbcDisclosureToExcel(
         ws.getCell(startRow, 2 + idx).value = displayValue;
         ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
       });
-      ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+      ws.getRow(startRow).font = { color: { argb: "FF000000" }, size: 10 };
       sbcComponentRows.push(startRow); // Track this row for total formula
       startRow += 1;
     }
@@ -1054,7 +1059,7 @@ export function exportSbcDisclosureToExcel(
           ws.getCell(startRow, 2 + idx).value = displayValue;
           ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0_);("$"#,##0)';
         });
-        ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+        ws.getRow(startRow).font = { color: { argb: "FF000000" }, size: 10 };
         sbcComponentRows.push(startRow); // Track this row for total formula
         startRow += 1;
       }
@@ -1071,7 +1076,7 @@ export function exportSbcDisclosureToExcel(
         ws.getCell(startRow, 2 + idx).value = displayValue;
         ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
       });
-      ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+      ws.getRow(startRow).font = { color: { argb: "FF000000" }, size: 10 };
       sbcComponentRows.push(startRow); // Track this row for total formula
       startRow += 1;
     }
@@ -1091,7 +1096,7 @@ export function exportSbcDisclosureToExcel(
           ws.getCell(startRow, 2 + idx).value = displayValue;
           ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0_);("$"#,##0)';
         });
-        ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+        ws.getRow(startRow).font = { color: { argb: "FF000000" }, size: 10 };
         sbcComponentRows.push(startRow);
         startRow += 1;
       }
@@ -1108,16 +1113,16 @@ export function exportSbcDisclosureToExcel(
         ws.getCell(startRow, 2 + idx).value = displayValue;
         ws.getCell(startRow, 2 + idx).numFmt = '"$"#,##0';
       });
-      ws.getRow(startRow).font = { color: { argb: "FFFFD700" } };
+      ws.getRow(startRow).font = { color: { argb: "FF000000" }, size: 10 };
       sbcComponentRows.push(startRow);
       startRow += 1;
     }
   }
   
-  // Total SBC (with formula that sums all component rows)
+  // Total SBC (with formula that sums all component rows) — IB: bold black
   if (sbcComponentRows.length > 0) {
     ws.getCell(startRow, 1).value = "Total stock-based compensation expense";
-    ws.getCell(startRow, 1).font = { bold: true, color: { argb: "FFFFD700" } };
+    ws.getCell(startRow, 1).font = { bold: true, color: { argb: "FF000000" }, size: 10 };
     years.forEach((y, idx) => {
       const col = 2 + idx; // Column B=2, C=3, etc.
       const colLetter = getColumnLetter(col);
@@ -1128,7 +1133,7 @@ export function exportSbcDisclosureToExcel(
       
       ws.getCell(startRow, col).value = { formula: formula };
       ws.getCell(startRow, col).numFmt = '"$"#,##0_);("$"#,##0)';
-      ws.getCell(startRow, col).font = { bold: true, color: { argb: "FFFFD700" } };
+      ws.getCell(startRow, col).font = { bold: true, color: { argb: "FF000000" }, size: 10 };
     });
     startRow += 1;
   }

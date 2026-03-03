@@ -88,7 +88,7 @@ export function computeRowValue(
       return row.values?.[year] ?? 0;
     }
     if (isProjection) {
-      return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns);
+      return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
     }
     return row.values?.[year] ?? 0;
   }
@@ -103,12 +103,12 @@ export function computeRowValue(
       // If it has children, sum them
       if (row.children && row.children.length > 0) {
         return row.children.reduce((sum, child) => {
-          return sum + computeRowValue(child, year, allRows, statementRows, allStatements, sbcBreakdowns);
+          return sum + computeRowValue(child, year, allRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
         }, 0);
       }
 
     // Otherwise, use a formula based on row ID (standard IB patterns)
-    return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns);
+    return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
   }
 
   return 0;
@@ -123,7 +123,8 @@ function computeFormula(
   year: string, 
   statementRows: Row[], 
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] },
-  sbcBreakdowns?: Record<string, Record<string, number>>
+  sbcBreakdowns?: Record<string, Record<string, number>>,
+  danaBreakdowns?: Record<string, number>
 ): number {
   const rowId = row.id;
   

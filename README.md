@@ -29,6 +29,19 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
+## Running on port 3002
+
+```bash
+npm run dev:3002
+```
+
+Then open [http://localhost:3002](http://localhost:3002). Use this port if your project data is saved under this origin in the browser.
+
+## Getting a public URL (open on another device / not localhost)
+
+- **Vercel (recommended):** Connect this repo at [vercel.com/new](https://vercel.com/new), import `jlrojmor/financial-modeler`, and deploy. You get a URL like `https://financial-modeler-xxx.vercel.app` that you can open from any device.
+- **ngrok (temporary):** While the app runs locally (`npm run dev:3002`), run `npx ngrok http 3002` in another terminal. Use the generated `https://xxx.ngrok.io` URL to access the app from another desk (URL changes each time unless you use a paid plan).
+
 ## Deploy on Vercel
 
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.

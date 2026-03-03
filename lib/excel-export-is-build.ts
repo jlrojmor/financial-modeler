@@ -18,6 +18,7 @@ import type {
   PctOfTotalInputs,
   ProductLineInputs,
 } from "@/types/revenue-projection";
+import { DEFAULT_REVENUE_PROJECTION_CONFIG } from "@/types/revenue-projection";
 
 const IB_DARK_BLUE = "FF1E3A5F";
 const IB_INPUT_BLUE = "FFD6E4F0";
@@ -64,7 +65,7 @@ function buildRevenueRows(
           const line = lineItems[lineIdx];
           const raw = line.id ?? line.label;
           const lineKey = (raw != null && String(raw).trim() !== "") ? String(raw) : `line-${lineIdx}`;
-          list.push({ id: `${b.id}::${lineKey}`, label: line.label, depth: 3, parentId: b.id });
+          list.push({ id: `${b.id}::${lineKey}`, label: line.label ?? lineKey, depth: 3, parentId: b.id });
         }
       }
     }
@@ -77,7 +78,7 @@ function buildRevenueRows(
           const line = lineItems[lineIdx];
           const raw = line.id ?? line.label;
           const lineKey = (raw != null && String(raw).trim() !== "") ? String(raw) : `line-${lineIdx}`;
-          list.push({ id: `${stream.id}::${lineKey}`, label: line.label, depth: 3, parentId: stream.id });
+          list.push({ id: `${stream.id}::${lineKey}`, label: line.label ?? "", depth: 3, parentId: stream.id ?? "" });
         }
       }
     }
@@ -169,7 +170,7 @@ export function exportISBuildToExcel(
 ): { lastRow: number; refMap: ISBuildRefMap } {
   const sheetName = "IS Build";
   const incomeStatement = modelState.incomeStatement ?? [];
-  const config = modelState.revenueProjectionConfig ?? { items: {}, breakdowns: {}, projectionAllocations: {} };
+  const config: RevenueProjectionConfig = modelState.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG;
   const historicalYears = modelState.meta?.years?.historical ?? [];
   const projectionYears = modelState.meta?.years?.projection ?? [];
   const years = [...historicalYears, ...projectionYears];

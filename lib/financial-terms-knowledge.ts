@@ -15,7 +15,7 @@ export interface TermKnowledge {
   
   // CFS treatment (if applicable)
   cfsTreatment?: {
-    section: "operating" | "investing" | "financing";
+    section: "operating" | "investing" | "financing" | "none";
     cfsItemId: string;
     impact: "positive" | "negative" | "neutral" | "calculated";
     description: string;
@@ -449,6 +449,7 @@ export const FINANCIAL_TERMS_KNOWLEDGE: Record<string, TermKnowledge> = {
     category: "equity",
     cfsTreatment: {
       section: "none",
+      cfsItemId: "",
       impact: "neutral",
       description: "AOCI changes are non-cash and don't flow through Cash Flow Statement.",
     },
@@ -458,6 +459,7 @@ export const FINANCIAL_TERMS_KNOWLEDGE: Record<string, TermKnowledge> = {
     category: "equity",
     cfsTreatment: {
       section: "none",
+      cfsItemId: "",
       impact: "neutral",
       description: "AOCI changes are non-cash and don't affect Cash Flow Statement.",
     },

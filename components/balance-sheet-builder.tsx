@@ -10,7 +10,7 @@ import {
   formatCurrencyDisplay,
 } from "@/lib/currency-utils";
 import CollapsibleSection from "@/components/collapsible-section";
-import { getBSCategorySuggestions, getBSItemImpacts, type BalanceSheetCategory } from "@/lib/bs-impact-rules";
+import { getBSCategorySuggestions, getBSItemImpacts, type BalanceSheetCategory, type BSItemImpact } from "@/lib/bs-impact-rules";
 import { getRowsForCategory, getInsertionIndexForCategory } from "@/lib/bs-category-mapper";
 import { findTermKnowledge, getSuggestedTreatment } from "@/lib/financial-terms-knowledge";
 // UUID helper - inline for now
@@ -142,14 +142,14 @@ function AddBSItemDialog({
           setSuggestedCategory(null);
         }
         
-        // Use knowledge-based impact if available
+        // Use knowledge-based impact if available (omit cfsLink when section is "none")
         const knowledgeImpact = {
           affectsTotalCurrentAssets: knowledge.category === "current_assets",
           affectsTotalAssets: knowledge.category === "current_assets" || knowledge.category === "fixed_assets",
           affectsTotalCurrentLiabilities: knowledge.category === "current_liabilities",
           affectsTotalLiabilities: knowledge.category === "current_liabilities" || knowledge.category === "non_current_liabilities",
           affectsTotalEquity: knowledge.category === "equity",
-          cfsLink: knowledge.cfsTreatment,
+          cfsLink: (knowledge.cfsTreatment && knowledge.cfsTreatment.section !== "none" ? knowledge.cfsTreatment : undefined) as BSItemImpact["cfsLink"],
           isLink: knowledge.isLink,
         };
         setImpact(knowledgeImpact);
@@ -408,7 +408,7 @@ function AddBSItemDialog({
           <button
             type="button"
             onClick={handleAdd}
-            disabled={(!label.trim() && !selectedSuggestion) || (!termKnowledge && label.trim() && !selectedSuggestion)}
+            disabled={Boolean((!label.trim() && !selectedSuggestion) || (!termKnowledge && label.trim() && !selectedSuggestion))}
             className={`rounded-md px-4 py-2 text-xs font-semibold text-white transition ${
               !termKnowledge && label.trim() && !selectedSuggestion
                 ? "bg-red-600 hover:bg-red-500 cursor-not-allowed opacity-75"
@@ -510,15 +510,14 @@ function BSCategorySection({
     // This is how we "remember" the correct treatment for future use
     let impact;
     if (knowledge && knowledge.cfsTreatment) {
-      // Use knowledge-based impact (correct treatment per IFRS/US GAAP)
-      // This ensures proper CFS treatment regardless of which category user chose
+      // Use knowledge-based impact (correct treatment per IFRS/US GAAP). Omit cfsLink when section is "none".
       impact = {
         affectsTotalCurrentAssets: knowledge.category === "current_assets",
         affectsTotalAssets: knowledge.category === "current_assets" || knowledge.category === "fixed_assets",
         affectsTotalCurrentLiabilities: knowledge.category === "current_liabilities",
         affectsTotalLiabilities: knowledge.category === "current_liabilities" || knowledge.category === "non_current_liabilities",
         affectsTotalEquity: knowledge.category === "equity",
-        cfsLink: knowledge.cfsTreatment,
+        cfsLink: (knowledge.cfsTreatment.section !== "none" ? knowledge.cfsTreatment : undefined) as BSItemImpact["cfsLink"],
         isLink: knowledge.isLink,
       };
       

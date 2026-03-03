@@ -338,7 +338,7 @@ export default function IncomeStatementBuilder() {
                   row={row}
                   years={years}
                   meta={meta}
-                  glossaryItem={glossaryItem}
+                  glossaryItem={glossaryItem ?? undefined}
                   isLocked={isLocked}
                   isCalculated={isCalculated || isCalculatedOutput}
                   autoValue={computedValue}
@@ -375,7 +375,7 @@ export default function IncomeStatementBuilder() {
                                 row={child}
                                 years={years}
                                 meta={meta}
-                                glossaryItem={childGlossaryItem}
+                                glossaryItem={childGlossaryItem ?? undefined}
                                 isLocked={isLocked}
                                 isCalculated={false}
                                 colorClass={colorClass}
@@ -653,7 +653,7 @@ export default function IncomeStatementBuilder() {
         {renderSection("Revenue", sections.revenue, "blue", "is_revenue")}
         
         {/* COGS Section */}
-        {renderSection("Cost of Goods Sold (COGS)", sections.cogs, "red", "is_cogs")}
+        {renderSection("Cost of Goods Sold (COGS)", sections.cogs, "orange", "is_cogs")}
         
         {/* Gross Profit Section */}
         {renderSection("Gross Profit", sections.grossProfit, "green", "is_gross_profit")}

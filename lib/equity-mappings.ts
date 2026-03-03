@@ -311,7 +311,7 @@ export function getStandardEquityItems(): EquityItemDefinition[] {
  * Get all equity items for a specific category
  */
 export function getEquityItemsByCategory(category: "contributed" | "retained" | "treasury" | "comprehensive" | "other"): EquityItemDefinition[] {
-  const categoryMap = {
+  const categoryMap: Record<typeof category, EquityItemId[]> = {
     contributed: ["common_stock", "apic", "preferred_stock", "convertible_preferred", "mezzanine_equity"],
     retained: ["retained_earnings", "accumulated_deficit"],
     treasury: ["treasury_stock", "share_repurchases"],
@@ -320,7 +320,7 @@ export function getEquityItemsByCategory(category: "contributed" | "retained" | 
   };
   
   const ids = categoryMap[category];
-  return ids.map(id => EQUITY_ITEMS[id]).filter(Boolean);
+  return ids.map((id): EquityItemDefinition | undefined => EQUITY_ITEMS[id]).filter((item): item is EquityItemDefinition => Boolean(item));
 }
 
 /**

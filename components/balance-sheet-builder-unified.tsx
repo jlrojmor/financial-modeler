@@ -204,14 +204,21 @@ export default function BalanceSheetBuilderUnified() {
       children: [],
     };
     
-    // Add CFS link if item has one
+    // Add CFS link if item has one (map glossary CFSSection to Row section type)
     const glossaryItem = findGlossaryItem(item.concept);
-    if (glossaryItem?.cfsSection) {
+    const cfsSection = glossaryItem?.cfsSection;
+    const sectionMap: Record<string, "operating" | "investing" | "financing"> = {
+      CFO: "operating",
+      CFI: "investing",
+      CFF: "financing",
+    };
+    const section = cfsSection ? sectionMap[cfsSection] : undefined;
+    if (section) {
       newRow.cfsLink = {
-        section: glossaryItem.cfsSection,
+        section,
         cfsItemId: newRow.id,
         impact: "positive", // Default, can be refined
-        description: glossaryItem.description,
+        description: glossaryItem!.description,
       };
     }
     
@@ -424,7 +431,7 @@ export default function BalanceSheetBuilderUnified() {
       children: [],
     };
     const knowledge = getSuggestedTreatment(trimmed);
-    if (knowledge.cfsLink) {
+    if (knowledge.cfsLink && knowledge.cfsLink.section !== "none") {
       newRow.cfsLink = {
         section: knowledge.cfsLink.section,
         cfsItemId: newRow.id,
@@ -502,7 +509,7 @@ export default function BalanceSheetBuilderUnified() {
       children: [],
     };
     const knowledge = getSuggestedTreatment(trimmed);
-    if (knowledge.cfsLink) {
+    if (knowledge.cfsLink && knowledge.cfsLink.section !== "none") {
       newRow.cfsLink = {
         section: knowledge.cfsLink.section,
         cfsItemId: newRow.id,
@@ -554,7 +561,7 @@ export default function BalanceSheetBuilderUnified() {
       children: [],
     };
     const knowledge = getSuggestedTreatment(trimmed);
-    if (knowledge.cfsLink) {
+    if (knowledge.cfsLink && knowledge.cfsLink.section !== "none") {
       newRow.cfsLink = {
         section: knowledge.cfsLink.section,
         cfsItemId: newRow.id,
@@ -593,7 +600,7 @@ export default function BalanceSheetBuilderUnified() {
       children: [],
     };
     const knowledge = getSuggestedTreatment(trimmed);
-    if (knowledge.cfsLink) {
+    if (knowledge.cfsLink && knowledge.cfsLink.section !== "none") {
       newRow.cfsLink = {
         section: knowledge.cfsLink.section,
         cfsItemId: newRow.id,
@@ -632,7 +639,7 @@ export default function BalanceSheetBuilderUnified() {
       children: [],
     };
     const knowledge = getSuggestedTreatment(trimmed);
-    if (knowledge.cfsLink) {
+    if (knowledge.cfsLink && knowledge.cfsLink.section !== "none") {
       newRow.cfsLink = {
         section: knowledge.cfsLink.section,
         cfsItemId: newRow.id,
@@ -720,7 +727,7 @@ export default function BalanceSheetBuilderUnified() {
                   row={row}
                   years={years}
                   meta={meta}
-                  glossaryItem={glossaryItem}
+                  glossaryItem={glossaryItem ?? undefined}
                   isLocked={isLocked}
                   isCalculated={isCalculated}
                   autoValue={computedValue}
@@ -842,7 +849,7 @@ export default function BalanceSheetBuilderUnified() {
                       row={row}
                       years={years}
                       meta={meta}
-                      glossaryItem={glossaryItem}
+                      glossaryItem={glossaryItem ?? undefined}
                       isLocked={isLocked}
                       isCalculated={isCalculated}
                       autoValue={computedValue}
@@ -1014,7 +1021,7 @@ export default function BalanceSheetBuilderUnified() {
                       row={row}
                       years={years}
                       meta={meta}
-                      glossaryItem={glossaryItem}
+                      glossaryItem={glossaryItem ?? undefined}
                       isLocked={isLocked}
                       isCalculated={isCalculated}
                       autoValue={computedValue}
@@ -1187,7 +1194,7 @@ export default function BalanceSheetBuilderUnified() {
                       row={row}
                       years={years}
                       meta={meta}
-                      glossaryItem={glossaryItem}
+                      glossaryItem={glossaryItem ?? undefined}
                       isLocked={isLocked}
                       isCalculated={isCalculated}
                       autoValue={computedValue}
@@ -1355,7 +1362,7 @@ export default function BalanceSheetBuilderUnified() {
                       row={row}
                       years={years}
                       meta={meta}
-                      glossaryItem={glossaryItem}
+                      glossaryItem={glossaryItem ?? undefined}
                       isLocked={isLocked}
                       isCalculated={isCalculated}
                       autoValue={computedValue}
@@ -1527,7 +1534,7 @@ export default function BalanceSheetBuilderUnified() {
                       row={row}
                       years={years}
                       meta={meta}
-                      glossaryItem={glossaryItem}
+                      glossaryItem={glossaryItem ?? undefined}
                       isLocked={isLocked}
                       isCalculated={isCalculated}
                       autoValue={computedValue}

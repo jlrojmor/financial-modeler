@@ -563,6 +563,10 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     sgaPctByItemId: state.sgaPctByItemId ?? {},
     sgaPctModeByItemId: state.sgaPctModeByItemId ?? {},
     sgaPctByItemIdByYear: state.sgaPctByItemIdByYear ?? {},
+    sgaPctOfParentByItemId: state.sgaPctOfParentByItemId ?? {},
+    sgaPctOfParentModeByItemId: state.sgaPctOfParentModeByItemId ?? {},
+    sgaPctOfParentByItemIdByYear: state.sgaPctOfParentByItemIdByYear ?? {},
+    sgaHistoricAmountByItemIdByYear: state.sgaHistoricAmountByItemIdByYear ?? {},
   };
 }
 

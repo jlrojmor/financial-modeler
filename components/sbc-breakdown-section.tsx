@@ -217,7 +217,7 @@ function SbcCategoryCard({
   const handleEdit = () => {
     setIsConfirmed(false);
     setIsExpanded(true);
-    initializeLocalValues();
+    setLocalValues(initializeLocalValues);
   };
 
   const handleValueChange = (year: string, value: string) => {

@@ -264,6 +264,20 @@ export type ProjectSnapshot = {
   sgaPctOfParentByItemIdByYear: Record<string, Record<string, number>>;
   /** IS Build: historic amounts per sub-item per year (for breakdown helper Option A). Stored in same unit as IS. */
   sgaHistoricAmountByItemIdByYear: Record<string, Record<string, number>>;
+  /** BS Build / Working Capital Schedule: driver type per WC item (days, % of revenue, % of COGS, or manual balance). */
+  wcDriverTypeByItemId: Record<string, "days" | "pct_revenue" | "pct_cogs" | "manual">;
+  /** WC: constant Days driver per item (applied to all projection years when mode is constant). */
+  wcDaysByItemId: Record<string, number>;
+  /** WC: custom Days driver per item and year. */
+  wcDaysByItemIdByYear: Record<string, Record<string, number>>;
+  /** WC: base for Days driver per item (revenue vs COGS). AR → revenue, Inventory/AP → COGS; user can override. */
+  wcDaysBaseByItemId: Record<string, "revenue" | "cogs">;
+  /** WC: base for % driver per item (revenue vs COGS). */
+  wcPctBaseByItemId: Record<string, "revenue" | "cogs">;
+  /** WC: constant % driver per item (0–100). */
+  wcPctByItemId: Record<string, number>;
+  /** WC: custom % driver per item and year (0–100). */
+  wcPctByItemIdByYear: Record<string, Record<string, number>>;
 };
 
 export type ProjectMeta = {
@@ -334,6 +348,20 @@ export type ModelState = {
   sgaPctOfParentModeByItemId: Record<string, "constant" | "custom">;
   sgaPctOfParentByItemIdByYear: Record<string, Record<string, number>>;
   sgaHistoricAmountByItemIdByYear: Record<string, Record<string, number>>;
+  /** BS Build / Working Capital Schedule: driver type per WC item (days, % of revenue, % of COGS, or manual balance). */
+  wcDriverTypeByItemId: Record<string, "days" | "pct_revenue" | "pct_cogs" | "manual">;
+  /** WC: constant Days driver per item (applied to all projection years when mode is constant). */
+  wcDaysByItemId: Record<string, number>;
+  /** WC: custom Days driver per item and year. */
+  wcDaysByItemIdByYear: Record<string, Record<string, number>>;
+  /** WC: base for Days driver per item (revenue vs COGS). AR → revenue, Inventory/AP → COGS; user can override. */
+  wcDaysBaseByItemId: Record<string, "revenue" | "cogs">;
+  /** WC: base for % driver per item (revenue vs COGS). */
+  wcPctBaseByItemId: Record<string, "revenue" | "cogs">;
+  /** WC: constant % driver per item (0–100). */
+  wcPctByItemId: Record<string, number>;
+  /** WC: custom % driver per item and year (0–100). */
+  wcPctByItemIdByYear: Record<string, Record<string, number>>;
 };
 
 export type ModelActions = {
@@ -414,6 +442,20 @@ export type ModelActions = {
   setSgaPctOfParentForItemYear: (itemId: string, year: string, pct: number) => void;
   /** IS Build: set historic amount for a sub-item in a year (breakdown helper Option A). */
   setSgaHistoricAmountForItemYear: (itemId: string, year: string, value: number) => void;
+  /** BS Build / Working Capital Schedule: set driver type for a WC item. */
+  setWcDriverType: (itemId: string, driver: "days" | "pct_revenue" | "pct_cogs" | "manual") => void;
+  /** WC: set constant days driver (used for all projection years when no per-year override). */
+  setWcDaysForItem: (itemId: string, days: number) => void;
+  /** WC: set days driver for a specific year. */
+  setWcDaysForItemYear: (itemId: string, year: string, days: number) => void;
+  /** WC: set base for Days driver (revenue vs COGS). AR → Revenue, Inventory/AP → COGS. */
+  setWcDaysBaseForItem: (itemId: string, base: "revenue" | "cogs") => void;
+  /** WC: set % base for pct driver (revenue or cogs). */
+  setWcPctBaseForItem: (itemId: string, base: "revenue" | "cogs") => void;
+  /** WC: set constant % driver (0–100). */
+  setWcPctForItem: (itemId: string, pct: number) => void;
+  /** WC: set % driver for a specific year (0–100). */
+  setWcPctForItemYear: (itemId: string, year: string, pct: number) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -535,6 +577,13 @@ const defaultState: ModelState = {
   sgaPctOfParentModeByItemId: {},
   sgaPctOfParentByItemIdByYear: {},
   sgaHistoricAmountByItemIdByYear: {},
+  wcDriverTypeByItemId: {},
+  wcDaysByItemId: {},
+  wcDaysByItemIdByYear: {},
+  wcDaysBaseByItemId: {},
+  wcPctBaseByItemId: {},
+  wcPctByItemId: {},
+  wcPctByItemIdByYear: {},
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -567,6 +616,13 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     sgaPctOfParentModeByItemId: state.sgaPctOfParentModeByItemId ?? {},
     sgaPctOfParentByItemIdByYear: state.sgaPctOfParentByItemIdByYear ?? {},
     sgaHistoricAmountByItemIdByYear: state.sgaHistoricAmountByItemIdByYear ?? {},
+    wcDriverTypeByItemId: state.wcDriverTypeByItemId ?? {},
+    wcDaysByItemId: state.wcDaysByItemId ?? {},
+    wcDaysByItemIdByYear: state.wcDaysByItemIdByYear ?? {},
+    wcDaysBaseByItemId: state.wcDaysBaseByItemId ?? {},
+    wcPctBaseByItemId: state.wcPctBaseByItemId ?? {},
+    wcPctByItemId: state.wcPctByItemId ?? {},
+    wcPctByItemIdByYear: state.wcPctByItemIdByYear ?? {},
   };
 }
 
@@ -603,6 +659,13 @@ function applyProjectSnapshot(
     sgaPctOfParentModeByItemId: snapshot.sgaPctOfParentModeByItemId ?? {},
     sgaPctOfParentByItemIdByYear: snapshot.sgaPctOfParentByItemIdByYear ?? {},
     sgaHistoricAmountByItemIdByYear: snapshot.sgaHistoricAmountByItemIdByYear ?? {},
+    wcDriverTypeByItemId: snapshot.wcDriverTypeByItemId ?? {},
+    wcDaysByItemId: snapshot.wcDaysByItemId ?? {},
+    wcDaysByItemIdByYear: snapshot.wcDaysByItemIdByYear ?? {},
+    wcDaysBaseByItemId: snapshot.wcDaysBaseByItemId ?? {},
+    wcPctBaseByItemId: snapshot.wcPctBaseByItemId ?? {},
+    wcPctByItemId: snapshot.wcPctByItemId ?? {},
+    wcPctByItemIdByYear: snapshot.wcPctByItemIdByYear ?? {},
   }));
 }
 
@@ -2878,6 +2941,77 @@ export const useModelStore = create<ModelState & ModelActions>()(
       };
       return {
         sgaHistoricAmountByItemIdByYear: { ...byItem, [itemId]: byYear },
+      };
+    });
+  },
+
+  setWcDriverType: (itemId, driver) => {
+    set((state) => ({
+      wcDriverTypeByItemId: {
+        ...(state.wcDriverTypeByItemId ?? {}),
+        [itemId]: driver,
+      },
+    }));
+  },
+
+  setWcDaysForItem: (itemId, days) => {
+    set((state) => ({
+      wcDaysByItemId: {
+        ...(state.wcDaysByItemId ?? {}),
+        [itemId]: Math.max(0, days),
+      },
+    }));
+  },
+
+  setWcDaysForItemYear: (itemId, year, days) => {
+    set((state) => {
+      const byItem = state.wcDaysByItemIdByYear ?? {};
+      const byYear = {
+        ...(byItem[itemId] ?? {}),
+        [year]: Math.max(0, days),
+      };
+      return {
+        wcDaysByItemIdByYear: { ...byItem, [itemId]: byYear },
+      };
+    });
+  },
+
+  setWcDaysBaseForItem: (itemId, base) => {
+    set((state) => ({
+      wcDaysBaseByItemId: {
+        ...(state.wcDaysBaseByItemId ?? {}),
+        [itemId]: base,
+      },
+    }));
+  },
+
+  setWcPctBaseForItem: (itemId, base) => {
+    set((state) => ({
+      wcPctBaseByItemId: {
+        ...(state.wcPctBaseByItemId ?? {}),
+        [itemId]: base,
+      },
+    }));
+  },
+
+  setWcPctForItem: (itemId, pct) => {
+    set((state) => ({
+      wcPctByItemId: {
+        ...(state.wcPctByItemId ?? {}),
+        [itemId]: Math.max(0, Math.min(100, pct)),
+      },
+    }));
+  },
+
+  setWcPctForItemYear: (itemId, year, pct) => {
+    set((state) => {
+      const byItem = state.wcPctByItemIdByYear ?? {};
+      const byYear = {
+        ...(byItem[itemId] ?? {}),
+        [year]: Math.max(0, Math.min(100, pct)),
+      };
+      return {
+        wcPctByItemIdByYear: { ...byItem, [itemId]: byYear },
       };
     });
   },

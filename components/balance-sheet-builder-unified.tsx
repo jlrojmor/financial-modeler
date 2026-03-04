@@ -13,6 +13,7 @@ import UnifiedItemCard from "@/components/unified-item-card";
 import CollapsibleSection from "@/components/collapsible-section";
 import { computeRowValue } from "@/lib/calculations";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
+import WorkingCapitalScheduleCard from "@/components/working-capital-schedule-card";
 
 // UUID helper
 function uuid() {
@@ -803,6 +804,7 @@ export default function BalanceSheetBuilderUnified() {
       defaultExpanded={true}
     >
       <div className="space-y-6">
+        <WorkingCapitalScheduleCard />
         {/* Assets Section */}
         <div>
           <h3 className="mb-3 text-sm font-semibold text-green-200">ASSETS</h3>

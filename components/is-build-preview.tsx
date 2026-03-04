@@ -442,16 +442,34 @@ export default function ISBuildPreview() {
   /** SG&A forecast methodology: % of revenue (top-level) or % of parent (sub-items) and total SG&A as % of revenue */
   const methodologySgaPct = useMemo(() => {
     const lines: Array<{ id: string; label: string; depth: number; pctByYear: Record<string, number | null> }> = [];
-    for (const { id, label, depth } of sgaLeaves) {
-      const pctByYear: Record<string, number | null> = {};
-      const getPct = depth > 0 ? getSgaPctOfParentForItemYear : getSgaPctForItemYear;
-      for (const y of years) {
-        if (y.endsWith("A")) pctByYear[y] = null;
-        else pctByYear[y] = getPct(id, y);
+    // Follow the SG&A tree order so breakdown rows appear directly under their parent (e.g., R&D -> 1, 2).
+    for (const { row, depth } of sgaRowsFlat) {
+      if (depth === 0) {
+        // Fixed SG&A item: % of total revenue
+        const pctByYear: Record<string, number | null> = {};
+        for (const y of years) {
+          if (y.endsWith("A")) {
+            pctByYear[y] = null;
+          } else {
+            pctByYear[y] = getSgaPctForItemYear(row.id, y);
+          }
+        }
+        lines.push({ id: `sga-${row.id}`, label: row.label, depth: 0, pctByYear });
+      } else if (!row.children?.length) {
+        // Breakdown leaf: % of parent
+        const pctByYear: Record<string, number | null> = {};
+        for (const y of years) {
+          if (y.endsWith("A")) {
+            pctByYear[y] = null;
+          } else {
+            pctByYear[y] = getSgaPctOfParentForItemYear(row.id, y);
+          }
+        }
+        const displayLabel = `${row.label} (% of parent)`;
+        lines.push({ id: `sga-${row.id}`, label: displayLabel, depth, pctByYear });
       }
-      const displayLabel = depth > 0 ? `${label} (% of parent)` : label;
-      lines.push({ id: `sga-${id}`, label: displayLabel, depth, pctByYear });
     }
+
     const totalPctByYear: Record<string, number | null> = {};
     for (const y of years) {
       if (y.endsWith("A")) totalPctByYear[y] = null;

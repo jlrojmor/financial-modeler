@@ -126,6 +126,9 @@ export default function ProjectPage() {
             <BuilderPanel />
             {currentStepId === "is_build" ? (
               <ISBuildPreview />
+            ) : currentStepId === "bs_build" ? (
+              // In BS Build, focus the real-time preview on the Balance Sheet structure only.
+              <ExcelPreview focusStatement="balance" />
             ) : (
               <ExcelPreview />
             )}

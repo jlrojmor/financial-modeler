@@ -6,6 +6,11 @@ import type { Row } from "@/types/finance";
 import { formatCurrencyDisplay, storedToDisplay, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
 import { checkBalanceSheetBalance, computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
+import {
+  getWcScheduleItems,
+  computeWcProjectedBalances,
+  type WcDriverState,
+} from "@/lib/working-capital-schedule";
 import { findCFIItem } from "@/lib/cfi-intelligence";
 import { findCFFItem } from "@/lib/cff-intelligence";
 
@@ -296,6 +301,7 @@ function StatementTable({
   projectedCogs,
   projectedCogsByCogsChild,
   projectedSgaBySgaChild,
+  getYearCellClassName,
 }: { 
   rows: Row[]; 
   label: string; 
@@ -315,6 +321,8 @@ function StatementTable({
   projectedCogsByCogsChild?: Record<string, Record<string, number>>;
   /** For Income Statement: projected SG&A per fixed category (sum of IS Build for that row + breakdown). */
   projectedSgaBySgaChild?: Record<string, Record<string, number>>;
+  /** Optional: class for each year column (e.g. text-blue-400 for actuals, bg for projections). Used in BS Build preview. */
+  getYearCellClassName?: (y: string) => string;
 }) {
   const forStatement: FlattenOptions["forStatement"] =
     label === "Cash Flow Statement" ? "cashflow" : label === "Balance Sheet" ? "balance" : "income";
@@ -324,6 +332,22 @@ function StatementTable({
   );
   const isBalanceSheet = label === "Balance Sheet";
   const isCashFlow = label === "Cash Flow Statement";
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
+  const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
+
+  const toggleSectionCollapsed = (section: string) => {
+    setCollapsedSections((prev) => ({
+      ...prev,
+      [section]: !prev[section],
+    }));
+  };
+
+  const toggleCategoryCollapsed = (category: string) => {
+    setCollapsedCategories((prev) => ({
+      ...prev,
+      [category]: !prev[category],
+    }));
+  };
 
   // For Cash Flow Statement, detect section (use parent's section for child rows to avoid duplicate headers)
   // Section = by position only (and cfsLink), so preview exactly mirrors builder: CFI = capex..investing_cf only
@@ -397,6 +421,10 @@ function StatementTable({
       {flat.map(({ row, depth, parentId }, flatIndex) => {
         const currentSection = isBalanceSheet ? getBSSection(row.id, rows) : isCashFlow ? getCFSSection(row.id, rows, parentId) : null;
         const currentCategory = isBalanceSheet ? getBSCategory(row.id, rows) : null;
+        const isSectionCollapsed =
+          isBalanceSheet && currentSection ? collapsedSections[currentSection] === true : false;
+        const isCategoryCollapsed =
+          isBalanceSheet && currentCategory ? collapsedCategories[currentCategory] === true : false;
         const prevRow = flatIndex > 0 ? flat[flatIndex - 1] : null;
         const prevSection =
           (isBalanceSheet || isCashFlow) && prevRow
@@ -427,6 +455,19 @@ function StatementTable({
         const isParentSubtotal = (row.id === "rev" || row.id === "cogs" || row.id === "sga") && hasChildren;
         const hasTopBorder = isSubtotal || isCalculatedWithChildren || isKeyCalculation || isParentSubtotal || isBalanceSheetSubtotal || isCFSSubtotal;
         const shouldBeBold = isSubtotal || isKeyCalculation || isParentSubtotal || isCalculatedWithChildren || isBalanceSheetSubtotal || isCFSSubtotal;
+
+        // For Balance Sheet: when a main section (Assets, Liabilities, Equity) is collapsed,
+        // keep only the key totals visible. For category collapse, keep category subtotal.
+        const keepWhenSectionCollapsed =
+          isBalanceSheet &&
+          (row.id === "total_assets" ||
+            row.id === "total_liabilities" ||
+            row.id === "total_liab_and_equity" ||
+            isBalanceSheetSubtotal);
+        const shouldHideForSectionCollapse = isBalanceSheet && isSectionCollapsed && !keepWhenSectionCollapsed;
+        const shouldHideForCategoryCollapse =
+          isBalanceSheet && isCategoryCollapsed && !isBalanceSheetSubtotal;
+        const shouldHideRow = shouldHideForSectionCollapse || shouldHideForCategoryCollapse;
         
         // Section colors for Balance Sheet (Assets = green, Liabilities = orange, Equity = purple)
         // Section colors for Cash Flow (Operating = blue, Investing = green, Financing = orange)
@@ -458,20 +499,35 @@ function StatementTable({
         const isBSCategorySubtotal = isBalanceSheet && isBalanceSheetSubtotal && !["total_assets", "total_liabilities", "total_liab_and_equity"].includes(row.id);
         
         return (
-          <React.Fragment key={`fragment-${row.id}-${flatIndex}`}>
+          <>
             {/* Section Header for Balance Sheet (Assets, Liabilities, Shareholders' Equity) */}
             {/* Section Header for Cash Flow Statement (Operating, Investing, Financing) */}
             {isSectionStart && currentSection && (
               <tr key={`section-${currentSection}-${flatIndex}`} className="border-t-2 border-slate-600">
                 <td colSpan={1 + years.length} className={`px-3 py-2.5 ${sectionColors[currentSection]?.bg || "bg-slate-900/50"}`}>
-                  <div className={`text-sm font-semibold ${sectionColors[currentSection]?.text || "text-slate-300"} underline`}>
-                    {currentSection === "assets" && "Assets"}
-                    {currentSection === "liabilities" && "Liabilities"}
-                    {currentSection === "equity" && "Shareholders' Equity"}
-                    {currentSection === "operating" && "Operating Activities"}
-                    {currentSection === "investing" && "Investing Activities"}
-                    {currentSection === "financing" && "Financing Activities"}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isBalanceSheet && currentSection) {
+                        toggleSectionCollapsed(currentSection);
+                      }
+                    }}
+                    className={`w-full flex items-center justify-start gap-2 text-sm font-semibold ${sectionColors[currentSection]?.text || "text-slate-300"} underline`}
+                  >
+                    {isBalanceSheet && (
+                      <span className="text-[11px] w-10 text-left">
+                        {isSectionCollapsed ? "▶" : "▼"}
+                      </span>
+                    )}
+                    <span>
+                      {currentSection === "assets" && "Assets"}
+                      {currentSection === "liabilities" && "Liabilities"}
+                      {currentSection === "equity" && "Shareholders' Equity"}
+                      {currentSection === "operating" && "Operating Activities"}
+                      {currentSection === "investing" && "Investing Activities"}
+                      {currentSection === "financing" && "Financing Activities"}
+                    </span>
+                  </button>
                 </td>
               </tr>
             )}
@@ -480,18 +536,30 @@ function StatementTable({
             {isCategoryStart && currentCategory && (
               <tr key={`category-${currentCategory}-${flatIndex}`}>
                 <td colSpan={1 + years.length} className={`px-3 py-1.5 ${categoryColors[currentCategory]?.bg || "bg-transparent"}`}>
-                  <div className={`text-xs font-medium ${categoryColors[currentCategory]?.text || "text-slate-400"}`}>
-                    {categoryLabels[currentCategory]}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isBalanceSheet && currentCategory) {
+                        toggleCategoryCollapsed(currentCategory);
+                      }
+                    }}
+                    className={`w-full flex items-center justify-start gap-2 text-xs font-medium ${categoryColors[currentCategory]?.text || "text-slate-400"}`}
+                  >
+                    <span className="text-[10px] w-8 text-left">
+                      {isCategoryCollapsed ? "▶" : "▼"}
+                    </span>
+                    <span>{categoryLabels[currentCategory]}</span>
+                  </button>
                 </td>
               </tr>
             )}
             
             {/* Main row */}
+            {!shouldHideRow && (
             <tr
-            key={`${row.id}-${flatIndex}`} 
-            className={`border-b border-slate-900 hover:bg-slate-900/40 ${hasTopBorder ? "border-t-2 border-slate-300" : ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/30" : ""}`}
-          >
+              key={`${row.id}-${flatIndex}`} 
+              className={`border-b border-slate-900 hover:bg-slate-900/40 ${hasTopBorder ? "border-t-2 border-slate-300" : ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/30" : ""}`}
+            >
             <td className={`px-3 py-2 ${labelClass} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
               <div
                 style={{
@@ -743,13 +811,14 @@ function StatementTable({
                 : (display || (isInput ? "" : "—"));
               
               return (
-                <td key={`${row.id}-${y}`} className={`px-3 py-2 ${cellClass} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
+                <td key={`${row.id}-${y}`} className={`px-3 py-2 ${cellClass} ${getYearCellClassName?.(y) ?? ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
                   {displayValue}
                 </td>
               );
             })}
           </tr>
-          </React.Fragment>
+            )}
+          </>
         );
       })}
 
@@ -764,7 +833,12 @@ function StatementTable({
   );
 }
 
-export default function ExcelPreview() {
+type ExcelPreviewProps = {
+  /** Optional: focus on a single statement ('all' = IS+BS+CFS, 'balance' = Balance Sheet only) */
+  focusStatement?: "all" | "balance";
+};
+
+export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewProps) {
   const meta = useModelStore((s) => s.meta);
   const incomeStatement = useModelStore((s) => s.incomeStatement);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
@@ -781,6 +855,13 @@ export default function ExcelPreview() {
   const sgaPctOfParentByItemId = useModelStore((s) => s.sgaPctOfParentByItemId ?? {});
   const sgaPctOfParentModeByItemId = useModelStore((s) => s.sgaPctOfParentModeByItemId ?? {});
   const sgaPctOfParentByItemIdByYear = useModelStore((s) => s.sgaPctOfParentByItemIdByYear ?? {});
+  const wcDriverTypeByItemId = useModelStore((s) => s.wcDriverTypeByItemId ?? {});
+  const wcDaysByItemId = useModelStore((s) => s.wcDaysByItemId ?? {});
+  const wcDaysByItemIdByYear = useModelStore((s) => s.wcDaysByItemIdByYear ?? {});
+  const wcDaysBaseByItemId = useModelStore((s) => s.wcDaysBaseByItemId ?? {});
+  const wcPctBaseByItemId = useModelStore((s) => s.wcPctBaseByItemId ?? {});
+  const wcPctByItemId = useModelStore((s) => s.wcPctByItemId ?? {});
+  const wcPctByItemIdByYear = useModelStore((s) => s.wcPctByItemIdByYear ?? {});
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -829,6 +910,16 @@ export default function ExcelPreview() {
   }, [incomeStatement, balanceSheet, cashFlow, expandedRows]);
 
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
+  const isProjectionYear = (y: string) => y.endsWith("E") || projectionYears.includes(y);
+  const isFirstProjectionYear = (y: string) => projectionYears[0] === y;
+  const yearColClass = (base: string) => (y: string) =>
+    [
+      base,
+      isProjectionYear(y) ? "bg-slate-800/60" : "!text-blue-400",
+      isFirstProjectionYear(y) ? "border-l-2 border-amber-500/70" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
   const lastHistoricYear = useMemo(
     () => (meta?.years?.historical ?? [])[(meta?.years?.historical ?? []).length - 1] ?? "",
     [meta]
@@ -1062,6 +1153,127 @@ export default function ExcelPreview() {
     return out;
   }, [incomeStatement, projectedSgaByRowIdByYear, meta?.years?.projection]);
 
+  const wcScheduleItems = useMemo(
+    () => getWcScheduleItems(cashFlow ?? [], balanceSheet ?? []),
+    [cashFlow, balanceSheet]
+  );
+  const revenueByYearForWc = useMemo(() => {
+    const out: Record<string, number> = {};
+    const revRow = incomeStatement?.find((r) => r.id === "rev");
+    const allSt = { incomeStatement: incomeStatement ?? [], balanceSheet: balanceSheet ?? [], cashFlow: cashFlow ?? [] };
+    for (const y of years) {
+      if (y.endsWith("E") && projectedRevenue?.["rev"]?.[y] != null) {
+        out[y] = projectedRevenue["rev"][y];
+      } else if (revRow) {
+        try {
+          out[y] = computeRowValue(revRow, y, incomeStatement ?? [], incomeStatement ?? [], allSt);
+        } catch {
+          out[y] = 0;
+        }
+      } else {
+        out[y] = 0;
+      }
+    }
+    return out;
+  }, [incomeStatement, years, projectedRevenue]);
+  const cogsByYearForWc = useMemo(() => {
+    const out: Record<string, number> = {};
+    const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+    const allSt = { incomeStatement: incomeStatement ?? [], balanceSheet: balanceSheet ?? [], cashFlow: cashFlow ?? [] };
+    for (const y of years) {
+      if (y.endsWith("E") && projectedCogs?.[y] != null) {
+        out[y] = projectedCogs[y];
+      } else if (cogsRow) {
+        try {
+          out[y] = computeRowValue(cogsRow, y, incomeStatement ?? [], incomeStatement ?? [], allSt);
+        } catch {
+          out[y] = 0;
+        }
+      } else {
+        out[y] = 0;
+      }
+    }
+    return out;
+  }, [incomeStatement, years, projectedCogs]);
+  const wcDriverState: WcDriverState = useMemo(
+    () => ({
+      wcDriverTypeByItemId,
+      wcDaysByItemId,
+      wcDaysByItemIdByYear,
+      wcDaysBaseByItemId,
+      wcPctBaseByItemId,
+      wcPctByItemId,
+      wcPctByItemIdByYear,
+    }),
+    [
+      wcDriverTypeByItemId,
+      wcDaysByItemId,
+      wcDaysByItemIdByYear,
+      wcDaysBaseByItemId,
+      wcPctBaseByItemId,
+      wcPctByItemId,
+      wcPctByItemIdByYear,
+    ]
+  );
+  const balanceByItemByYearForWc = useMemo(() => {
+    const out: Record<string, Record<string, number>> = {};
+    for (const item of wcScheduleItems) {
+      const row = balanceSheet?.find((r) => r.id === item.id);
+      out[item.id] = {};
+      for (const y of years) {
+        out[item.id][y] = row?.values?.[y] ?? 0;
+      }
+    }
+    return out;
+  }, [wcScheduleItems, balanceSheet, years]);
+  const wcProjectedBalances = useMemo(() => {
+    if (wcScheduleItems.length === 0) return {};
+    const projYears = meta?.years?.projection ?? [];
+    return computeWcProjectedBalances(
+      wcScheduleItems.map((i) => i.id),
+      projYears,
+      wcDriverState,
+      revenueByYearForWc,
+      cogsByYearForWc,
+      balanceByItemByYearForWc
+    );
+  }, [
+    wcScheduleItems,
+    meta?.years?.projection,
+    wcDriverState,
+    revenueByYearForWc,
+    cogsByYearForWc,
+    balanceByItemByYearForWc,
+  ]);
+
+  const wcAssets = useMemo(() => wcScheduleItems.filter((i) => i.side === "asset"), [wcScheduleItems]);
+  const wcLiabilities = useMemo(() => wcScheduleItems.filter((i) => i.side === "liability"), [wcScheduleItems]);
+
+  const { totalOAByYear, totalOLByYear, nowcByYear, deltaNowcByYear } = useMemo(() => {
+    const getVal = (itemId: string, y: string) => {
+      const isProj = y.endsWith("E");
+      if (isProj && wcProjectedBalances[itemId]?.[y] != null) return wcProjectedBalances[itemId][y];
+      return balanceByItemByYearForWc[itemId]?.[y] ?? 0;
+    };
+    const totalOA: Record<string, number> = {};
+    const totalOL: Record<string, number> = {};
+    const nowc: Record<string, number> = {};
+    const deltaNowc: Record<string, number | null> = {};
+    for (const y of years) {
+      totalOA[y] = wcAssets.reduce((sum, i) => sum + getVal(i.id, y), 0);
+      totalOL[y] = wcLiabilities.reduce((sum, i) => sum + getVal(i.id, y), 0);
+      nowc[y] = totalOA[y] - totalOL[y];
+      const idx = years.indexOf(y);
+      deltaNowc[y] = idx > 0 ? nowc[y] - nowc[years[idx - 1]] : null;
+    }
+    return {
+      totalOAByYear: totalOA,
+      totalOLByYear: totalOL,
+      nowcByYear: nowc,
+      deltaNowcByYear: deltaNowc,
+    };
+  }, [wcScheduleItems, wcAssets, wcLiabilities, years, wcProjectedBalances, balanceByItemByYearForWc]);
+
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
       {/* Header - Fixed */}
@@ -1120,7 +1332,11 @@ export default function ExcelPreview() {
                 Line Item
               </th>
               {years.map((y) => (
-                <th key={y} className="px-3 py-2 text-right font-semibold text-slate-400">
+                <th
+                  key={y}
+                  className={yearColClass("px-3 py-2 text-right font-semibold text-slate-400")(y)}
+                  title={isProjectionYear(y) ? "Projection" : "Actual"}
+                >
                   {y}
                 </th>
               ))}
@@ -1128,33 +1344,35 @@ export default function ExcelPreview() {
           </thead>
 
           <tbody>
-            {/* Income Statement — projection years for Revenue use engine (sum of IS Build breakdowns) */}
-            <StatementTable
-              rows={incomeStatement.filter(r => 
-                r.id !== "ebitda" && 
-                r.id !== "ebitda_margin" && 
-                r.id !== "sbc" &&
-                !r.label.toLowerCase().includes("stock-based compensation") &&
-                !r.label.toLowerCase().includes("stock based compensation") &&
-                !r.label.toLowerCase().includes("sbc")
-              )}
-              label="Income Statement"
-              years={years}
-              meta={meta}
-              showDecimals={showDecimals}
-              expandedRows={expandedRows}
-              toggleRow={toggleRow}
-              allStatements={{ incomeStatement, balanceSheet, cashFlow }}
-              sbcBreakdowns={sbcBreakdowns}
-              danaBreakdowns={danaBreakdowns}
-              projectedRevenue={projectedRevenue}
-              projectedCogs={projectedCogs}
-              projectedCogsByCogsChild={projectedCogsByCogsChild}
-              projectedSgaBySgaChild={projectedSgaBySgaChild}
-            />
+            {/* Income Statement — only when showing full model */}
+            {focusStatement === "all" && (
+              <StatementTable
+                rows={incomeStatement.filter(r => 
+                  r.id !== "ebitda" && 
+                  r.id !== "ebitda_margin" && 
+                  r.id !== "sbc" &&
+                  !r.label.toLowerCase().includes("stock-based compensation") &&
+                  !r.label.toLowerCase().includes("stock based compensation") &&
+                  !r.label.toLowerCase().includes("sbc")
+                )}
+                label="Income Statement"
+                years={years}
+                meta={meta}
+                showDecimals={showDecimals}
+                expandedRows={expandedRows}
+                toggleRow={toggleRow}
+                allStatements={{ incomeStatement, balanceSheet, cashFlow }}
+                sbcBreakdowns={sbcBreakdowns}
+                danaBreakdowns={danaBreakdowns}
+                projectedRevenue={projectedRevenue}
+                projectedCogs={projectedCogs}
+                projectedCogsByCogsChild={projectedCogsByCogsChild}
+                projectedSgaBySgaChild={projectedSgaBySgaChild}
+              />
+            )}
 
             {/* Stock-Based Compensation Disclosure */}
-            {(() => {
+            {focusStatement === "all" && (() => {
               const sgaRow = incomeStatement.find((r) => r.id === "sga");
               const cogsRow = incomeStatement.find((r) => r.id === "cogs");
               const rdRow = incomeStatement.find((r) => r.id === "rd");
@@ -1391,6 +1609,101 @@ export default function ExcelPreview() {
               );
             })()}
 
+            {/* Working Capital Schedule — only when BS Build focus (IB: NOWC = Total OA - Total OL, ΔNOWC = change) */}
+            {focusStatement === "balance" && wcScheduleItems.length > 0 && (
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-blue-950/50">
+                    <h3 className="text-sm font-bold text-blue-200">Working Capital Schedule</h3>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      Operating WC items from CFO. Total OA − Total OL = NOWC; ΔNOWC = period change. Columns: Actuals → <span className="text-amber-400/90">Projections</span>.
+                    </p>
+                  </td>
+                </tr>
+                <tr className="border-b border-slate-700 bg-slate-800/30">
+                  <td className="px-3 py-1.5 text-xs font-semibold text-slate-400">Line Item</td>
+                  {years.map((y) => (
+                    <td key={y} className={yearColClass("px-3 py-1.5 text-right text-xs font-semibold text-slate-400")(y)}>
+                      {y}
+                    </td>
+                  ))}
+                </tr>
+                {/* Net Operating Working Capital (NOWC) = Total OA − Total OL */}
+                <tr className="border-b-2 border-slate-600 bg-slate-800/50">
+                  <td className="px-3 py-2 text-xs font-semibold text-slate-100">Net Operating Working Capital (NOWC)</td>
+                  {years.map((y) => (
+                    <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-semibold text-slate-100")(y)}>
+                      {formatAccountingNumber(nowcByYear[y], meta?.currencyUnit ?? "millions", showDecimals)}
+                    </td>
+                  ))}
+                </tr>
+                {/* ΔNOWC = period-over-period change */}
+                <tr className="border-b border-slate-700 bg-slate-800/30">
+                  <td className="px-3 py-2 text-xs font-medium text-blue-200/90 pl-6">ΔNOWC</td>
+                  {years.map((y) => (
+                    <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                      {deltaNowcByYear[y] === null ? "—" : formatAccountingNumber(deltaNowcByYear[y]!, meta?.currencyUnit ?? "millions", showDecimals)}
+                    </td>
+                  ))}
+                </tr>
+                {/* Asset Accounts (total) */}
+                <tr className="border-b border-slate-700 bg-slate-800/40">
+                  <td className="px-3 py-2 text-xs font-semibold text-slate-200">Asset Accounts</td>
+                  {years.map((y) => (
+                    <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-medium text-slate-200")(y)}>
+                      {totalOAByYear[y] === 0 ? "—" : formatAccountingNumber(totalOAByYear[y], meta?.currencyUnit ?? "millions", showDecimals)}
+                    </td>
+                  ))}
+                </tr>
+                {wcAssets.map((item) => {
+                  const isProj = (y: string) => y.endsWith("E");
+                  const val = (y: string) =>
+                    isProj(y) && wcProjectedBalances[item.id]?.[y] != null
+                      ? wcProjectedBalances[item.id][y]
+                      : balanceByItemByYearForWc[item.id]?.[y] ?? 0;
+                  return (
+                    <tr key={item.id} className="border-b border-slate-800 hover:bg-slate-800/40">
+                      <td className="px-3 py-2 text-xs text-slate-300 pl-6">{item.label}</td>
+                      {years.map((y) => (
+                        <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                          {val(y) === 0 ? "—" : formatAccountingNumber(val(y), meta?.currencyUnit ?? "millions", showDecimals)}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+                {/* Liabilities Accounts (total) */}
+                <tr className="border-b border-slate-700 bg-slate-800/40">
+                  <td className="px-3 py-2 text-xs font-semibold text-slate-200">Liabilities Accounts</td>
+                  {years.map((y) => (
+                    <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-medium text-slate-200")(y)}>
+                      {totalOLByYear[y] === 0 ? "—" : formatAccountingNumber(totalOLByYear[y], meta?.currencyUnit ?? "millions", showDecimals)}
+                    </td>
+                  ))}
+                </tr>
+                {wcLiabilities.map((item) => {
+                  const isProj = (y: string) => y.endsWith("E");
+                  const val = (y: string) =>
+                    isProj(y) && wcProjectedBalances[item.id]?.[y] != null
+                      ? wcProjectedBalances[item.id][y]
+                      : balanceByItemByYearForWc[item.id]?.[y] ?? 0;
+                  return (
+                    <tr key={item.id} className="border-b border-slate-800 hover:bg-slate-800/40">
+                      <td className="px-3 py-2 text-xs text-slate-300 pl-6">{item.label}</td>
+                      {years.map((y) => (
+                        <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                          {val(y) === 0 ? "—" : formatAccountingNumber(val(y), meta?.currencyUnit ?? "millions", showDecimals)}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+                <tr>
+                  <td colSpan={1 + years.length} className="h-3 bg-transparent" />
+                </tr>
+              </>
+            )}
+
             {/* Balance Sheet */}
             {balanceSheet && balanceSheet.length > 0 && (
               <>
@@ -1405,6 +1718,17 @@ export default function ExcelPreview() {
                   allStatements={{ incomeStatement, balanceSheet, cashFlow }}
                   sbcBreakdowns={sbcBreakdowns}
                   danaBreakdowns={danaBreakdowns}
+                  getYearCellClassName={
+                    focusStatement === "balance"
+                      ? (y) =>
+                          [
+                            isProjectionYear(y) ? "bg-slate-800/60" : "!text-blue-400",
+                            isFirstProjectionYear(y) ? "border-l-2 border-amber-500/70" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")
+                      : undefined
+                  }
                 />
                 
                 {/* Balance Check */}
@@ -1496,7 +1820,7 @@ export default function ExcelPreview() {
             )}
 
             {/* Cash Flow Statement */}
-            {cashFlow && cashFlow.length > 0 && (
+            {focusStatement === "all" && cashFlow && cashFlow.length > 0 && (
               <StatementTable
                 rows={cashFlow}
                 label="Cash Flow Statement"

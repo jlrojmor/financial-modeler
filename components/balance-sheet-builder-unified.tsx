@@ -86,8 +86,10 @@ const EXTRA_EQUITY_SUGGESTIONS = [
  * - Expand/collapse items
  * - Edit/Confirm/Remove functionality
  * - Organized by categories (Assets, Liabilities, Equity)
+ * When stepId === "historicals", only the BS structure is shown (no WC or Capex & D&A schedules).
  */
-export default function BalanceSheetBuilderUnified() {
+export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "historicals" | "bs_build" }) {
+  const isHistoricalsStep = stepId === "historicals";
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const updateRowValue = useModelStore((s) => s.updateRowValue);
@@ -805,14 +807,18 @@ export default function BalanceSheetBuilderUnified() {
   return (
     <CollapsibleSection
       sectionId="balance_sheet_all"
-      title="Balance Sheet Builder"
-      description="Build your Balance Sheet with Assets, Liabilities, and Equity. All items are organized by category."
+      title={isHistoricalsStep ? "Balance Sheet (Historical)" : "Balance Sheet Builder"}
+      description={isHistoricalsStep ? "Enter historical Balance Sheet data for Assets, Liabilities, and Equity. Working Capital and Capex & D&A schedules are set up in the BS Build step." : "Build your Balance Sheet with Assets, Liabilities, and Equity. All items are organized by category."}
       colorClass="green"
       defaultExpanded={true}
     >
       <div className="space-y-6">
-        <WorkingCapitalScheduleCard />
-        <CapexDaScheduleCard />
+        {!isHistoricalsStep && (
+          <>
+            <WorkingCapitalScheduleCard />
+            <CapexDaScheduleCard />
+          </>
+        )}
         {/* Assets Section */}
         <div>
           <h3 className="mb-3 text-sm font-semibold text-green-200">ASSETS</h3>

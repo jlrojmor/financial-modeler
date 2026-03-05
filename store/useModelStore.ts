@@ -427,6 +427,8 @@ export type ModelState = {
   intangiblesPctOfCapex: number;
   intangiblesHasHistoricalAmortization: boolean;
   intangiblesHistoricalAmortizationByYear: Record<string, number>;
+  /** BS Build preview only: rowId -> year -> value. WC schedule, PP&E, Intangibles schedule outputs. Not persisted. */
+  bsBuildPreviewOverrides: Record<string, Record<string, number>>;
 };
 
 export type ModelActions = {
@@ -551,6 +553,8 @@ export type ModelActions = {
   setIntangiblesPctOfCapex: (pct: number) => void;
   setIntangiblesHasHistoricalAmortization: (on: boolean) => void;
   setIntangiblesHistoricalAmortizationForYear: (year: string, value: number) => void;
+  /** Set BS Build preview overrides (WC + PP&E + Intangibles schedule outputs). Preview-only, not persisted. */
+  setBsBuildPreviewOverrides: (overrides: Record<string, Record<string, number>>) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -706,6 +710,7 @@ const defaultState: ModelState = {
   intangiblesPctOfCapex: 0,
   intangiblesHasHistoricalAmortization: false,
   intangiblesHistoricalAmortizationByYear: {},
+  bsBuildPreviewOverrides: {},
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -3312,6 +3317,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     set((s) => ({
       intangiblesHistoricalAmortizationByYear: { ...(s.intangiblesHistoricalAmortizationByYear ?? {}), [year]: value },
     })),
+  setBsBuildPreviewOverrides: (overrides) => set(() => ({ bsBuildPreviewOverrides: overrides })),
 
   // IS Build breakdowns live ONLY in config; they are NOT added to the incomeStatement tree.
   // Historicals structure (e.g. Revenue → Subscription, Services) is unchanged. For projection

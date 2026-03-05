@@ -648,27 +648,136 @@ function computeFormula(
 }
 
 /**
+ * Effective value for a row in a given year (override or stored).
+ * Used by BS Build preview to compute subtotals/totals from schedule overrides.
+ */
+function effectiveValue(
+  row: Row,
+  year: string,
+  overrides?: Record<string, Record<string, number>>
+): number {
+  if (overrides?.[row.id]?.[year] !== undefined) return overrides[row.id][year];
+  return row.values?.[year] ?? 0;
+}
+
+/**
+ * Compute Balance Sheet category total by summing line items with effective values (override or stored).
+ * Used in BS Build preview so subtotals/totals reflect WC, PP&E, Intangibles schedule overrides.
+ */
+function sumCategoryWithOverrides(
+  statementRows: Row[],
+  category: "current_assets" | "fixed_assets" | "current_liabilities" | "non_current_liabilities" | "equity",
+  year: string,
+  overrides?: Record<string, Record<string, number>>
+): number {
+  const items = getRowsForCategory(statementRows, category);
+  const excludeIds = [
+    "total_current_assets",
+    "total_fixed_assets",
+    "total_assets",
+    "total_current_liabilities",
+    "total_non_current_liabilities",
+    "total_liabilities",
+    "total_equity",
+    "total_liab_and_equity",
+  ];
+  const itemsToSum = items.filter(
+    (item) =>
+      !excludeIds.includes(item.id) &&
+      !item.id.startsWith("total_") &&
+      item.kind !== "total" &&
+      item.kind !== "subtotal"
+  );
+  let sum = 0;
+  for (const item of itemsToSum) {
+    sum += effectiveValue(item, year, overrides);
+  }
+  return sum;
+}
+
+/**
+ * Compute all Balance Sheet subtotals and totals for a single year, optionally using overrides.
+ * Used in BS Build preview so totals reflect WC/PP&E/Intangibles schedule outputs.
+ */
+export function computeBalanceSheetTotalsWithOverrides(
+  balanceSheet: Row[],
+  year: string,
+  overrides?: Record<string, Record<string, number>>
+): Record<string, number> {
+  const total_current_assets = sumCategoryWithOverrides(
+    balanceSheet,
+    "current_assets",
+    year,
+    overrides
+  );
+  const total_fixed_assets = sumCategoryWithOverrides(
+    balanceSheet,
+    "fixed_assets",
+    year,
+    overrides
+  );
+  const total_assets = total_current_assets + total_fixed_assets;
+  const total_current_liabilities = sumCategoryWithOverrides(
+    balanceSheet,
+    "current_liabilities",
+    year,
+    overrides
+  );
+  const total_non_current_liabilities = sumCategoryWithOverrides(
+    balanceSheet,
+    "non_current_liabilities",
+    year,
+    overrides
+  );
+  const total_liabilities = total_current_liabilities + total_non_current_liabilities;
+  const total_equity = sumCategoryWithOverrides(
+    balanceSheet,
+    "equity",
+    year,
+    overrides
+  );
+  const total_liab_and_equity = total_liabilities + total_equity;
+  return {
+    total_current_assets,
+    total_fixed_assets,
+    total_assets,
+    total_current_liabilities,
+    total_non_current_liabilities,
+    total_liabilities,
+    total_equity,
+    total_liab_and_equity,
+  };
+}
+
+/**
  * Check if Balance Sheet balances: Total Assets = Total Liabilities + Total Equity
- * Returns an object with balance status and difference for each year
- * Uses findRowValue internally to get computed values
+ * Returns an object with balance status and difference for each year.
+ * If overrides (BS Build preview) are provided, uses them for projection years so the check reflects schedule outputs.
  */
 export function checkBalanceSheetBalance(
   balanceSheet: Row[],
-  years: string[]
+  years: string[],
+  overrides?: Record<string, Record<string, number>>
 ): { year: string; balances: boolean; totalAssets: number; totalLiabAndEquity: number; difference: number }[] {
-  const results = years.map(year => {
-    // Use findRowValue to get the computed values (it handles children, formulas, etc.)
-    const totalAssets = findRowValue(balanceSheet, "total_assets", year);
-    const totalLiabilities = findRowValue(balanceSheet, "total_liabilities", year);
-    const totalEquity = findRowValue(balanceSheet, "total_equity", year);
+  const results = years.map((year) => {
+    const useOverrides = overrides != null && Object.keys(overrides).length > 0;
+    const totalAssets =
+      useOverrides
+        ? computeBalanceSheetTotalsWithOverrides(balanceSheet, year, overrides).total_assets
+        : findRowValue(balanceSheet, "total_assets", year);
+    const totalLiabilities =
+      useOverrides
+        ? computeBalanceSheetTotalsWithOverrides(balanceSheet, year, overrides).total_liabilities
+        : findRowValue(balanceSheet, "total_liabilities", year);
+    const totalEquity =
+      useOverrides
+        ? computeBalanceSheetTotalsWithOverrides(balanceSheet, year, overrides).total_equity
+        : findRowValue(balanceSheet, "total_equity", year);
     const totalLiabAndEquity = totalLiabilities + totalEquity;
-    
-    // Calculate difference (should be 0 if balanced)
+
     const difference = totalAssets - totalLiabAndEquity;
-    
-    // Consider it balanced if difference is within rounding tolerance (0.01)
     const balances = Math.abs(difference) < 0.01;
-    
+
     return {
       year,
       balances,
@@ -677,7 +786,7 @@ export function checkBalanceSheetBalance(
       difference,
     };
   });
-  
+
   return results;
 }
 

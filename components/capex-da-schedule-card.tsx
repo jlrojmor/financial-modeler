@@ -388,7 +388,7 @@ export default function CapexDaScheduleCard() {
 
                 {/* C) PP&E intensity */}
                 <div>
-                  <div className="text-xs font-medium text-slate-300 mb-1">PP&E intensity (PP&E / Revenue)</div>
+                  <div className="text-xs font-medium text-slate-300 mb-1">{"PP&E intensity (PP&E / Revenue)"}</div>
                   <div className="overflow-x-auto rounded border border-slate-700 bg-slate-950/60">
                     <table className="min-w-full border-collapse text-[11px] text-slate-200">
                       <thead className="bg-slate-800/80">
@@ -417,7 +417,7 @@ export default function CapexDaScheduleCard() {
 
                 {/* D) Intangibles */}
                 <div>
-                  <div className="text-xs font-medium text-slate-300 mb-1">Intangibles (Intangibles / Revenue)</div>
+                  <div className="text-xs font-medium text-slate-300 mb-1">{"Intangibles (Intangibles / Revenue)"}</div>
                   <div className="overflow-x-auto rounded border border-slate-700 bg-slate-950/60">
                     <table className="min-w-full border-collapse text-[11px] text-slate-200">
                       <thead className="bg-slate-800/80">
@@ -648,7 +648,7 @@ export default function CapexDaScheduleCard() {
           className="flex w-full items-center gap-2 text-left"
         >
           <span className="text-slate-400">{section3Open ? "▾" : "▸"}</span>
-          <span className="text-sm font-semibold text-slate-200">3. Depreciation / Amortization Setup</span>
+          <span className="text-sm font-semibold text-slate-200">{"3. Depreciation / Amortization Setup"}</span>
         </button>
         {section3Open && (
           <div className="mt-3 pl-5 space-y-4">

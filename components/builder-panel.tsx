@@ -202,9 +202,9 @@ export default function BuilderPanel() {
             {/* Income Statement Section - Using Unified Builder */}
             <IncomeStatementBuilder />
 
-            {/* Balance Sheet Section */}
+            {/* Balance Sheet Section — historical data only; no WC/Capex schedules here */}
             <div className="mt-6">
-              <BalanceSheetBuilder />
+              <BalanceSheetBuilder stepId="historicals" />
             </div>
 
             {/* Cash Flow Statement Section */}
@@ -217,7 +217,7 @@ export default function BuilderPanel() {
         {currentStepId === "is_build" && <ISBuildView />}
 
         {currentStepId === "bs_build" && (
-          <BalanceSheetBuilder />
+          <BalanceSheetBuilder stepId="bs_build" />
         )}
 
         {currentStepId === "cfs_build" && (

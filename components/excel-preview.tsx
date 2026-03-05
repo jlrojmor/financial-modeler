@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { formatCurrencyDisplay, storedToDisplay, displayToStored, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
-import { checkBalanceSheetBalance, computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
+import { checkBalanceSheetBalance, computeBalanceSheetTotalsWithOverrides, computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
 import {
   getWcScheduleItems,
@@ -322,6 +322,8 @@ function StatementTable({
   projectedCogsByCogsChild,
   projectedSgaBySgaChild,
   getYearCellClassName,
+  bsBuildPreviewOverrides,
+  bsBuildTotalsByYear,
 }: { 
   rows: Row[]; 
   label: string; 
@@ -343,6 +345,10 @@ function StatementTable({
   projectedSgaBySgaChild?: Record<string, Record<string, number>>;
   /** Optional: class for each year column (e.g. text-blue-400 for actuals, bg for projections). Used in BS Build preview. */
   getYearCellClassName?: (y: string) => string;
+  /** BS Build preview only: rowId -> year -> value. When set, projection years show override or "—". */
+  bsBuildPreviewOverrides?: Record<string, Record<string, number>>;
+  /** BS Build preview only: year -> totalRowId -> value. When set, total rows use these for projection years. */
+  bsBuildTotalsByYear?: Record<string, Record<string, number>>;
 }) {
   const forStatement: FlattenOptions["forStatement"] =
     label === "Cash Flow Statement" ? "cashflow" : label === "Balance Sheet" ? "balance" : "income";
@@ -620,7 +626,12 @@ function StatementTable({
             {years.map((y) => {
               // For calculated CFS items, use stored values (computed by recomputeCalculations)
               // Don't recompute here to avoid recursion - values should already be stored
-              let storedValue = row.values?.[y] ?? 0;
+              let storedValue: number | undefined = row.values?.[y] ?? 0;
+              // BS Build preview only: projection years show schedule overrides (WC, PP&E, Intangibles) or "—"
+              if (isBalanceSheet && bsBuildPreviewOverrides && y.endsWith("E")) {
+                const ov = bsBuildPreviewOverrides[row.id]?.[y];
+                storedValue = ov !== undefined ? ov : undefined;
+              }
               
               // INCOME STATEMENT REVENUE: projection years use engine (sum of IS Build breakdowns per stream)
               const isProjectionYear = y.endsWith("E");
@@ -689,16 +700,17 @@ function StatementTable({
                 if (row.id === "ebit_margin") storedValue = rev > 0 ? (ebit / rev) * 100 : 0;
               }
               
-              // FOR BALANCE SHEET TOTALS: ALWAYS RECALCULATE ON THE FLY
-              // This ensures totals reflect ONLY items that are actually in the builder
-              // When items are removed, totals must immediately reflect the change
+              // FOR BALANCE SHEET TOTALS: use computed totals (with overrides in BS Build) or recalc on the fly
               if (isBalanceSheet && (row.kind === "subtotal" || row.kind === "total" || isBalanceSheetSubtotal)) {
-                // Always recalculate Balance Sheet totals to ensure they're accurate
-                try {
-                  storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
-                } catch (e) {
-                  // If recursion error, fall back to stored value
-                  storedValue = row.values?.[y] ?? 0;
+                if (bsBuildTotalsByYear && y.endsWith("E")) {
+                  const totalVal = bsBuildTotalsByYear[y]?.[row.id];
+                  storedValue = totalVal !== undefined ? totalVal : undefined;
+                } else {
+                  try {
+                    storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                  } catch (e) {
+                    storedValue = row.values?.[y] ?? 0;
+                  }
                 }
               }
               // For CFS items that pull from IS/BS, the values should already be computed and stored
@@ -775,7 +787,9 @@ function StatementTable({
               const isPercent = row.valueType === "percent";
               
               let display = "";
-              if (typeof storedValue === "number") {
+              if (storedValue === undefined || storedValue === null) {
+                display = "—";
+              } else if (typeof storedValue === "number") {
                 if (storedValue === 0) {
                   display = "—";
                 } else if (isCurrency && meta?.currencyUnit) {
@@ -901,6 +915,9 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const intangiblesPctRevenue = useModelStore((s) => s.intangiblesPctRevenue ?? 0);
   const intangiblesManualByYear = useModelStore((s) => s.intangiblesManualByYear ?? {});
   const intangiblesPctOfCapex = useModelStore((s) => s.intangiblesPctOfCapex ?? 0);
+  const currentStepId = useModelStore((s) => s.currentStepId);
+  const setBsBuildPreviewOverrides = useModelStore((s) => s.setBsBuildPreviewOverrides);
+  const bsBuildPreviewOverrides = useModelStore((s) => s.bsBuildPreviewOverrides ?? {});
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -1457,6 +1474,52 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
     intangiblesAmortizationLifeYears,
     capexTimingConvention,
   ]);
+
+  // BS Build preview only: publish WC, PP&E, Intangibles schedule outputs into overrides (used when rendering Balance Sheet in BS Build).
+  const bsBuildPreviewOverridesComputed = useMemo(() => {
+    const out: Record<string, Record<string, number>> = {};
+    for (const y of projectionYears) {
+      for (const item of wcScheduleItems) {
+        const v = wcProjectedBalances[item.id]?.[y];
+        if (v !== undefined && typeof v === "number") {
+          if (!out[item.id]) out[item.id] = {};
+          out[item.id][y] = v;
+        }
+      }
+      const ppeVal = capexScheduleOutputBucketed?.totalPpeByYear?.[y] ?? capexScheduleOutput?.ppeByYear?.[y];
+      if (ppeVal !== undefined && typeof ppeVal === "number") {
+        if (!out["ppe"]) out["ppe"] = {};
+        out["ppe"][y] = ppeVal;
+      }
+      const intanVal = intangiblesScheduleOutput?.endByYear?.[y];
+      if (intanVal !== undefined && typeof intanVal === "number") {
+        if (!out["intangible_assets"]) out["intangible_assets"] = {};
+        out["intangible_assets"][y] = intanVal;
+      }
+    }
+    return out;
+  }, [
+    projectionYears,
+    wcScheduleItems,
+    wcProjectedBalances,
+    capexScheduleOutputBucketed,
+    capexScheduleOutput,
+    intangiblesScheduleOutput,
+  ]);
+
+  useEffect(() => {
+    setBsBuildPreviewOverrides(bsBuildPreviewOverridesComputed);
+  }, [bsBuildPreviewOverridesComputed, setBsBuildPreviewOverrides]);
+
+  // BS Build: compute subtotals/totals per year from overrides so Total rows and Balance Check show values.
+  const bsBuildTotalsByYear = useMemo(() => {
+    if (focusStatement !== "balance" || !balanceSheet?.length || Object.keys(bsBuildPreviewOverrides).length === 0) return undefined;
+    const out: Record<string, Record<string, number>> = {};
+    for (const y of years) {
+      out[y] = computeBalanceSheetTotalsWithOverrides(balanceSheet, y, bsBuildPreviewOverrides);
+    }
+    return out;
+  }, [focusStatement, balanceSheet, years, bsBuildPreviewOverrides]);
 
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
@@ -2211,11 +2274,17 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                             .join(" ")
                       : undefined
                   }
+                  bsBuildPreviewOverrides={focusStatement === "balance" ? bsBuildPreviewOverrides : undefined}
+                  bsBuildTotalsByYear={focusStatement === "balance" ? bsBuildTotalsByYear : undefined}
                 />
                 
                 {/* Balance Check */}
                 {(() => {
-                  const balanceCheck = checkBalanceSheetBalance(balanceSheet, years);
+                  const balanceCheck = checkBalanceSheetBalance(
+                    balanceSheet,
+                    years,
+                    focusStatement === "balance" && Object.keys(bsBuildPreviewOverrides).length > 0 ? bsBuildPreviewOverrides : undefined
+                  );
                   const allBalanced = balanceCheck.every(b => b.balances);
                   const hasAnyData = balanceCheck.some(b => b.totalAssets !== 0 || b.totalLiabAndEquity !== 0);
                   

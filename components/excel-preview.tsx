@@ -1888,18 +1888,18 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
               </>
             )}
 
-            {/* Capex & D&A Schedule — only when BS Build focus */}
+            {/* PP&E Roll-Forward — only when BS Build focus */}
             {focusStatement === "balance" && (capexScheduleOutput || capexScheduleOutputBucketed) && (
               <>
                 <tr className="border-t-4 border-slate-700">
                   <td colSpan={1 + years.length} className="px-3 py-3 bg-purple-950/40">
-                    <h3 className="text-sm font-bold text-purple-200">Capex &amp; D&A Schedule</h3>
+                    <h3 className="text-sm font-bold text-purple-200">PP&amp;E Roll-Forward (Capex &amp; Depreciation)</h3>
                     <p className="text-[10px] text-slate-400 mt-0.5">
                       {capexScheduleOutputBucketed
                         ? "Per-bucket: Beginning, Capex, Depreciation, End. Timing: " +
                           (capexTimingConvention === "mid" ? "Mid-year" : capexTimingConvention === "start" ? "Start of period" : "End of period") +
                           ". Columns: Actuals → Projections."
-                        : "Total Capex, D&A, and Ending PP&E from schedule setup. Columns: Actuals → Projections."}
+                        : "Total Capex, Depreciation, and Ending PP&E from schedule setup. Columns: Actuals → Projections."}
                     </p>
                   </td>
                 </tr>
@@ -1988,7 +1988,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                       })}
                     </tr>
                     <tr className="border-b border-slate-700 bg-slate-800/60">
-                      <td className="px-3 py-2 text-xs font-semibold text-slate-200">Total D&A</td>
+                      <td className="px-3 py-2 text-xs font-semibold text-slate-200">Total Depreciation</td>
                       {years.map((y) => {
                         const isProj = projectionYears.includes(y);
                         const val = isProj ? capexScheduleOutputBucketed.totalDandaByYear[y] : (danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null);
@@ -2028,7 +2028,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                       })}
                     </tr>
                     <tr className="border-b border-slate-700 bg-slate-800/40">
-                      <td className="px-3 py-2 text-xs font-medium text-slate-200 pl-6">D&A</td>
+                      <td className="px-3 py-2 text-xs font-medium text-slate-200 pl-6">Depreciation</td>
                       {years.map((y) => {
                         const isProj = projectionYears.includes(y);
                         const val = isProj && capexScheduleOutput ? capexScheduleOutput.dandaByYear[y] : (danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null);
@@ -2148,6 +2148,37 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                   <td colSpan={1 + years.length} className="px-3 py-1.5 text-[10px] text-slate-400">
                     Ending Intangibles ties to Balance Sheet: ✅
                   </td>
+                </tr>
+                <tr>
+                  <td colSpan={1 + years.length} className="h-3 bg-transparent" />
+                </tr>
+              </>
+            )}
+
+            {/* Total D&A (IS) = Total Depreciation (PP&E) + Amortization (Intangibles) — one row below both schedules */}
+            {focusStatement === "balance" && (capexScheduleOutput || capexScheduleOutputBucketed) && (
+              <>
+                <tr className="border-t-2 border-slate-600 bg-slate-800/70">
+                  <td className="px-3 py-2 text-xs font-bold text-slate-200">Total D&amp;A (Income Statement)</td>
+                  {years.map((y) => {
+                    const isProj = projectionYears.includes(y);
+                    let total: number | null;
+                    if (isProj) {
+                      const dep =
+                        capexScheduleOutputBucketed != null
+                          ? capexScheduleOutputBucketed.totalDandaByYear[y]
+                          : capexScheduleOutput?.dandaByYear[y] ?? null;
+                      const amort = intangiblesScheduleOutput?.amortByYear[y] ?? 0;
+                      total = dep != null ? dep + amort : null;
+                    } else {
+                      total = danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null;
+                    }
+                    return (
+                      <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-bold text-slate-200")(y)}>
+                        {total == null ? "—" : formatAccountingNumber(total, meta?.currencyUnit ?? "millions", showDecimals)}
+                      </td>
+                    );
+                  })}
                 </tr>
                 <tr>
                   <td colSpan={1 + years.length} className="h-3 bg-transparent" />

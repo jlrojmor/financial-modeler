@@ -5,7 +5,6 @@ import { useModelStore } from "@/store/useModelStore";
 import CollapsibleSection from "@/components/collapsible-section";
 import { storedToDisplay, displayToStored, getUnitLabel } from "@/lib/currency-utils";
 import { computeCapexDiagnostics } from "@/lib/capex-da-diagnostics";
-import { computeCapexDaSchedule } from "@/lib/capex-da-engine";
 import { computeRowValue } from "@/lib/calculations";
 import {
   CAPEX_DEFAULT_BUCKET_IDS,
@@ -67,7 +66,6 @@ export default function CapexDaScheduleCard() {
 
   const ppeUsefulLifeByBucket = useModelStore((s) => s.ppeUsefulLifeByBucket ?? {});
   const ppeUsefulLifeSingle = useModelStore((s) => s.ppeUsefulLifeSingle ?? 10);
-  const capexModelIntangibles = useModelStore((s) => s.capexModelIntangibles ?? false);
   const intangiblesForecastMethod = useModelStore((s) => s.intangiblesForecastMethod ?? "pct_revenue");
   const intangiblesAmortizationLifeYears = useModelStore((s) => s.intangiblesAmortizationLifeYears ?? 7);
   const intangiblesPctRevenue = useModelStore((s) => s.intangiblesPctRevenue ?? 0);
@@ -86,7 +84,6 @@ export default function CapexDaScheduleCard() {
   const setCapexIncludeInAllocation = useModelStore((s) => s.setCapexIncludeInAllocation);
   const resetCapexHelperUsefulLivesToDefaults = useModelStore((s) => s.resetCapexHelperUsefulLivesToDefaults);
   const applyCapexHelperWeightsToForecast = useModelStore((s) => s.applyCapexHelperWeightsToForecast);
-  const setCapexModelIntangibles = useModelStore((s) => s.setCapexModelIntangibles);
   const setIntangiblesForecastMethod = useModelStore((s) => s.setIntangiblesForecastMethod);
   const setIntangiblesAmortizationLifeYears = useModelStore((s) => s.setIntangiblesAmortizationLifeYears);
   const setIntangiblesPctRevenue = useModelStore((s) => s.setIntangiblesPctRevenue);
@@ -280,33 +277,6 @@ export default function CapexDaScheduleCard() {
     };
   }, [allBucketIds, historicalYears, capexHelperPpeByBucketByYear, ppeUsefulLifeByBucket, capexIncludeInAllocationByBucket, revenueByYearHistoric]);
 
-  const scheduleOutput = useMemo(() => {
-    if (projectionYears.length === 0) return null;
-    return computeCapexDaSchedule({
-      projectionYears,
-      revenueByYear,
-      lastHistPPE,
-      lastHistCapex,
-      method: capexForecastMethod,
-      pctRevenue: capexPctRevenue,
-      manualByYear: capexManualByYear,
-      growthPct: capexGrowthPct,
-      timingConvention: capexTimingConvention,
-      usefulLifeYears: effectiveUsefulLife,
-    });
-  }, [
-    projectionYears,
-    revenueByYear,
-    lastHistPPE,
-    lastHistCapex,
-    capexForecastMethod,
-    capexPctRevenue,
-    capexManualByYear,
-    capexGrowthPct,
-    capexTimingConvention,
-    effectiveUsefulLife,
-  ]);
-
   const diagnostics = useMemo(() => {
     if (historicalYears.length === 0 || !incomeStatement?.length || !balanceSheet?.length || !cashFlow?.length) {
       return null;
@@ -323,7 +293,6 @@ export default function CapexDaScheduleCard() {
   const [section1Open, setSection1Open] = useState(true);
   const [section2Open, setSection2Open] = useState(true);
   const [section3Open, setSection3Open] = useState(true);
-  const [section4Open, setSection4Open] = useState(true);
 
   const formatVal = (v: number) => {
     if (v === 0) return "—";
@@ -888,17 +857,8 @@ export default function CapexDaScheduleCard() {
                 </div>
               </div>
             )}
-            <label className="flex items-center gap-2 text-xs text-slate-300">
-              <input
-                type="checkbox"
-                checked={capexModelIntangibles}
-                onChange={(e) => setCapexModelIntangibles(e.target.checked)}
-                className="rounded border-slate-600 bg-slate-800"
-              />
-              Model Intangibles &amp; Amortization
-            </label>
-            {capexModelIntangibles && (
-              <div className="space-y-4 pl-2 border-l-2 border-purple-500/30">
+            <div className="space-y-4 pl-2 border-l-2 border-purple-500/30">
+              <h4 className="text-xs font-medium text-slate-300">Intangibles &amp; Amortization</h4>
                 {/* B) Additions forecast method */}
                 <div>
                   <label className="block text-xs font-medium text-slate-300 mb-1">Additions forecast method</label>
@@ -1085,76 +1045,7 @@ export default function CapexDaScheduleCard() {
                 {intangiblesAmortizationLifeYears <= 0 && (
                   <p className="text-xs text-amber-400">Enter a useful life (years) to compute the schedule.</p>
                 )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Section 4 — Schedule Output */}
-      <div className="rounded-lg border border-slate-700 bg-slate-900/30 p-3">
-        <button
-          type="button"
-          onClick={() => setSection4Open((v) => !v)}
-          className="flex w-full items-center gap-2 text-left"
-        >
-          <span className="text-slate-400">{section4Open ? "▾" : "▸"}</span>
-          <span className="text-sm font-semibold text-slate-200">4. Schedule Output</span>
-        </button>
-        {section4Open && (
-          <div className="mt-3 pl-5">
-            {!scheduleOutput ? (
-              <p className="text-xs text-slate-500">Set projection years and Capex/D&A inputs above to see the schedule.</p>
-            ) : (
-              <div className="overflow-x-auto rounded border border-slate-700 bg-slate-950/60">
-                <table className="min-w-full border-collapse text-[11px] text-slate-200">
-                  <thead className="bg-slate-800/80">
-                    <tr>
-                      <th className="border-b border-slate-600 px-2 py-1.5 text-left font-medium">Line</th>
-                      {lastHistYear && (
-                        <th className="border-b border-slate-600 px-2 py-1.5 text-right text-blue-400">{lastHistYear}</th>
-                      )}
-                      {projectionYears.map((y) => (
-                        <th key={y} className="border-b border-slate-600 px-2 py-1.5 text-right">{y}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr className="border-b border-slate-700/50">
-                      <td className="px-2 py-1.5 font-medium">Capex</td>
-                      {lastHistYear && (
-                        <td className="px-2 py-1.5 text-right text-blue-400">{formatVal(Math.abs(lastHistCapex))}</td>
-                      )}
-                      {projectionYears.map((y) => (
-                        <td key={y} className="px-2 py-1.5 text-right">
-                          {formatVal(scheduleOutput.capexByYear[y] ?? 0)}
-                        </td>
-                      ))}
-                    </tr>
-                    <tr className="border-b border-slate-700/50">
-                      <td className="px-2 py-1.5 font-medium">D&A</td>
-                      {lastHistYear && <td className="px-2 py-1.5 text-right text-blue-400">—</td>}
-                      {projectionYears.map((y) => (
-                        <td key={y} className="px-2 py-1.5 text-right">
-                          {formatVal(scheduleOutput.dandaByYear[y] ?? 0)}
-                        </td>
-                      ))}
-                    </tr>
-                    <tr className="border-b border-slate-700/50 last:border-0">
-                      <td className="px-2 py-1.5 font-medium">Ending PP&E</td>
-                      {lastHistYear && (
-                        <td className="px-2 py-1.5 text-right text-blue-400">{formatVal(lastHistPPE)}</td>
-                      )}
-                      {projectionYears.map((y) => (
-                        <td key={y} className="px-2 py-1.5 text-right">
-                          {formatVal(scheduleOutput.ppeByYear[y] ?? 0)}
-                        </td>
-                      ))}
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            )}
+            </div>
           </div>
         )}
       </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, Fragment } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import type { RevenueProjectionMethod, RevenueProjectionInputs } from "@/types/revenue-projection";
@@ -2063,7 +2063,9 @@ export default function ISBuildView() {
                               )}
                             </div>
                             <div className="mt-2 space-y-2 border-l-2 border-purple-700/40 pl-3">
-                              {item.children.map((child) => renderSgaItem(child, depth + 1, item))}
+                              {item.children.map((child) => (
+                                <Fragment key={child.id}>{renderSgaItem(child, depth + 1, item)}</Fragment>
+                              ))}
                             </div>
                           </>
                         )}
@@ -2071,7 +2073,13 @@ export default function ISBuildView() {
                     );
                   }
 
-                  return <>{sgaRow.children.map((item) => renderSgaItem(item, 0, null))}</>;
+                  return (
+                    <>
+                      {sgaRow.children.map((item) => (
+                        <Fragment key={item.id}>{renderSgaItem(item, 0, null)}</Fragment>
+                      ))}
+                    </>
+                  );
                 })()}
               </div>
             )}

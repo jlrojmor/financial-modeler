@@ -304,11 +304,13 @@ export type ProjectSnapshot = {
   /** Capex Allocation Helper: include bucket in allocation (default OFF for Land, CIP). */
   capexIncludeInAllocationByBucket: Record<string, boolean>;
   capexModelIntangibles: boolean;
-  intangiblesForecastMethod: "pct_revenue" | "manual" | "growth";
+  intangiblesForecastMethod: "pct_revenue" | "manual" | "pct_capex";
   intangiblesAmortizationLifeYears: number;
   intangiblesPctRevenue: number;
   intangiblesManualByYear: Record<string, number>;
-  intangiblesGrowthPct: number;
+  intangiblesPctOfCapex: number;
+  intangiblesHasHistoricalAmortization: boolean;
+  intangiblesHistoricalAmortizationByYear: Record<string, number>;
 };
 
 export type ProjectMeta = {
@@ -418,11 +420,13 @@ export type ModelState = {
   /** Capex Allocation Helper: include bucket in allocation (default OFF for Land, CIP). */
   capexIncludeInAllocationByBucket: Record<string, boolean>;
   capexModelIntangibles: boolean;
-  intangiblesForecastMethod: "pct_revenue" | "manual" | "growth";
+  intangiblesForecastMethod: "pct_revenue" | "manual" | "pct_capex";
   intangiblesAmortizationLifeYears: number;
   intangiblesPctRevenue: number;
   intangiblesManualByYear: Record<string, number>;
-  intangiblesGrowthPct: number;
+  intangiblesPctOfCapex: number;
+  intangiblesHasHistoricalAmortization: boolean;
+  intangiblesHistoricalAmortizationByYear: Record<string, number>;
 };
 
 export type ModelActions = {
@@ -540,11 +544,13 @@ export type ModelActions = {
   resetCapexHelperUsefulLivesToDefaults: () => void;
   applyCapexHelperWeightsToForecast: (weightsPct: Record<string, number>) => void;
   setCapexModelIntangibles: (on: boolean) => void;
-  setIntangiblesForecastMethod: (method: "pct_revenue" | "manual" | "growth") => void;
+  setIntangiblesForecastMethod: (method: "pct_revenue" | "manual" | "pct_capex") => void;
   setIntangiblesAmortizationLifeYears: (years: number) => void;
   setIntangiblesPctRevenue: (pct: number) => void;
   setIntangiblesManualByYear: (year: string, value: number) => void;
-  setIntangiblesGrowthPct: (pct: number) => void;
+  setIntangiblesPctOfCapex: (pct: number) => void;
+  setIntangiblesHasHistoricalAmortization: (on: boolean) => void;
+  setIntangiblesHistoricalAmortizationForYear: (year: string, value: number) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -697,7 +703,9 @@ const defaultState: ModelState = {
   intangiblesAmortizationLifeYears: 7,
   intangiblesPctRevenue: 0,
   intangiblesManualByYear: {},
-  intangiblesGrowthPct: 0,
+  intangiblesPctOfCapex: 0,
+  intangiblesHasHistoricalAmortization: false,
+  intangiblesHistoricalAmortizationByYear: {},
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -757,11 +765,13 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     capexHelperPpeByBucketByYear: state.capexHelperPpeByBucketByYear ?? {},
     capexIncludeInAllocationByBucket: state.capexIncludeInAllocationByBucket ?? {},
     capexModelIntangibles: state.capexModelIntangibles ?? false,
-    intangiblesForecastMethod: state.intangiblesForecastMethod ?? "pct_revenue",
+    intangiblesForecastMethod: (String(state.intangiblesForecastMethod) === "growth" ? "pct_revenue" : state.intangiblesForecastMethod) ?? "pct_revenue",
     intangiblesAmortizationLifeYears: state.intangiblesAmortizationLifeYears ?? 7,
     intangiblesPctRevenue: state.intangiblesPctRevenue ?? 0,
     intangiblesManualByYear: state.intangiblesManualByYear ?? {},
-    intangiblesGrowthPct: state.intangiblesGrowthPct ?? 0,
+    intangiblesPctOfCapex: state.intangiblesPctOfCapex ?? 0,
+    intangiblesHasHistoricalAmortization: state.intangiblesHasHistoricalAmortization ?? false,
+    intangiblesHistoricalAmortizationByYear: state.intangiblesHistoricalAmortizationByYear ?? {},
   };
 }
 
@@ -830,11 +840,13 @@ function applyProjectSnapshot(
     capexHelperPpeByBucketByYear: snapshot.capexHelperPpeByBucketByYear ?? {},
     capexIncludeInAllocationByBucket: snapshot.capexIncludeInAllocationByBucket ?? {},
     capexModelIntangibles: snapshot.capexModelIntangibles ?? false,
-    intangiblesForecastMethod: snapshot.intangiblesForecastMethod ?? "pct_revenue",
+    intangiblesForecastMethod: (String(snapshot.intangiblesForecastMethod) === "growth" ? "pct_revenue" : snapshot.intangiblesForecastMethod) ?? "pct_revenue",
     intangiblesAmortizationLifeYears: snapshot.intangiblesAmortizationLifeYears ?? 7,
     intangiblesPctRevenue: snapshot.intangiblesPctRevenue ?? 0,
     intangiblesManualByYear: snapshot.intangiblesManualByYear ?? {},
-    intangiblesGrowthPct: snapshot.intangiblesGrowthPct ?? 0,
+    intangiblesPctOfCapex: snapshot.intangiblesPctOfCapex ?? 0,
+    intangiblesHasHistoricalAmortization: snapshot.intangiblesHasHistoricalAmortization ?? false,
+    intangiblesHistoricalAmortizationByYear: snapshot.intangiblesHistoricalAmortizationByYear ?? {},
   }));
 }
 
@@ -3294,7 +3306,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
     set((s) => ({
       intangiblesManualByYear: { ...(s.intangiblesManualByYear ?? {}), [year]: value },
     })),
-  setIntangiblesGrowthPct: (pct) => set(() => ({ intangiblesGrowthPct: pct })),
+  setIntangiblesPctOfCapex: (pct) => set(() => ({ intangiblesPctOfCapex: Math.max(0, pct) })),
+  setIntangiblesHasHistoricalAmortization: (on) => set(() => ({ intangiblesHasHistoricalAmortization: on })),
+  setIntangiblesHistoricalAmortizationForYear: (year, value) =>
+    set((s) => ({
+      intangiblesHistoricalAmortizationByYear: { ...(s.intangiblesHistoricalAmortizationByYear ?? {}), [year]: value },
+    })),
 
   // IS Build breakdowns live ONLY in config; they are NOT added to the incomeStatement tree.
   // Historicals structure (e.g. Revenue → Subscription, Services) is unchanged. For projection

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import CollapsibleSection from "@/components/collapsible-section";
-import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
+import { storedToDisplay, displayToStored, getUnitLabel } from "@/lib/currency-utils";
 import { computeCapexDiagnostics } from "@/lib/capex-da-diagnostics";
 import { computeCapexDaSchedule } from "@/lib/capex-da-engine";
 import { computeRowValue } from "@/lib/calculations";
@@ -15,6 +15,12 @@ import {
   CAPEX_HELPER_CIP_ID,
   isLegacyWrongUsefulLives,
 } from "@/lib/capex-defaults";
+import {
+  computeIntangiblesAdditionsGuidance,
+  INTANGIBLES_ADDITIONS_PCT_HEURISTIC_MIN,
+  INTANGIBLES_ADDITIONS_PCT_HEURISTIC_MAX,
+  INTANGIBLES_ADDITIONS_PCT_HEURISTIC_TYPICAL,
+} from "@/lib/intangibles-guidance";
 
 const CAPEX_DEFAULT_BUCKET_LABELS: Record<string, string> = {
   cap_b1: "Land",
@@ -66,7 +72,9 @@ export default function CapexDaScheduleCard() {
   const intangiblesAmortizationLifeYears = useModelStore((s) => s.intangiblesAmortizationLifeYears ?? 7);
   const intangiblesPctRevenue = useModelStore((s) => s.intangiblesPctRevenue ?? 0);
   const intangiblesManualByYear = useModelStore((s) => s.intangiblesManualByYear ?? {});
-  const intangiblesGrowthPct = useModelStore((s) => s.intangiblesGrowthPct ?? 0);
+  const intangiblesPctOfCapex = useModelStore((s) => s.intangiblesPctOfCapex ?? 0);
+  const intangiblesHasHistoricalAmortization = useModelStore((s) => s.intangiblesHasHistoricalAmortization ?? false);
+  const intangiblesHistoricalAmortizationByYear = useModelStore((s) => s.intangiblesHistoricalAmortizationByYear ?? {});
 
   const setPpeUsefulLifeByBucket = useModelStore((s) => s.setPpeUsefulLifeByBucket);
   const setPpeUsefulLifeSingle = useModelStore((s) => s.setPpeUsefulLifeSingle);
@@ -83,7 +91,9 @@ export default function CapexDaScheduleCard() {
   const setIntangiblesAmortizationLifeYears = useModelStore((s) => s.setIntangiblesAmortizationLifeYears);
   const setIntangiblesPctRevenue = useModelStore((s) => s.setIntangiblesPctRevenue);
   const setIntangiblesManualByYear = useModelStore((s) => s.setIntangiblesManualByYear);
-  const setIntangiblesGrowthPct = useModelStore((s) => s.setIntangiblesGrowthPct);
+  const setIntangiblesPctOfCapex = useModelStore((s) => s.setIntangiblesPctOfCapex);
+  const setIntangiblesHasHistoricalAmortization = useModelStore((s) => s.setIntangiblesHasHistoricalAmortization);
+  const setIntangiblesHistoricalAmortizationForYear = useModelStore((s) => s.setIntangiblesHistoricalAmortizationForYear);
 
   const historicalYears = useMemo(() => meta?.years?.historical ?? [], [meta]);
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
@@ -182,6 +192,34 @@ export default function CapexDaScheduleCard() {
     }
     return out;
   }, [incomeStatement, balanceSheet, cashFlow, historicalYears]);
+
+  const intangiblesByYearHistoric = useMemo(() => {
+    const row = balanceSheet?.find((r) => r.id === "intangible_assets");
+    if (!row) return {};
+    const out: Record<string, number> = {};
+    for (const y of historicalYears) {
+      out[y] = row.values?.[y] ?? 0;
+    }
+    return out;
+  }, [balanceSheet, historicalYears]);
+
+  const intangiblesAdditionsGuidance = useMemo(() => {
+    return computeIntangiblesAdditionsGuidance({
+      historicalYears,
+      intangiblesByYear: intangiblesByYearHistoric,
+      revenueByYearHistoric,
+      amortByYear: intangiblesHistoricalAmortizationByYear ?? {},
+      revenueFirstProjYear:
+        projectionYears.length > 0 ? (revenueByYear[projectionYears[0]!] ?? null) : null,
+    });
+  }, [
+    historicalYears,
+    intangiblesByYearHistoric,
+    revenueByYearHistoric,
+    intangiblesHistoricalAmortizationByYear,
+    projectionYears,
+    revenueByYear,
+  ]);
 
   const capexHelperComputed = useMemo(() => {
     const impliedMaintByBucketByYear: Record<string, Record<string, number>> = {};
@@ -857,78 +895,196 @@ export default function CapexDaScheduleCard() {
                 onChange={(e) => setCapexModelIntangibles(e.target.checked)}
                 className="rounded border-slate-600 bg-slate-800"
               />
-              Model Intangibles & Amortization
+              Model Intangibles &amp; Amortization
             </label>
             {capexModelIntangibles && (
-              <div className="space-y-3 pl-2 border-l-2 border-purple-500/30">
+              <div className="space-y-4 pl-2 border-l-2 border-purple-500/30">
+                {/* B) Additions forecast method */}
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Intangibles forecast method</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Additions forecast method</label>
                   <select
                     value={intangiblesForecastMethod}
-                    onChange={(e) => setIntangiblesForecastMethod(e.target.value as "pct_revenue" | "manual" | "growth")}
+                    onChange={(e) => setIntangiblesForecastMethod(e.target.value as "pct_revenue" | "manual" | "pct_capex")}
                     className="rounded border border-slate-600 bg-slate-800 px-2 py-1 text-sm text-slate-200"
                   >
                     <option value="pct_revenue">% of Revenue</option>
-                    <option value="manual">Manual by year</option>
-                    <option value="growth">Growth rate</option>
+                    <option value="manual">Manual $ additions by year</option>
+                    <option value="pct_capex">% of Capex</option>
                   </select>
-                </div>
-                {intangiblesForecastMethod === "pct_revenue" && (
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-0.5">Intangibles % of Revenue</label>
-                    <input
-                      type="number"
-                      step={0.1}
-                      min={0}
-                      value={intangiblesPctRevenue || ""}
-                      onChange={(e) => setIntangiblesPctRevenue(parseFloat(e.target.value) || 0)}
-                      className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-slate-200"
-                    />
-                    %
-                  </div>
-                )}
-                {intangiblesForecastMethod === "manual" && projectionYears.length > 0 && (
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-0.5">Intangibles by year</label>
-                    <div className="flex flex-wrap gap-1">
-                      {projectionYears.map((y) => (
+                  {intangiblesForecastMethod === "pct_revenue" && (
+                    <div className="mt-1.5 space-y-2">
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-0.5">Intangibles additions as % of revenue</label>
                         <input
-                          key={y}
                           type="number"
-                          step={0.01}
-                          value={intangiblesManualByYear[y] ?? ""}
-                          onChange={(e) => setIntangiblesManualByYear(y, parseFloat(e.target.value) || 0)}
-                          className="w-16 rounded border border-slate-600 bg-slate-800 px-1 text-[11px] text-slate-200"
-                          placeholder={y}
+                          step={0.1}
+                          min={0}
+                          value={intangiblesPctRevenue || ""}
+                          onChange={(e) => setIntangiblesPctRevenue(parseFloat(e.target.value) || 0)}
+                          className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-slate-200"
                         />
-                      ))}
+                        %
+                      </div>
+                      <div className="rounded border border-slate-600/80 bg-slate-800/50 px-2 py-1.5 text-[10px] text-slate-400">
+                        <span className="font-medium text-slate-300">Historical guidance</span>
+                        {intangiblesAdditionsGuidance.hasHistory ? (
+                          <>
+                            <p className="mt-0.5">
+                              Suggested: <strong className="text-slate-200">{intangiblesAdditionsGuidance.suggestedPct?.toFixed(2)}%</strong>
+                              {" "}(median of implied additions % of revenue).
+                            </p>
+                            {intangiblesAdditionsGuidance.impliedAdditionsFirstYear != null && projectionYears[0] && (
+                              <p className="mt-0.5">
+                                Implied additions for {projectionYears[0]}:{" "}
+                                <strong className="text-slate-200">
+                                  {storedToDisplay(intangiblesAdditionsGuidance.impliedAdditionsFirstYear, unit).toLocaleString(undefined, { maximumFractionDigits: 1 })}{unitLabel}
+                                </strong>
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => intangiblesAdditionsGuidance.suggestedPct != null && setIntangiblesPctRevenue(Math.round(intangiblesAdditionsGuidance.suggestedPct * 10) / 10)}
+                              className="mt-1 rounded bg-slate-600 px-2 py-0.5 text-[10px] text-slate-200 hover:bg-slate-500"
+                            >
+                              Use suggested %
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <p className="mt-0.5">
+                              No sufficient history (need Δ intangibles + amortization by year). Typical range: {INTANGIBLES_ADDITIONS_PCT_HEURISTIC_MIN}%–{INTANGIBLES_ADDITIONS_PCT_HEURISTIC_MAX}% of revenue.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setIntangiblesPctRevenue(INTANGIBLES_ADDITIONS_PCT_HEURISTIC_TYPICAL)}
+                              className="mt-1 rounded bg-slate-600 px-2 py-0.5 text-[10px] text-slate-200 hover:bg-slate-500"
+                            >
+                              Use {INTANGIBLES_ADDITIONS_PCT_HEURISTIC_TYPICAL}%
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
-                {intangiblesForecastMethod === "growth" && (
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-0.5">Intangibles growth %</label>
-                    <input
-                      type="number"
-                      step={0.1}
-                      value={intangiblesGrowthPct || ""}
-                      onChange={(e) => setIntangiblesGrowthPct(parseFloat(e.target.value) || 0)}
-                      className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-slate-200"
-                    />
-                    %
-                  </div>
-                )}
-                <div>
-                  <label className="block text-xs text-slate-400 mb-0.5">Amortization useful life (years)</label>
-                  <input
-                    type="number"
-                    step={0.5}
-                    min={0.5}
-                    value={intangiblesAmortizationLifeYears || ""}
-                    onChange={(e) => setIntangiblesAmortizationLifeYears(parseFloat(e.target.value) || 0)}
-                    className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-slate-200"
-                  />
+                  )}
+                  {intangiblesForecastMethod === "manual" && projectionYears.length > 0 && (
+                    <div className="mt-1.5">
+                      <label className="block text-xs text-slate-400 mb-0.5">Additions by year ({unitLabel})</label>
+                      <div className="flex flex-wrap gap-1">
+                        {projectionYears.map((y) => (
+                          <input
+                            key={y}
+                            type="number"
+                            step={0.01}
+                            value={intangiblesManualByYear[y] != null ? storedToDisplay(intangiblesManualByYear[y], unit) : ""}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              if (v === "" || v === "-") { setIntangiblesManualByYear(y, 0); return; }
+                              const n = parseFloat(v);
+                              if (!Number.isNaN(n)) setIntangiblesManualByYear(y, displayToStored(n, unit));
+                            }}
+                            className="w-16 rounded border border-slate-600 bg-slate-800 px-1 text-[11px] text-slate-200"
+                            placeholder={y}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {intangiblesForecastMethod === "pct_capex" && (
+                    <div className="mt-1.5">
+                      <label className="block text-xs text-slate-400 mb-0.5">Intangibles additions as % of total Capex</label>
+                      <input
+                        type="number"
+                        step={0.1}
+                        min={0}
+                        value={intangiblesPctOfCapex || ""}
+                        onChange={(e) => setIntangiblesPctOfCapex(parseFloat(e.target.value) || 0)}
+                        className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-slate-200"
+                      />
+                      %
+                    </div>
+                  )}
                 </div>
+                {/* C) Amortization setup */}
+                <div>
+                  <h4 className="text-xs font-medium text-slate-300 mb-1">Amortization setup</h4>
+                  <div className="space-y-2">
+                    <div title="Used to compute annual amortization of net intangibles.">
+                      <label className="block text-xs text-slate-400 mb-0.5">Useful life (years)</label>
+                      <input
+                        type="number"
+                        step={0.5}
+                        min={0.5}
+                        value={intangiblesAmortizationLifeYears || ""}
+                        onChange={(e) => setIntangiblesAmortizationLifeYears(parseFloat(e.target.value) || 0)}
+                        className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-slate-200"
+                        title="Used to compute annual amortization of net intangibles."
+                      />
+                      <span className="ml-1 text-[10px] text-slate-500">(default 7)</span>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-400">
+                      <input
+                        type="checkbox"
+                        checked={intangiblesHasHistoricalAmortization}
+                        onChange={(e) => setIntangiblesHasHistoricalAmortization(e.target.checked)}
+                        className="rounded border-slate-600 bg-slate-800"
+                      />
+                      I have historical amortization
+                    </label>
+                    {intangiblesHasHistoricalAmortization && historicalYears.length > 0 && (
+                      <div className="pl-2 space-y-1.5">
+                        <div className="flex flex-wrap gap-1">
+                          {historicalYears.map((y) => (
+                            <span key={y} className="flex items-center gap-0.5">
+                              <span className="text-[10px] text-slate-500 w-8">{y}</span>
+                              <input
+                                type="number"
+                                step={0.01}
+                                min={0}
+                                value={intangiblesHistoricalAmortizationByYear[y] != null ? storedToDisplay(intangiblesHistoricalAmortizationByYear[y], unit) : ""}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  if (v === "" || v === "-") { setIntangiblesHistoricalAmortizationForYear(y, 0); return; }
+                                  const n = parseFloat(v);
+                                  if (!Number.isNaN(n)) setIntangiblesHistoricalAmortizationForYear(y, displayToStored(n, unit));
+                                }}
+                                className="w-14 rounded border border-slate-600 bg-slate-800 px-1 text-[11px] text-slate-200"
+                                placeholder="0"
+                              />
+                            </span>
+                          ))}
+                        </div>
+                        {(() => {
+                          const ppeRow = balanceSheet?.find((r) => r.id === "intangible_assets");
+                          const lastHistYear = historicalYears[historicalYears.length - 1];
+                          const allSt = { incomeStatement: incomeStatement ?? [], balanceSheet: balanceSheet ?? [], cashFlow: cashFlow ?? [] };
+                          const lastHistIntan = ppeRow && lastHistYear ? (computeRowValue(ppeRow, lastHistYear, balanceSheet ?? [], balanceSheet ?? [], allSt) ?? 0) : 0;
+                          const amorts = historicalYears.map((y) => intangiblesHistoricalAmortizationByYear[y]).filter((a) => a != null && a > 0);
+                          const avgAmort = amorts.length > 0 ? amorts.reduce((s, a) => s + a, 0) / amorts.length : 0;
+                          const impliedLife = avgAmort > 0 && lastHistIntan > 0 ? lastHistIntan / avgAmort : null;
+                          return (
+                            <>
+                              {impliedLife != null && (
+                                <p className="text-[10px] text-slate-400">
+                                  Implied useful life from history: {impliedLife.toFixed(1)} years
+                                  <button
+                                    type="button"
+                                    onClick={() => setIntangiblesAmortizationLifeYears(Math.round(impliedLife * 10) / 10)}
+                                    className="ml-2 rounded bg-slate-600 px-1.5 py-0.5 text-[10px] text-slate-200 hover:bg-slate-500"
+                                  >
+                                    Use implied life
+                                  </button>
+                                </p>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {intangiblesAmortizationLifeYears <= 0 && (
+                  <p className="text-xs text-amber-400">Enter a useful life (years) to compute the schedule.</p>
+                )}
               </div>
             )}
           </div>

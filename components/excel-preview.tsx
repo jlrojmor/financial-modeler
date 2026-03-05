@@ -16,6 +16,7 @@ import {
   computeCapexDaScheduleByBucket,
   computeProjectedCapexByYear,
 } from "@/lib/capex-da-engine";
+import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
 import { findCFIItem } from "@/lib/cfi-intelligence";
 import { findCFFItem } from "@/lib/cff-intelligence";
 
@@ -894,6 +895,12 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const capexBucketLabels = useModelStore((s) => s.capexBucketLabels ?? {});
   const capexIncludeInAllocationByBucket = useModelStore((s) => s.capexIncludeInAllocationByBucket ?? {});
   const capexHelperPpeByBucketByYear = useModelStore((s) => s.capexHelperPpeByBucketByYear ?? {});
+  const capexModelIntangibles = useModelStore((s) => s.capexModelIntangibles ?? false);
+  const intangiblesForecastMethod = useModelStore((s) => s.intangiblesForecastMethod ?? "pct_revenue");
+  const intangiblesAmortizationLifeYears = useModelStore((s) => s.intangiblesAmortizationLifeYears ?? 7);
+  const intangiblesPctRevenue = useModelStore((s) => s.intangiblesPctRevenue ?? 0);
+  const intangiblesManualByYear = useModelStore((s) => s.intangiblesManualByYear ?? {});
+  const intangiblesPctOfCapex = useModelStore((s) => s.intangiblesPctOfCapex ?? 0);
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -1407,6 +1414,48 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
     capexBucketAllocationPct,
     ppeUsefulLifeByBucket,
     initialLandBalance,
+  ]);
+
+  const lastHistIntangibles = useMemo(() => {
+    if (!lastHistYear || !balanceSheet?.length) return 0;
+    const row = balanceSheet.find((r) => r.id === "intangible_assets");
+    return row?.values?.[lastHistYear] ?? 0;
+  }, [balanceSheet, lastHistYear]);
+
+  const revenueByYearForIntangibles = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const y of projectionYears) {
+      out[y] = revenueByYearForCapex[y] ?? 0;
+    }
+    return out;
+  }, [projectionYears, revenueByYearForCapex]);
+
+  const intangiblesScheduleOutput = useMemo(() => {
+    if (!capexModelIntangibles || projectionYears.length === 0 || intangiblesAmortizationLifeYears <= 0) return null;
+    return computeIntangiblesAmortSchedule({
+      projectionYears,
+      lastHistIntangibles,
+      additionsMethod: intangiblesForecastMethod,
+      pctRevenue: intangiblesPctRevenue,
+      manualByYear: intangiblesManualByYear,
+      pctOfCapex: intangiblesPctOfCapex,
+      capexByYear: totalCapexByYear,
+      revenueByYear: revenueByYearForIntangibles,
+      lifeYears: intangiblesAmortizationLifeYears,
+      timingConvention: capexTimingConvention,
+    });
+  }, [
+    capexModelIntangibles,
+    projectionYears,
+    lastHistIntangibles,
+    intangiblesForecastMethod,
+    intangiblesPctRevenue,
+    intangiblesManualByYear,
+    intangiblesPctOfCapex,
+    totalCapexByYear,
+    revenueByYearForIntangibles,
+    intangiblesAmortizationLifeYears,
+    capexTimingConvention,
   ]);
 
   return (
@@ -2004,6 +2053,102 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                     </tr>
                   </>
                 )}
+                <tr>
+                  <td colSpan={1 + years.length} className="h-3 bg-transparent" />
+                </tr>
+              </>
+            )}
+
+            {/* Intangibles & Amortization Schedule — only when BS Build focus and model intangibles ON */}
+            {focusStatement === "balance" && capexModelIntangibles && intangiblesScheduleOutput && (
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-purple-950/40">
+                    <h3 className="text-sm font-bold text-purple-200">Intangibles &amp; Amortization Schedule</h3>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      Beginning, Additions, Amortization, Ending — timing:{" "}
+                      {capexTimingConvention === "mid" ? "Mid-year" : capexTimingConvention === "start" ? "Start of period" : "End of period"}.
+                      Columns: Actuals → Projections.
+                    </p>
+                  </td>
+                </tr>
+                <tr className="border-b border-slate-700 bg-slate-800/30">
+                  <td className="px-3 py-1.5 text-xs font-semibold text-slate-400">Line Item</td>
+                  {years.map((y) => (
+                    <td key={y} className={yearColClass("px-3 py-1.5 text-right text-xs font-semibold text-slate-400")(y)}>
+                      {y}
+                    </td>
+                  ))}
+                </tr>
+                <tr className="border-b border-slate-700/50 bg-slate-800/20">
+                  <td className="px-3 py-1.5 pl-4 text-xs font-medium text-purple-200/90">Intangible Assets, net</td>
+                  <td colSpan={years.length} className="px-3 py-1.5" />
+                </tr>
+                <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                  <td className="px-3 py-2 pl-6 text-xs text-slate-300">Beginning</td>
+                  {years.map((y) => {
+                    const isProj = projectionYears.includes(y);
+                    const val = isProj ? intangiblesScheduleOutput.beginningByYear[y] : (y === lastHistYear ? lastHistIntangibles : null);
+                    return (
+                      <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                        {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                  <td className="px-3 py-2 pl-6 text-xs text-slate-300">Additions</td>
+                  {years.map((y) => {
+                    const isProj = projectionYears.includes(y);
+                    const val = isProj ? intangiblesScheduleOutput.additionsByYear[y] : null;
+                    return (
+                      <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                        {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                  <td className="px-3 py-2 pl-6 text-xs text-slate-300">Amortization</td>
+                  {years.map((y) => {
+                    const isProj = projectionYears.includes(y);
+                    const val = isProj ? intangiblesScheduleOutput.amortByYear[y] : null;
+                    return (
+                      <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                        {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                  <td className="px-3 py-2 pl-6 text-xs text-slate-300">Ending</td>
+                  {years.map((y) => {
+                    const isProj = projectionYears.includes(y);
+                    const val = isProj ? intangiblesScheduleOutput.endByYear[y] : (y === lastHistYear ? lastHistIntangibles : null);
+                    return (
+                      <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                        {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-t-2 border-slate-600 bg-slate-800/60">
+                  <td className="px-3 py-2 text-xs font-semibold text-slate-200">Amortization Expense (IS)</td>
+                  {years.map((y) => {
+                    const isProj = projectionYears.includes(y);
+                    const val = isProj ? intangiblesScheduleOutput.amortByYear[y] : null;
+                    return (
+                      <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-medium text-slate-200")(y)}>
+                        {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-700 bg-slate-800/50">
+                  <td colSpan={1 + years.length} className="px-3 py-1.5 text-[10px] text-slate-400">
+                    Ending Intangibles ties to Balance Sheet: ✅
+                  </td>
+                </tr>
                 <tr>
                   <td colSpan={1 + years.length} className="h-3 bg-transparent" />
                 </tr>

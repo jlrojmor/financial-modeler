@@ -182,7 +182,7 @@ export default function WorkingCapitalScheduleCard() {
             return (
               <div key={y} className="flex flex-col">
                 <span className="text-slate-500">{y}</span>
-                {isProj(y) && effectiveDriver !== "manual" ? (
+                {isProj(y) && driver !== "manual" ? (
                   effectiveDriver === "days" ? (
                     <input
                       type="number"

@@ -250,9 +250,15 @@ export default function BalanceSheetBuilderUnified() {
     // Add CFS link if matched item has one
     if (matchResult?.matchedConcept) {
       const glossaryItem = matchResult.matchedConcept;
-      if (glossaryItem.cfsSection) {
+      const cfsToRowSection: Record<string, "operating" | "investing" | "financing"> = {
+        CFO: "operating",
+        CFI: "investing",
+        CFF: "financing",
+      };
+      const section = glossaryItem.cfsSection ? cfsToRowSection[glossaryItem.cfsSection] : undefined;
+      if (section) {
         newRow.cfsLink = {
-          section: glossaryItem.cfsSection,
+          section,
           cfsItemId: newRow.id,
           impact: "positive",
           description: glossaryItem.description,

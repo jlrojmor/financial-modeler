@@ -697,7 +697,7 @@ export default function CapexDaScheduleCard() {
                                   type="number"
                                   step={0.5}
                                   min={0.5}
-                                  value={displayYears === "" ? "" : displayYears}
+                                  value={typeof displayYears === "number" ? displayYears : ""}
                                   onChange={(e) => setPpeUsefulLifeByBucket(id, parseFloat(e.target.value) || 0)}
                                   placeholder={CAPEX_IB_TYPICAL_RANGE[id] ?? "e.g. 10"}
                                   title={CAPEX_IB_TYPICAL_RANGE[id] ? `Typical range: ${CAPEX_IB_TYPICAL_RANGE[id]} years` : undefined}

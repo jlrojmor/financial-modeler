@@ -3,7 +3,7 @@
 import React, { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
-import { formatCurrencyDisplay, storedToDisplay, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
+import { formatCurrencyDisplay, storedToDisplay, displayToStored, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
 import { checkBalanceSheetBalance, computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
 import {
@@ -11,8 +11,27 @@ import {
   computeWcProjectedBalances,
   type WcDriverState,
 } from "@/lib/working-capital-schedule";
+import {
+  computeCapexDaSchedule,
+  computeCapexDaScheduleByBucket,
+  computeProjectedCapexByYear,
+} from "@/lib/capex-da-engine";
 import { findCFIItem } from "@/lib/cfi-intelligence";
 import { findCFFItem } from "@/lib/cff-intelligence";
+
+const CAPEX_DEFAULT_BUCKET_IDS_PREVIEW = ["cap_b1", "cap_b2", "cap_b3", "cap_b4", "cap_b5", "cap_b6", "cap_b7", "cap_b8", "cap_b9", "cap_b10"];
+const CAPEX_DEFAULT_BUCKET_LABELS_PREVIEW: Record<string, string> = {
+  cap_b1: "Land",
+  cap_b2: "Buildings & Improvements",
+  cap_b3: "Machinery & Equipment",
+  cap_b4: "Computer Hardware",
+  cap_b5: "Software (Capitalized)",
+  cap_b6: "Furniture & Fixtures",
+  cap_b7: "Leasehold Improvements",
+  cap_b8: "Vehicles",
+  cap_b9: "Construction in Progress (CIP)",
+  cap_b10: "Other PP&E",
+};
 
 /**
  * Format a number for display in accounting format (negatives in parentheses)
@@ -862,6 +881,19 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const wcPctBaseByItemId = useModelStore((s) => s.wcPctBaseByItemId ?? {});
   const wcPctByItemId = useModelStore((s) => s.wcPctByItemId ?? {});
   const wcPctByItemIdByYear = useModelStore((s) => s.wcPctByItemIdByYear ?? {});
+  const capexForecastMethod = useModelStore((s) => s.capexForecastMethod ?? "pct_revenue");
+  const capexPctRevenue = useModelStore((s) => s.capexPctRevenue ?? 0);
+  const capexManualByYear = useModelStore((s) => s.capexManualByYear ?? {});
+  const capexGrowthPct = useModelStore((s) => s.capexGrowthPct ?? 0);
+  const capexTimingConvention = useModelStore((s) => s.capexTimingConvention ?? "mid");
+  const capexSplitByBucket = useModelStore((s) => s.capexSplitByBucket ?? true);
+  const capexCustomBucketIds = useModelStore((s) => s.capexCustomBucketIds ?? []);
+  const ppeUsefulLifeByBucket = useModelStore((s) => s.ppeUsefulLifeByBucket ?? {});
+  const ppeUsefulLifeSingle = useModelStore((s) => s.ppeUsefulLifeSingle ?? 10);
+  const capexBucketAllocationPct = useModelStore((s) => s.capexBucketAllocationPct ?? {});
+  const capexBucketLabels = useModelStore((s) => s.capexBucketLabels ?? {});
+  const capexIncludeInAllocationByBucket = useModelStore((s) => s.capexIncludeInAllocationByBucket ?? {});
+  const capexHelperPpeByBucketByYear = useModelStore((s) => s.capexHelperPpeByBucketByYear ?? {});
   const [showDecimals, setShowDecimals] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string> | null>(null);
 
@@ -1273,6 +1305,109 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
       deltaNowcByYear: deltaNowc,
     };
   }, [wcScheduleItems, wcAssets, wcLiabilities, years, wcProjectedBalances, balanceByItemByYearForWc]);
+
+  const historicalYears = useMemo(() => meta?.years?.historical ?? [], [meta]);
+  const lastHistYear = historicalYears.length > 0 ? historicalYears[historicalYears.length - 1] : null;
+  const revenueByYearForCapex = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const y of projectionYears) {
+      out[y] = revenueByYearForWc[y] ?? 0;
+    }
+    return out;
+  }, [projectionYears, revenueByYearForWc]);
+  const lastHistPPE = useMemo(() => {
+    if (!lastHistYear || !balanceSheet?.length) return 0;
+    const row = balanceSheet.find((r) => r.id === "ppe");
+    return row?.values?.[lastHistYear] ?? 0;
+  }, [balanceSheet, lastHistYear]);
+  const lastHistCapex = useMemo(() => {
+    if (!lastHistYear || !cashFlow?.length) return 0;
+    const row = cashFlow.find((r) => r.id === "capex");
+    return row?.values?.[lastHistYear] ?? 0;
+  }, [cashFlow, lastHistYear]);
+  const allCapexBucketIds = useMemo(
+    () => [...CAPEX_DEFAULT_BUCKET_IDS_PREVIEW, ...capexCustomBucketIds],
+    [capexCustomBucketIds]
+  );
+  const effectiveUsefulLifeCapex = useMemo(() => {
+    if (!capexSplitByBucket) return ppeUsefulLifeSingle;
+    const lives = allCapexBucketIds.map((id) => ppeUsefulLifeByBucket[id]).filter((n) => n != null && n > 0);
+    if (lives.length === 0) return ppeUsefulLifeSingle;
+    return lives.reduce((a, b) => a + b, 0) / lives.length;
+  }, [capexSplitByBucket, ppeUsefulLifeSingle, ppeUsefulLifeByBucket, allCapexBucketIds]);
+  const capexEngineInput = useMemo(
+    () => ({
+      projectionYears,
+      revenueByYear: revenueByYearForCapex,
+      lastHistPPE,
+      lastHistCapex,
+      method: capexForecastMethod,
+      pctRevenue: capexPctRevenue,
+      manualByYear: capexManualByYear,
+      growthPct: capexGrowthPct,
+      timingConvention: capexTimingConvention,
+      usefulLifeYears: effectiveUsefulLifeCapex,
+    }),
+    [
+      projectionYears,
+      revenueByYearForCapex,
+      lastHistPPE,
+      lastHistCapex,
+      capexForecastMethod,
+      capexPctRevenue,
+      capexManualByYear,
+      capexGrowthPct,
+      capexTimingConvention,
+      effectiveUsefulLifeCapex,
+    ]
+  );
+  const totalCapexByYear = useMemo(() => {
+    if (projectionYears.length === 0) return {};
+    return computeProjectedCapexByYear(capexEngineInput);
+  }, [projectionYears, capexEngineInput]);
+  const capexScheduleOutput = useMemo(() => {
+    if (projectionYears.length === 0) return null;
+    return computeCapexDaSchedule(capexEngineInput);
+  }, [projectionYears, capexEngineInput]);
+  const capexBucketsToShowInPreview = useMemo(() => {
+    const isIncluded = (id: string) => {
+      const v = capexIncludeInAllocationByBucket[id];
+      if (v !== undefined && v !== null) return v === true;
+      return id !== "cap_b1" && id !== "cap_b9";
+    };
+    return allCapexBucketIds.filter(isIncluded);
+  }, [allCapexBucketIds, capexIncludeInAllocationByBucket]);
+
+  const initialLandBalance = useMemo(() => {
+    if (!lastHistYear) return 0;
+    const landPpeDisplay = capexHelperPpeByBucketByYear["cap_b1"]?.[lastHistYear];
+    const land = typeof landPpeDisplay === "number" && !Number.isNaN(landPpeDisplay) ? landPpeDisplay : 0;
+    return displayToStored(land, meta?.currencyUnit ?? "millions");
+  }, [lastHistYear, capexHelperPpeByBucketByYear, meta?.currencyUnit]);
+
+  const capexScheduleOutputBucketed = useMemo(() => {
+    if (!capexSplitByBucket || projectionYears.length === 0 || allCapexBucketIds.length === 0) return null;
+    return computeCapexDaScheduleByBucket({
+      projectionYears,
+      totalCapexByYear,
+      lastHistPPE,
+      timingConvention: capexTimingConvention,
+      bucketIds: allCapexBucketIds,
+      allocationPct: capexBucketAllocationPct,
+      usefulLifeByBucket: ppeUsefulLifeByBucket,
+      initialLandBalance,
+    });
+  }, [
+    capexSplitByBucket,
+    projectionYears,
+    totalCapexByYear,
+    lastHistPPE,
+    capexTimingConvention,
+    allCapexBucketIds,
+    capexBucketAllocationPct,
+    ppeUsefulLifeByBucket,
+    initialLandBalance,
+  ]);
 
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
@@ -1698,6 +1833,177 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                     </tr>
                   );
                 })}
+                <tr>
+                  <td colSpan={1 + years.length} className="h-3 bg-transparent" />
+                </tr>
+              </>
+            )}
+
+            {/* Capex & D&A Schedule — only when BS Build focus */}
+            {focusStatement === "balance" && (capexScheduleOutput || capexScheduleOutputBucketed) && (
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-purple-950/40">
+                    <h3 className="text-sm font-bold text-purple-200">Capex &amp; D&A Schedule</h3>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      {capexScheduleOutputBucketed
+                        ? "Per-bucket: Beginning, Capex, Depreciation, End. Timing: " +
+                          (capexTimingConvention === "mid" ? "Mid-year" : capexTimingConvention === "start" ? "Start of period" : "End of period") +
+                          ". Columns: Actuals → Projections."
+                        : "Total Capex, D&A, and Ending PP&E from schedule setup. Columns: Actuals → Projections."}
+                    </p>
+                  </td>
+                </tr>
+                <tr className="border-b border-slate-700 bg-slate-800/30">
+                  <td className="px-3 py-1.5 text-xs font-semibold text-slate-400">Line Item</td>
+                  {years.map((y) => (
+                    <td key={y} className={yearColClass("px-3 py-1.5 text-right text-xs font-semibold text-slate-400")(y)}>
+                      {y}
+                    </td>
+                  ))}
+                </tr>
+                {capexScheduleOutputBucketed ? (
+                  <>
+                    {capexBucketsToShowInPreview.map((bucketId) => {
+                      const label = capexBucketLabels[bucketId] || CAPEX_DEFAULT_BUCKET_LABELS_PREVIEW[bucketId] || bucketId;
+                      const sched = capexScheduleOutputBucketed.byBucket[bucketId];
+                      if (!sched) return null;
+                      return (
+                        <React.Fragment key={bucketId}>
+                          <tr className="border-b border-slate-700/50 bg-slate-800/20">
+                            <td className="px-3 py-1.5 pl-4 text-xs font-medium text-purple-200/90">{label}</td>
+                            <td colSpan={years.length} className="px-3 py-1.5" />
+                          </tr>
+                          <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                            <td className="px-3 py-2 pl-6 text-xs text-slate-300">Beginning</td>
+                            {years.map((y) => {
+                              const isProj = projectionYears.includes(y);
+                              const val = isProj ? sched.beginningByYear[y] : null;
+                              return (
+                                <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                                  {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                          <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                            <td className="px-3 py-2 pl-6 text-xs text-slate-300">Capex</td>
+                            {years.map((y) => {
+                              const isProj = projectionYears.includes(y);
+                              const val = isProj ? sched.capexByYear[y] : null;
+                              return (
+                                <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                                  {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                          <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                            <td className="px-3 py-2 pl-6 text-xs text-slate-300">Depreciation</td>
+                            {years.map((y) => {
+                              const isProj = projectionYears.includes(y);
+                              const val = isProj ? sched.dandaByYear[y] : null;
+                              return (
+                                <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                                  {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                          <tr className="border-b border-slate-700/50 bg-slate-800/40">
+                            <td className="px-3 py-2 pl-6 text-xs text-slate-300">End</td>
+                            {years.map((y) => {
+                              const isProj = projectionYears.includes(y);
+                              const val = isProj ? sched.endByYear[y] : null;
+                              return (
+                                <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                                  {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        </React.Fragment>
+                      );
+                    })}
+                    <tr className="border-t-2 border-slate-600 bg-slate-800/60">
+                      <td className="px-3 py-2 text-xs font-semibold text-slate-200">Total Capex</td>
+                      {years.map((y) => {
+                        const isProj = projectionYears.includes(y);
+                        const raw = isProj ? capexScheduleOutputBucketed.totalCapexByYear[y] : (cashFlow?.find((r) => r.id === "capex")?.values?.[y] ?? null);
+                        const val = raw != null ? (isProj ? raw : Math.abs(raw)) : null;
+                        return (
+                          <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-medium text-slate-200")(y)}>
+                            {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="border-b border-slate-700 bg-slate-800/60">
+                      <td className="px-3 py-2 text-xs font-semibold text-slate-200">Total D&A</td>
+                      {years.map((y) => {
+                        const isProj = projectionYears.includes(y);
+                        const val = isProj ? capexScheduleOutputBucketed.totalDandaByYear[y] : (danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null);
+                        return (
+                          <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-medium text-slate-200")(y)}>
+                            {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="border-b border-slate-700 bg-slate-800/60">
+                      <td className="px-3 py-2 text-xs font-semibold text-slate-200">Ending PP&E, net</td>
+                      {years.map((y) => {
+                        const isProj = projectionYears.includes(y);
+                        const val = isProj ? capexScheduleOutputBucketed.totalPpeByYear[y] : (balanceSheet?.find((r) => r.id === "ppe")?.values?.[y] ?? null);
+                        return (
+                          <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-medium text-slate-200")(y)}>
+                            {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </>
+                ) : (
+                  <>
+                    <tr className="border-b border-slate-700 bg-slate-800/40">
+                      <td className="px-3 py-2 text-xs font-medium text-slate-200">Capex</td>
+                      {years.map((y) => {
+                        const isProj = projectionYears.includes(y);
+                        const raw = isProj && capexScheduleOutput ? capexScheduleOutput.capexByYear[y] : (cashFlow?.find((r) => r.id === "capex")?.values?.[y] ?? null);
+                        const val = raw != null ? (isProj ? raw : Math.abs(raw)) : null;
+                        return (
+                          <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                            {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="border-b border-slate-700 bg-slate-800/40">
+                      <td className="px-3 py-2 text-xs font-medium text-slate-200 pl-6">D&A</td>
+                      {years.map((y) => {
+                        const isProj = projectionYears.includes(y);
+                        const val = isProj && capexScheduleOutput ? capexScheduleOutput.dandaByYear[y] : (danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null);
+                        return (
+                          <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                            {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="border-b border-slate-700 bg-slate-800/40">
+                      <td className="px-3 py-2 text-xs font-medium text-slate-200">Ending PP&E</td>
+                      {years.map((y) => {
+                        const isProj = projectionYears.includes(y);
+                        const val = isProj && capexScheduleOutput ? capexScheduleOutput.ppeByYear[y] : (balanceSheet?.find((r) => r.id === "ppe")?.values?.[y] ?? null);
+                        return (
+                          <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
+                            {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </>
+                )}
                 <tr>
                   <td colSpan={1 + years.length} className="h-3 bg-transparent" />
                 </tr>

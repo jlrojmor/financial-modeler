@@ -18,6 +18,7 @@ import {
   createCashFlowTemplate,
 } from "@/lib/statement-templates";
 import { getRowsForCategory } from "@/lib/bs-category-mapper";
+import { CAPEX_IB_DEFAULT_USEFUL_LIVES, isLegacyWrongUsefulLives } from "@/lib/capex-defaults";
 
 /**
  * Helpers
@@ -278,6 +279,36 @@ export type ProjectSnapshot = {
   wcPctByItemId: Record<string, number>;
   /** WC: custom % driver per item and year (0–100). */
   wcPctByItemIdByYear: Record<string, Record<string, number>>;
+  /** Capex & D&A Schedule (BS Build). */
+  capexForecastMethod: "pct_revenue" | "manual" | "growth";
+  capexPctRevenue: number;
+  capexManualByYear: Record<string, number>;
+  capexGrowthPct: number;
+  capexSplitByBucket: boolean;
+  capexForecastBucketsIndependently: boolean;
+  capexTimingConvention: "mid" | "start" | "end";
+  capexBucketAllocationPct: Record<string, number>;
+  capexBucketLabels: Record<string, string>;
+  /** User-added Capex bucket IDs (custom categories beyond the default 7). */
+  capexCustomBucketIds: string[];
+  capexBucketMethod: Record<string, "pct_revenue" | "manual" | "growth">;
+  capexBucketPctRevenue: Record<string, number>;
+  capexBucketManualByYear: Record<string, Record<string, number>>;
+  capexBucketGrowthPct: Record<string, number>;
+  ppeUsefulLifeByBucket: Record<string, number>;
+  ppeUsefulLifeSingle: number;
+  /** Optional: historic Capex by bucket by year (informative; for implied allocation %). bucketId -> year -> amount */
+  capexHistoricByBucketByYear: Record<string, Record<string, number>>;
+  /** Capex Allocation Helper: PP&E by bucket by year (for maintenance-capex-weighted allocation). bucketId -> year -> PP&E */
+  capexHelperPpeByBucketByYear: Record<string, Record<string, number>>;
+  /** Capex Allocation Helper: include bucket in allocation (default OFF for Land, CIP). */
+  capexIncludeInAllocationByBucket: Record<string, boolean>;
+  capexModelIntangibles: boolean;
+  intangiblesForecastMethod: "pct_revenue" | "manual" | "growth";
+  intangiblesAmortizationLifeYears: number;
+  intangiblesPctRevenue: number;
+  intangiblesManualByYear: Record<string, number>;
+  intangiblesGrowthPct: number;
 };
 
 export type ProjectMeta = {
@@ -362,6 +393,36 @@ export type ModelState = {
   wcPctByItemId: Record<string, number>;
   /** WC: custom % driver per item and year (0–100). */
   wcPctByItemIdByYear: Record<string, Record<string, number>>;
+  /** Capex & D&A Schedule (BS Build). */
+  capexForecastMethod: "pct_revenue" | "manual" | "growth";
+  capexPctRevenue: number;
+  capexManualByYear: Record<string, number>;
+  capexGrowthPct: number;
+  capexSplitByBucket: boolean;
+  capexForecastBucketsIndependently: boolean;
+  capexTimingConvention: "mid" | "start" | "end";
+  capexBucketAllocationPct: Record<string, number>;
+  capexBucketLabels: Record<string, string>;
+  /** User-added Capex bucket IDs (custom categories beyond the default 7). */
+  capexCustomBucketIds: string[];
+  capexBucketMethod: Record<string, "pct_revenue" | "manual" | "growth">;
+  capexBucketPctRevenue: Record<string, number>;
+  capexBucketManualByYear: Record<string, Record<string, number>>;
+  capexBucketGrowthPct: Record<string, number>;
+  ppeUsefulLifeByBucket: Record<string, number>;
+  ppeUsefulLifeSingle: number;
+  /** Optional: historic Capex by bucket by year (informative; for implied allocation %). bucketId -> year -> amount */
+  capexHistoricByBucketByYear: Record<string, Record<string, number>>;
+  /** Capex Allocation Helper: PP&E by bucket by year (for maintenance-capex-weighted allocation). bucketId -> year -> PP&E */
+  capexHelperPpeByBucketByYear: Record<string, Record<string, number>>;
+  /** Capex Allocation Helper: include bucket in allocation (default OFF for Land, CIP). */
+  capexIncludeInAllocationByBucket: Record<string, boolean>;
+  capexModelIntangibles: boolean;
+  intangiblesForecastMethod: "pct_revenue" | "manual" | "growth";
+  intangiblesAmortizationLifeYears: number;
+  intangiblesPctRevenue: number;
+  intangiblesManualByYear: Record<string, number>;
+  intangiblesGrowthPct: number;
 };
 
 export type ModelActions = {
@@ -456,6 +517,34 @@ export type ModelActions = {
   setWcPctForItem: (itemId: string, pct: number) => void;
   /** WC: set % driver for a specific year (0–100). */
   setWcPctForItemYear: (itemId: string, year: string, pct: number) => void;
+  setCapexForecastMethod: (method: "pct_revenue" | "manual" | "growth") => void;
+  setCapexPctRevenue: (pct: number) => void;
+  setCapexManualByYear: (year: string, value: number) => void;
+  setCapexGrowthPct: (pct: number) => void;
+  setCapexSplitByBucket: (on: boolean) => void;
+  setCapexForecastBucketsIndependently: (on: boolean) => void;
+  setCapexTimingConvention: (timing: "mid" | "start" | "end") => void;
+  setCapexBucketAllocationPct: (bucketId: string, pct: number) => void;
+  setCapexBucketLabel: (bucketId: string, label: string) => void;
+  addCapexBucket: (label?: string) => string;
+  removeCapexBucket: (bucketId: string) => void;
+  setCapexBucketMethod: (bucketId: string, method: "pct_revenue" | "manual" | "growth") => void;
+  setCapexBucketPctRevenue: (bucketId: string, pct: number) => void;
+  setCapexBucketManualByYear: (bucketId: string, year: string, value: number) => void;
+  setCapexBucketGrowthPct: (bucketId: string, pct: number) => void;
+  setPpeUsefulLifeByBucket: (bucketId: string, years: number) => void;
+  setPpeUsefulLifeSingle: (years: number) => void;
+  setCapexHistoricBucketYear: (bucketId: string, year: string, value: number) => void;
+  setCapexHelperPpeBucketYear: (bucketId: string, year: string, value: number) => void;
+  setCapexIncludeInAllocation: (bucketId: string, include: boolean) => void;
+  resetCapexHelperUsefulLivesToDefaults: () => void;
+  applyCapexHelperWeightsToForecast: (weightsPct: Record<string, number>) => void;
+  setCapexModelIntangibles: (on: boolean) => void;
+  setIntangiblesForecastMethod: (method: "pct_revenue" | "manual" | "growth") => void;
+  setIntangiblesAmortizationLifeYears: (years: number) => void;
+  setIntangiblesPctRevenue: (pct: number) => void;
+  setIntangiblesManualByYear: (year: string, value: number) => void;
+  setIntangiblesGrowthPct: (pct: number) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -584,6 +673,31 @@ const defaultState: ModelState = {
   wcPctBaseByItemId: {},
   wcPctByItemId: {},
   wcPctByItemIdByYear: {},
+  capexForecastMethod: "pct_revenue",
+  capexPctRevenue: 0,
+  capexManualByYear: {},
+  capexGrowthPct: 0,
+  capexSplitByBucket: true,
+  capexForecastBucketsIndependently: false,
+  capexTimingConvention: "mid",
+  capexBucketAllocationPct: {},
+  capexBucketLabels: {},
+  capexCustomBucketIds: [],
+  capexBucketMethod: {},
+  capexBucketPctRevenue: {},
+  capexBucketManualByYear: {},
+  capexBucketGrowthPct: {},
+  ppeUsefulLifeByBucket: { ...CAPEX_IB_DEFAULT_USEFUL_LIVES },
+  ppeUsefulLifeSingle: 10,
+  capexHistoricByBucketByYear: {},
+  capexHelperPpeByBucketByYear: {},
+  capexIncludeInAllocationByBucket: {},
+  capexModelIntangibles: false,
+  intangiblesForecastMethod: "pct_revenue",
+  intangiblesAmortizationLifeYears: 7,
+  intangiblesPctRevenue: 0,
+  intangiblesManualByYear: {},
+  intangiblesGrowthPct: 0,
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -623,6 +737,31 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     wcPctBaseByItemId: state.wcPctBaseByItemId ?? {},
     wcPctByItemId: state.wcPctByItemId ?? {},
     wcPctByItemIdByYear: state.wcPctByItemIdByYear ?? {},
+    capexForecastMethod: state.capexForecastMethod ?? "pct_revenue",
+    capexPctRevenue: state.capexPctRevenue ?? 0,
+    capexManualByYear: state.capexManualByYear ?? {},
+    capexGrowthPct: state.capexGrowthPct ?? 0,
+    capexSplitByBucket: state.capexSplitByBucket ?? true,
+    capexForecastBucketsIndependently: state.capexForecastBucketsIndependently ?? false,
+    capexTimingConvention: state.capexTimingConvention ?? "mid",
+    capexBucketAllocationPct: state.capexBucketAllocationPct ?? {},
+    capexBucketLabels: state.capexBucketLabels ?? {},
+    capexCustomBucketIds: state.capexCustomBucketIds ?? [],
+    capexBucketMethod: state.capexBucketMethod ?? {},
+    capexBucketPctRevenue: state.capexBucketPctRevenue ?? {},
+    capexBucketManualByYear: state.capexBucketManualByYear ?? {},
+    capexBucketGrowthPct: state.capexBucketGrowthPct ?? {},
+    ppeUsefulLifeByBucket: state.ppeUsefulLifeByBucket ?? {},
+    ppeUsefulLifeSingle: state.ppeUsefulLifeSingle ?? 10,
+    capexHistoricByBucketByYear: state.capexHistoricByBucketByYear ?? {},
+    capexHelperPpeByBucketByYear: state.capexHelperPpeByBucketByYear ?? {},
+    capexIncludeInAllocationByBucket: state.capexIncludeInAllocationByBucket ?? {},
+    capexModelIntangibles: state.capexModelIntangibles ?? false,
+    intangiblesForecastMethod: state.intangiblesForecastMethod ?? "pct_revenue",
+    intangiblesAmortizationLifeYears: state.intangiblesAmortizationLifeYears ?? 7,
+    intangiblesPctRevenue: state.intangiblesPctRevenue ?? 0,
+    intangiblesManualByYear: state.intangiblesManualByYear ?? {},
+    intangiblesGrowthPct: state.intangiblesGrowthPct ?? 0,
   };
 }
 
@@ -666,6 +805,36 @@ function applyProjectSnapshot(
     wcPctBaseByItemId: snapshot.wcPctBaseByItemId ?? {},
     wcPctByItemId: snapshot.wcPctByItemId ?? {},
     wcPctByItemIdByYear: snapshot.wcPctByItemIdByYear ?? {},
+    capexForecastMethod: snapshot.capexForecastMethod ?? "pct_revenue",
+    capexPctRevenue: snapshot.capexPctRevenue ?? 0,
+    capexManualByYear: snapshot.capexManualByYear ?? {},
+    capexGrowthPct: snapshot.capexGrowthPct ?? 0,
+    capexSplitByBucket: snapshot.capexSplitByBucket ?? true,
+    capexForecastBucketsIndependently: snapshot.capexForecastBucketsIndependently ?? false,
+    capexTimingConvention: snapshot.capexTimingConvention ?? "mid",
+    capexBucketAllocationPct: snapshot.capexBucketAllocationPct ?? {},
+    capexBucketLabels: snapshot.capexBucketLabels ?? {},
+    capexCustomBucketIds: snapshot.capexCustomBucketIds ?? [],
+    capexBucketMethod: snapshot.capexBucketMethod ?? {},
+    capexBucketPctRevenue: snapshot.capexBucketPctRevenue ?? {},
+    capexBucketManualByYear: snapshot.capexBucketManualByYear ?? {},
+    capexBucketGrowthPct: snapshot.capexBucketGrowthPct ?? {},
+    ppeUsefulLifeByBucket:
+      snapshot.ppeUsefulLifeByBucket &&
+      Object.keys(snapshot.ppeUsefulLifeByBucket).length > 0 &&
+      !isLegacyWrongUsefulLives(snapshot.ppeUsefulLifeByBucket)
+        ? snapshot.ppeUsefulLifeByBucket
+        : { ...CAPEX_IB_DEFAULT_USEFUL_LIVES },
+    ppeUsefulLifeSingle: snapshot.ppeUsefulLifeSingle ?? 10,
+    capexHistoricByBucketByYear: snapshot.capexHistoricByBucketByYear ?? {},
+    capexHelperPpeByBucketByYear: snapshot.capexHelperPpeByBucketByYear ?? {},
+    capexIncludeInAllocationByBucket: snapshot.capexIncludeInAllocationByBucket ?? {},
+    capexModelIntangibles: snapshot.capexModelIntangibles ?? false,
+    intangiblesForecastMethod: snapshot.intangiblesForecastMethod ?? "pct_revenue",
+    intangiblesAmortizationLifeYears: snapshot.intangiblesAmortizationLifeYears ?? 7,
+    intangiblesPctRevenue: snapshot.intangiblesPctRevenue ?? 0,
+    intangiblesManualByYear: snapshot.intangiblesManualByYear ?? {},
+    intangiblesGrowthPct: snapshot.intangiblesGrowthPct ?? 0,
   }));
 }
 
@@ -3015,6 +3184,117 @@ export const useModelStore = create<ModelState & ModelActions>()(
       };
     });
   },
+
+  setCapexForecastMethod: (method) => set((s) => ({ capexForecastMethod: method })),
+  setCapexPctRevenue: (pct) => set((s) => ({ capexPctRevenue: Math.max(0, pct) })),
+  setCapexManualByYear: (year, value) =>
+    set((s) => ({
+      capexManualByYear: { ...(s.capexManualByYear ?? {}), [year]: value },
+    })),
+  setCapexGrowthPct: (pct) => set((s) => ({ capexGrowthPct: pct })),
+  setCapexSplitByBucket: (on) => set(() => ({ capexSplitByBucket: on })),
+  setCapexForecastBucketsIndependently: (on) => set(() => ({ capexForecastBucketsIndependently: on })),
+  setCapexTimingConvention: (timing) => set(() => ({ capexTimingConvention: timing })),
+  setCapexBucketAllocationPct: (bucketId, pct) =>
+    set((s) => ({
+      capexBucketAllocationPct: { ...(s.capexBucketAllocationPct ?? {}), [bucketId]: Math.max(0, Math.min(100, pct)) },
+    })),
+  setCapexBucketLabel: (bucketId, label) =>
+    set((s) => ({
+      capexBucketLabels: { ...(s.capexBucketLabels ?? {}), [bucketId]: label ?? "" },
+    })),
+  addCapexBucket: (label) => {
+    const id = `cap_custom_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const displayLabel = (label ?? "").trim() || "New category";
+    set((s) => ({
+      capexCustomBucketIds: [...(s.capexCustomBucketIds ?? []), id],
+      capexBucketLabels: { ...(s.capexBucketLabels ?? {}), [id]: displayLabel },
+    }));
+    return id;
+  },
+  removeCapexBucket: (bucketId) =>
+    set((s) => {
+      const custom = s.capexCustomBucketIds ?? [];
+      if (!custom.includes(bucketId)) return {};
+      const labels = { ...(s.capexBucketLabels ?? {}) };
+      const allocation = { ...(s.capexBucketAllocationPct ?? {}) };
+      const method = { ...(s.capexBucketMethod ?? {}) };
+      const pctRev = { ...(s.capexBucketPctRevenue ?? {}) };
+      const manual = { ...(s.capexBucketManualByYear ?? {}) };
+      const growth = { ...(s.capexBucketGrowthPct ?? {}) };
+      const usefulLife = { ...(s.ppeUsefulLifeByBucket ?? {}) };
+      delete labels[bucketId];
+      delete allocation[bucketId];
+      delete method[bucketId];
+      delete pctRev[bucketId];
+      delete manual[bucketId];
+      delete growth[bucketId];
+      delete usefulLife[bucketId];
+      return {
+        capexCustomBucketIds: custom.filter((x) => x !== bucketId),
+        capexBucketLabels: labels,
+        capexBucketAllocationPct: allocation,
+        capexBucketMethod: method,
+        capexBucketPctRevenue: pctRev,
+        capexBucketManualByYear: manual,
+        capexBucketGrowthPct: growth,
+        ppeUsefulLifeByBucket: usefulLife,
+      };
+    }),
+  setCapexBucketMethod: (bucketId, method) =>
+    set((s) => ({
+      capexBucketMethod: { ...(s.capexBucketMethod ?? {}), [bucketId]: method },
+    })),
+  setCapexBucketPctRevenue: (bucketId, pct) =>
+    set((s) => ({
+      capexBucketPctRevenue: { ...(s.capexBucketPctRevenue ?? {}), [bucketId]: Math.max(0, pct) },
+    })),
+  setCapexBucketManualByYear: (bucketId, year, value) =>
+    set((s) => {
+      const byBucket = s.capexBucketManualByYear ?? {};
+      const byYear = { ...(byBucket[bucketId] ?? {}), [year]: value };
+      return { capexBucketManualByYear: { ...byBucket, [bucketId]: byYear } };
+    }),
+  setCapexBucketGrowthPct: (bucketId, pct) =>
+    set((s) => ({
+      capexBucketGrowthPct: { ...(s.capexBucketGrowthPct ?? {}), [bucketId]: pct },
+    })),
+  setPpeUsefulLifeByBucket: (bucketId, years) =>
+    set((s) => ({
+      ppeUsefulLifeByBucket: { ...(s.ppeUsefulLifeByBucket ?? {}), [bucketId]: Math.max(0.5, years) },
+    })),
+  setPpeUsefulLifeSingle: (years) => set(() => ({ ppeUsefulLifeSingle: Math.max(0.5, years) })),
+  setCapexHistoricBucketYear: (bucketId, year, value) =>
+    set((s) => {
+      const byBucket = s.capexHistoricByBucketByYear ?? {};
+      const byYear = { ...(byBucket[bucketId] ?? {}), [year]: value };
+      return { capexHistoricByBucketByYear: { ...byBucket, [bucketId]: byYear } };
+    }),
+  setCapexHelperPpeBucketYear: (bucketId, year, value) =>
+    set((s) => {
+      const byBucket = s.capexHelperPpeByBucketByYear ?? {};
+      const byYear = { ...(byBucket[bucketId] ?? {}), [year]: value };
+      return { capexHelperPpeByBucketByYear: { ...byBucket, [bucketId]: byYear } };
+    }),
+  setCapexIncludeInAllocation: (bucketId, include) =>
+    set((s) => ({
+      capexIncludeInAllocationByBucket: { ...(s.capexIncludeInAllocationByBucket ?? {}), [bucketId]: include },
+    })),
+  resetCapexHelperUsefulLivesToDefaults: () =>
+    set((s) => ({
+      ppeUsefulLifeByBucket: { ...(s.ppeUsefulLifeByBucket ?? {}), ...CAPEX_IB_DEFAULT_USEFUL_LIVES },
+    })),
+  applyCapexHelperWeightsToForecast: (weightsPct) =>
+    set(() => ({ capexBucketAllocationPct: { ...weightsPct } })),
+  setCapexModelIntangibles: (on) => set(() => ({ capexModelIntangibles: on })),
+  setIntangiblesForecastMethod: (method) => set(() => ({ intangiblesForecastMethod: method })),
+  setIntangiblesAmortizationLifeYears: (years) => set(() => ({ intangiblesAmortizationLifeYears: Math.max(0.5, years) })),
+  setIntangiblesPctRevenue: (pct) => set(() => ({ intangiblesPctRevenue: Math.max(0, pct) })),
+  setIntangiblesManualByYear: (year, value) =>
+    set((s) => ({
+      intangiblesManualByYear: { ...(s.intangiblesManualByYear ?? {}), [year]: value },
+    })),
+  setIntangiblesGrowthPct: (pct) => set(() => ({ intangiblesGrowthPct: pct })),
 
   // IS Build breakdowns live ONLY in config; they are NOT added to the incomeStatement tree.
   // Historicals structure (e.g. Revenue → Subscription, Services) is unchanged. For projection

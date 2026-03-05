@@ -14,6 +14,7 @@ import CollapsibleSection from "@/components/collapsible-section";
 import { computeRowValue } from "@/lib/calculations";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 import WorkingCapitalScheduleCard from "@/components/working-capital-schedule-card";
+import CapexDaScheduleCard from "@/components/capex-da-schedule-card";
 
 // UUID helper
 function uuid() {
@@ -805,6 +806,7 @@ export default function BalanceSheetBuilderUnified() {
     >
       <div className="space-y-6">
         <WorkingCapitalScheduleCard />
+        <CapexDaScheduleCard />
         {/* Assets Section */}
         <div>
           <h3 className="mb-3 text-sm font-semibold text-green-200">ASSETS</h3>

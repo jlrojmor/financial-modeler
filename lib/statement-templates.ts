@@ -153,13 +153,15 @@ export function createIncomeStatementTemplate(): Row[] {
 
 /**
  * Standard Balance Sheet Template (IB-grade)
+ * Core rows so schedules (WC, Capex, Intangibles, etc.) can identify which items to use.
+ * Total/subtotal row IDs and order must not change; users can add/remove non-total rows.
  */
 export function createBalanceSheetTemplate(): Row[] {
   return [
-    // ASSETS
+    // CURRENT ASSETS
     {
       id: "cash",
-      label: "Cash & Cash Equivalents",
+      label: "Cash",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -187,7 +189,7 @@ export function createBalanceSheetTemplate(): Row[] {
       kind: "input",
       valueType: "currency",
       values: {},
-      children: [], // User can break this down
+      children: [],
     },
     {
       id: "total_current_assets",
@@ -197,6 +199,7 @@ export function createBalanceSheetTemplate(): Row[] {
       values: {},
       children: [],
     },
+    // FIXED ASSETS
     {
       id: "ppe",
       label: "Property, Plant & Equipment (PP&E)",
@@ -214,8 +217,16 @@ export function createBalanceSheetTemplate(): Row[] {
       children: [],
     },
     {
+      id: "goodwill",
+      label: "Goodwill",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
       id: "other_assets",
-      label: "Other Assets",
+      label: "Other Long-Term Assets",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -237,10 +248,26 @@ export function createBalanceSheetTemplate(): Row[] {
       values: {},
       children: [],
     },
-    // LIABILITIES
+    // CURRENT LIABILITIES
     {
       id: "ap",
       label: "Accounts Payable",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "accrued_liabilities",
+      label: "Accrued Liabilities",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "deferred_revenue",
+      label: "Deferred Revenue",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -270,6 +297,7 @@ export function createBalanceSheetTemplate(): Row[] {
       values: {},
       children: [],
     },
+    // NON-CURRENT LIABILITIES
     {
       id: "lt_debt",
       label: "Long-Term Debt",
@@ -302,18 +330,10 @@ export function createBalanceSheetTemplate(): Row[] {
       values: {},
       children: [],
     },
-    // EQUITY (10-K Standard Structure)
-    {
-      id: "preferred_stock",
-      label: "Preferred Stock (Par Value)",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-    },
+    // EQUITY (core items)
     {
       id: "common_stock",
-      label: "Common Stock (Par Value)",
+      label: "Common Stock",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -321,7 +341,7 @@ export function createBalanceSheetTemplate(): Row[] {
     },
     {
       id: "apic",
-      label: "Additional Paid-in Capital (APIC)",
+      label: "Additional Paid-in Capital",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -329,16 +349,7 @@ export function createBalanceSheetTemplate(): Row[] {
     },
     {
       id: "treasury_stock",
-      label: "Treasury Stock (at cost)",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      children: [],
-      // Note: Treasury stock is typically negative (contra-equity account)
-    },
-    {
-      id: "aoci",
-      label: "Accumulated Other Comprehensive Income (AOCI)",
+      label: "Treasury Stock",
       kind: "input",
       valueType: "currency",
       values: {},
@@ -347,6 +358,14 @@ export function createBalanceSheetTemplate(): Row[] {
     {
       id: "retained_earnings",
       label: "Retained Earnings",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    },
+    {
+      id: "other_equity",
+      label: "Other Equity",
       kind: "input",
       valueType: "currency",
       values: {},

@@ -868,15 +868,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
     const force = options?.force === true;
     // Only initialize if not already initialized (preserve existing data), unless force
     if (!state.isInitialized || force) {
-      let incomeStatement = state.incomeStatement.length > 0 
-        ? [...state.incomeStatement] 
-        : createIncomeStatementTemplate();
-      let balanceSheet = state.balanceSheet.length > 0 
-        ? [...state.balanceSheet] 
-        : createBalanceSheetTemplate();
-      let cashFlow = state.cashFlow.length > 0 
-        ? [...state.cashFlow] 
-        : createCashFlowTemplate();
+      // When force (e.g. "New project"), always start fresh from templates. Otherwise keep existing if present.
+      const useTemplates = force || state.incomeStatement.length === 0;
+      let incomeStatement = useTemplates
+        ? createIncomeStatementTemplate()
+        : [...state.incomeStatement];
+      let balanceSheet = useTemplates
+        ? createBalanceSheetTemplate()
+        : [...state.balanceSheet];
+      let cashFlow = useTemplates
+        ? createCashFlowTemplate()
+        : [...state.cashFlow];
 
       // Migration: Ensure core Income Statement skeleton items always exist
       // These are the fundamental structure of an IS and cannot be removed

@@ -7,6 +7,7 @@ import { findGlossaryItem } from "@/lib/financial-glossary";
 import { getCommonBSItems, filterAlreadyAdded } from "@/lib/common-suggestions";
 import { suggestBestMatch, validateConceptForStatement } from "@/lib/ai-item-matcher";
 import { getRowsForCategory, getInsertionIndexForCategory } from "@/lib/bs-category-mapper";
+import { getMissingRequiredBsRows, getRequiredRowTemplate } from "@/lib/bs-required-rows";
 import type { BalanceSheetCategory } from "@/lib/bs-impact-rules";
 import { getSuggestedTreatment } from "@/lib/financial-terms-knowledge";
 import UnifiedItemCard from "@/components/unified-item-card";
@@ -92,6 +93,10 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
   const isHistoricalsStep = stepId === "historicals";
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
+  const missingRequiredRows = useMemo(
+    () => (isHistoricalsStep ? [] : getMissingRequiredBsRows(balanceSheet ?? [])),
+    [isHistoricalsStep, balanceSheet]
+  );
   const updateRowValue = useModelStore((s) => s.updateRowValue);
   const insertRow = useModelStore((s) => s.insertRow);
   const removeRow = useModelStore((s) => s.removeRow);
@@ -813,6 +818,35 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       defaultExpanded={true}
     >
       <div className="space-y-6">
+        {!isHistoricalsStep && missingRequiredRows.length > 0 && (
+          <div className="rounded-lg border border-amber-700/60 bg-amber-950/30 p-4">
+            <p className="text-sm font-medium text-amber-200 mb-2">
+              Missing required balance sheet line(s) for schedules
+            </p>
+            <p className="text-xs text-amber-300/90 mb-3">
+              Add them back so Working Capital, Capex & D&A, and Intangibles schedules can run correctly.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {missingRequiredRows.map((config) => {
+                const row = getRequiredRowTemplate(config.id);
+                if (!row) return null;
+                return (
+                  <button
+                    key={config.id}
+                    type="button"
+                    onClick={() => {
+                      const idx = getInsertionIndexForCategory(balanceSheet ?? [], config.category);
+                      insertRow("balanceSheet", idx, row);
+                    }}
+                    className="px-3 py-1.5 rounded-md bg-amber-700/50 text-amber-100 text-sm font-medium hover:bg-amber-600/50 transition-colors"
+                  >
+                    Add {config.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         {!isHistoricalsStep && (
           <>
             <WorkingCapitalScheduleCard />

@@ -23,6 +23,8 @@ const CATEGORY_MAPPINGS: Record<string, BalanceSheetCategory> = {
   
   // Current Liabilities
   ap: "current_liabilities",
+  accrued_liabilities: "current_liabilities",
+  deferred_revenue: "current_liabilities",
   st_debt: "current_liabilities",
   other_cl: "current_liabilities",
   

@@ -8,6 +8,50 @@
 import type { Row } from "@/types/finance";
 import { getBSCategoryForRow, getRowsForCategory } from "./bs-category-mapper";
 
+/** WC exclusions for BS-based WC: cash and st_debt (and totals). */
+const WC_BS_EXCLUDE_IDS = new Set([
+  "cash",
+  "st_debt",
+  "total_current_assets",
+  "total_current_liabilities",
+]);
+
+/**
+ * Working capital from BS using only WC-tagged rows (cashFlowBehavior === "working_capital").
+ * WC_BS = sum(CA WC) - sum(CL WC). Used for ΔWC_BS and projection wc_change.
+ */
+export function getWcBsBalance(balanceSheet: Row[], year: string): number {
+  const currentAssets = getRowsForCategory(balanceSheet, "current_assets");
+  const currentLiabilities = getRowsForCategory(balanceSheet, "current_liabilities");
+  const isWcRow = (r: Row) =>
+    !WC_BS_EXCLUDE_IDS.has(r.id) &&
+    !r.id.startsWith("total") &&
+    r.cashFlowBehavior === "working_capital";
+  let wc = 0;
+  currentAssets.filter(isWcRow).forEach((r) => {
+    wc += r.values?.[year] ?? 0;
+  });
+  currentLiabilities.filter(isWcRow).forEach((r) => {
+    wc -= r.values?.[year] ?? 0;
+  });
+  return wc;
+}
+
+/**
+ * ΔWC from BS (model-implied) for a given year: WC_BS(y) - WC_BS(y-1).
+ * Uses only WC-tagged rows. For first year in list there is no previous year.
+ */
+export function getDeltaWcBs(
+  balanceSheet: Row[],
+  year: string,
+  previousYear: string | null
+): number {
+  if (!previousYear) return 0;
+  const wcCurrent = getWcBsBalance(balanceSheet, year);
+  const wcPrev = getWcBsBalance(balanceSheet, previousYear);
+  return wcCurrent - wcPrev;
+}
+
 /**
  * Total SBC for a year without double-counting.
  * If SG&A / COGS / R&D have breakdown children, sum those category values; otherwise use "sga" / "cogs" / "rd".
@@ -243,40 +287,11 @@ function computeFormula(
     const yearIndex = allYears.indexOf(year);
     const previousYear = yearIndex > 0 ? allYears[yearIndex - 1] : null;
     if (!previousYear) return 0;
-    
-    // Get Current Assets (excluding Cash) using getRowsForCategory
-    const allCurrentAssets = getRowsForCategory(allStatements.balanceSheet, "current_assets");
-    const currentAssetsRows = allCurrentAssets.filter(r => r.id !== "cash" && r.id !== "total_current_assets");
-    
-    // Get Current Liabilities (excluding Short-Term Debt) using getRowsForCategory
-    const allCurrentLiabilities = getRowsForCategory(allStatements.balanceSheet, "current_liabilities");
-    const currentLiabilitiesRows = allCurrentLiabilities.filter(r => r.id !== "st_debt" && r.id !== "total_current_liabilities");
-    
-    // Calculate current year working capital (excluding cash and short-term debt)
-    let currentWC = 0;
-    currentAssetsRows.forEach(r => {
-      currentWC += r.values?.[year] ?? 0;
-    });
-    currentLiabilitiesRows.forEach(r => {
-      currentWC -= r.values?.[year] ?? 0;
-    });
-    
-    // Calculate previous year working capital
-    let previousWC = 0;
-    currentAssetsRows.forEach(r => {
-      previousWC += r.values?.[previousYear] ?? 0;
-    });
-    currentLiabilitiesRows.forEach(r => {
-      previousWC -= r.values?.[previousYear] ?? 0;
-    });
-    
-    // Change in Working Capital = Current WC - Previous WC
-    // Negative change = cash outflow (increase in WC uses cash)
-    // Positive change = cash inflow (decrease in WC frees cash)
-    const wcChange = currentWC - previousWC;
-    
+
+    // Forecast: ΔWC only from projected BS WC balances (WC-tagged rows only)
+    const deltaWcBs = getDeltaWcBs(allStatements.balanceSheet, year, previousYear);
     // In CFO, we subtract WC change (increase in WC = negative CF)
-    return -wcChange;
+    return -deltaWcBs;
   }
   
   if (rowId === "operating_cf") {
@@ -750,33 +765,24 @@ export function computeBalanceSheetTotalsWithOverrides(
 }
 
 /**
- * Check if Balance Sheet balances: Total Assets = Total Liabilities + Total Equity
- * Returns an object with balance status and difference for each year.
- * If overrides (BS Build preview) are provided, uses them for projection years so the check reflects schedule outputs.
+ * Balance check: for each year, compare Total Assets to (Total Liabilities + Total Equity).
+ * Totals are computed by summing line items: L = current + non-current liabilities, E = equity items, A = current + fixed assets.
+ * Per-year: balanced when A ≈ L + E (within tolerance). Years with only one side filled are "incomplete" and do not trigger OUT OF BALANCE.
  */
 export function checkBalanceSheetBalance(
   balanceSheet: Row[],
   years: string[],
   overrides?: Record<string, Record<string, number>>
-): { year: string; balances: boolean; totalAssets: number; totalLiabAndEquity: number; difference: number }[] {
+): { year: string; balances: boolean; totalAssets: number; totalLiabAndEquity: number; difference: number; incomplete?: boolean }[] {
   const results = years.map((year) => {
-    const useOverrides = overrides != null && Object.keys(overrides).length > 0;
-    const totalAssets =
-      useOverrides
-        ? computeBalanceSheetTotalsWithOverrides(balanceSheet, year, overrides).total_assets
-        : findRowValue(balanceSheet, "total_assets", year);
-    const totalLiabilities =
-      useOverrides
-        ? computeBalanceSheetTotalsWithOverrides(balanceSheet, year, overrides).total_liabilities
-        : findRowValue(balanceSheet, "total_liabilities", year);
-    const totalEquity =
-      useOverrides
-        ? computeBalanceSheetTotalsWithOverrides(balanceSheet, year, overrides).total_equity
-        : findRowValue(balanceSheet, "total_equity", year);
-    const totalLiabAndEquity = totalLiabilities + totalEquity;
+    const totals = computeBalanceSheetTotalsWithOverrides(balanceSheet, year, overrides);
+    const totalAssets = totals.total_assets;
+    const totalLiabAndEquity = totals.total_liab_and_equity;
 
     const difference = totalAssets - totalLiabAndEquity;
-    const balances = Math.abs(difference) < 0.01;
+    const bothHaveData = Math.abs(totalAssets) >= 0.01 && Math.abs(totalLiabAndEquity) >= 0.01;
+    const incomplete = !bothHaveData && (Math.abs(totalAssets) >= 0.01 || Math.abs(totalLiabAndEquity) >= 0.01);
+    const balances = Math.abs(difference) < 0.01 || incomplete;
 
     return {
       year,
@@ -784,6 +790,7 @@ export function checkBalanceSheetBalance(
       totalAssets,
       totalLiabAndEquity,
       difference,
+      incomplete,
     };
   });
 
@@ -864,14 +871,39 @@ export function recomputeCalculations(
         ? recomputeCalculations(row.children, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns)
         : undefined;
 
+    // WC Change: set Other WC / Reclass child so historical total ties to CFO; forecast = 0
+    let finalChildren = newChildren;
+    if (row.id === "wc_change" && allStatements && newChildren?.length) {
+      const bs = allStatements.balanceSheet;
+      const allYears = bs?.length && bs[0]?.values ? Object.keys(bs[0].values).sort() : [];
+      const histYears = allYears.filter((y: string) => y.endsWith("A"));
+      const firstHistYear = histYears[0] ?? null;
+      const yearIdx = allYears.indexOf(year);
+      const previousYear = yearIdx > 0 ? allYears[yearIdx - 1] : null;
+      const isProjection = year.endsWith("E");
+      let otherReclass = 0;
+      if (!isProjection && year !== firstHistYear && previousYear != null) {
+        const deltaWcBs = getDeltaWcBs(bs, year, previousYear);
+        const deltaWcCfo = newChildren
+          .filter((c: Row) => c.id !== "other_wc_reclass")
+          .reduce((s: number, c: Row) => s + (c.values?.[year] ?? 0), 0);
+        otherReclass = deltaWcCfo - deltaWcBs;
+      }
+      finalChildren = newChildren.map((c: Row) =>
+        c.id === "other_wc_reclass"
+          ? { ...c, values: { ...(c.values ?? {}), [year]: otherReclass } }
+          : c
+      );
+    }
+
     // CRITICAL: For input rows with children, compute the sum and store it FIRST
     // EXCEPT: rows with IS Build–only breakdowns keep their value so Historicals stays editable.
-    if (row.kind === "input" && newChildren && newChildren.length > 0) {
+    if (row.kind === "input" && finalChildren && finalChildren.length > 0) {
       if (parentIdsWithProjectionBreakdowns?.has(row.id)) {
-        return { ...row, children: newChildren };
+        return { ...row, children: finalChildren };
       }
       // Sum all children values (handles nested children recursively)
-      const sum = newChildren.reduce((total, child) => {
+      const sum = finalChildren.reduce((total, child) => {
         // If child has its own children, recursively sum them
         if (child.children && child.children.length > 0) {
           const childSum = child.children.reduce((childTotal, grandchild) => {
@@ -886,41 +918,36 @@ export function recomputeCalculations(
       return {
         ...row,
         values: newValues,
-        children: newChildren,
+        children: finalChildren,
       };
     }
 
-    // Special case: WC Change is input for all historical years, calculated for projection years
-    if (row.id === "wc_change" && allStatements) {
-      // Check if year is historical (ends with "A") or projection (ends with "E")
-      const isHistorical = year.endsWith("A");
+    // Special case: WC Change projection years - value is computed from BS (handled in computeFormula)
+    if (row.id === "wc_change" && allStatements && finalChildren?.length) {
       const isProjection = year.endsWith("E");
-      
       if (isProjection) {
-        // Projection years - calculate from BS changes and store it
         const calculatedValue = computeRowValue(row, year, statementRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
         const newValues = { ...(row.values ?? {}), [year]: calculatedValue };
         return {
           ...row,
           values: newValues,
-          children: newChildren,
+          children: finalChildren,
         };
       }
-      // Historical years (or unclear format) - keep as input (stored value)
     }
 
     // For input rows without children, just update children if they exist
     if (row.kind === "input" && row.children) {
       return {
         ...row,
-        children: newChildren,
+        children: finalChildren ?? newChildren,
       };
     }
 
     // For calc rows, we'll compute in second pass after all inputs are updated
     return {
       ...row,
-      children: newChildren,
+      children: finalChildren ?? newChildren,
     };
   });
 

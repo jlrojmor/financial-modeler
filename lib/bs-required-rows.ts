@@ -5,6 +5,7 @@
 
 import type { Row } from "@/types/finance";
 import type { BalanceSheetCategory } from "./bs-impact-rules";
+import { getCoreLockedBehavior } from "./bs-core-rows";
 
 export interface RequiredBsRowConfig {
   id: string;
@@ -52,7 +53,8 @@ export function getMissingRequiredBsRows(balanceSheet: Row[]): RequiredBsRowConf
 export function getRequiredRowTemplate(id: string): Row | null {
   const config = REQUIRED_BS_ROWS_CONFIG[id];
   if (!config) return null;
-  return {
+  const locked = getCoreLockedBehavior(id);
+  const row: Row = {
     id: config.id,
     label: config.label,
     kind: "input",
@@ -60,4 +62,11 @@ export function getRequiredRowTemplate(id: string): Row | null {
     values: {},
     children: [],
   };
+  if (locked) {
+    row.cashFlowBehavior = locked.cashFlowBehavior;
+    if (locked.scheduleOwner != null && locked.scheduleOwner !== "none") {
+      row.scheduleOwner = locked.scheduleOwner;
+    }
+  }
+  return row;
 }

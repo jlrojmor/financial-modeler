@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
-import { computeRowValue } from "@/lib/calculations";
+import { computeRowValue, getDeltaWcBs } from "@/lib/calculations";
 import {
   getWcScheduleItems,
   getDaysBaseForItemId,
@@ -12,6 +12,7 @@ import {
   computeHistoricDays,
   computeHistoricPct,
 } from "@/lib/working-capital-schedule";
+import { getRowsForCategory } from "@/lib/bs-category-mapper";
 import CollapsibleSection from "@/components/collapsible-section";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 import { getGuidanceReply, type GuidanceChatContext } from "@/lib/guidance-chat";
@@ -91,10 +92,90 @@ export default function WorkingCapitalScheduleCard() {
 
   const unit = meta?.currencyUnit ?? "millions";
   const [recommendationsOpen, setRecommendationsOpen] = useState(true);
+  const [wcReconOpen, setWcReconOpen] = useState(false);
   const [guidanceMessages, setGuidanceMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [guidanceInput, setGuidanceInput] = useState("");
   const [guidanceLoading, setGuidanceLoading] = useState(false);
   const guidanceContext: GuidanceChatContext = "wc_schedule";
+
+  // Historical WC reconciliation: ΔWC from BS (WC-tagged only) vs ΔWC from CFO (reported); Other WC / Reclass = difference
+  type ReconRow = { year: string; deltaWcBs: number; deltaWcCfo: number; deltaWcCfoMissing?: boolean; reclass: number };
+  const wcReconciliation = useMemo(() => {
+    if (!balanceSheet?.length || !cashFlow?.length || historicYears.length < 2) return null;
+    const wcRow = cashFlow.find((r) => r.id === "wc_change");
+    const wcChildIds = new Set((wcRow?.children ?? []).filter((c) => c.id !== "other_wc_reclass").map((c) => c.id));
+    const rows: ReconRow[] = [];
+    for (let i = 0; i < historicYears.length; i++) {
+      const y = historicYears[i];
+      const prevY = i > 0 ? historicYears[i - 1] : null;
+      const deltaWcBs = getDeltaWcBs(balanceSheet, y, prevY);
+      let deltaWcCfo: number | null = 0;
+      if (wcRow?.children?.length) {
+        const sum = wcRow.children
+          .filter((c) => c.id !== "other_wc_reclass")
+          .reduce((s, c) => s + (c.values?.[y] ?? 0), 0);
+        deltaWcCfo = sum;
+      } else if (wcRow?.values?.[y] != null) {
+        deltaWcCfo = wcRow.values[y];
+      } else {
+        deltaWcCfo = null;
+      }
+      // First historical year: no prior year, so no reconciliation; reclass = 0
+      const reclass =
+        i === 0 ? 0 : deltaWcCfo != null ? deltaWcCfo - deltaWcBs : 0;
+      rows.push({
+        year: y,
+        deltaWcBs,
+        deltaWcCfo: deltaWcCfo ?? 0,
+        deltaWcCfoMissing: deltaWcCfo === null,
+        reclass,
+      });
+    }
+    const caRows = getRowsForCategory(balanceSheet, "current_assets").filter(
+      (r) => r.id !== "cash" && !r.id.startsWith("total_") && r.cashFlowBehavior === "working_capital"
+    );
+    const clRows = getRowsForCategory(balanceSheet, "current_liabilities").filter(
+      (r) => r.id !== "st_debt" && !r.id.startsWith("total_") && r.cashFlowBehavior === "working_capital"
+    );
+    return { rows, wcChildIds, caRows, clRows };
+  }, [balanceSheet, cashFlow, historicYears]);
+
+  // Variance warning: years where |ΔWC_CFO - ΔWC_BS| exceeds threshold, plus largest-changing rows to review
+  const reconciliationVariance = useMemo(() => {
+    if (!wcReconciliation || !revenueByYear) return null;
+    const { rows, wcChildIds, caRows, clRows } = wcReconciliation;
+    const allCaCl = [...caRows, ...clRows];
+    const varianceYears: { year: string; reclass: number; threshold: number }[] = [];
+    const highlightsByYear: Record<string, { wcRows: { label: string; delta: number }[]; nonWcRows: { label: string; delta: number }[] }> = {};
+    const RECON_THRESHOLD_PCT = 0.01;
+    const RECON_THRESHOLD_MIN = 1000;
+    const TOP_N = 5;
+
+    for (let i = 1; i < historicYears.length; i++) {
+      const y = historicYears[i];
+      const prevY = historicYears[i - 1];
+      const rowData = rows.find((r) => r.year === y);
+      if (!rowData) continue;
+      const revenue = Math.abs(revenueByYear[y] ?? 0);
+      const threshold = Math.max(RECON_THRESHOLD_MIN, revenue * RECON_THRESHOLD_PCT);
+      if (Math.abs(rowData.reclass) <= threshold) continue;
+      varianceYears.push({ year: y, reclass: rowData.reclass, threshold });
+
+      const withDelta = allCaCl.map((r) => {
+        const v = r.values?.[y] ?? 0;
+        const prevV = r.values?.[prevY] ?? 0;
+        return { row: r, delta: v - prevV };
+      });
+      const wcTagged = withDelta.filter((x) => wcChildIds.has(x.row.id)).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, TOP_N);
+      const nonWcTagged = withDelta.filter((x) => !wcChildIds.has(x.row.id)).sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, TOP_N);
+      highlightsByYear[y] = {
+        wcRows: wcTagged.map((x) => ({ label: x.row.label, delta: x.delta })),
+        nonWcRows: nonWcTagged.map((x) => ({ label: x.row.label, delta: x.delta })),
+      };
+    }
+    if (varianceYears.length === 0) return null;
+    return { varianceYears, highlightsByYear };
+  }, [wcReconciliation, historicYears, revenueByYear]);
 
   if (wcItems.length === 0) return null;
 
@@ -419,9 +500,80 @@ export default function WorkingCapitalScheduleCard() {
         </div>
       )}
       {liabilities.length > 0 && (
-        <div>
+        <div className="mb-4">
           <h4 className="text-xs font-semibold text-orange-300 mb-2">Operating current liabilities</h4>
           <div className="space-y-2">{liabilities.map(renderItem)}</div>
+        </div>
+      )}
+
+      {/* Historical WC reconciliation (informational): ΔWC from BS vs ΔWC from CFO */}
+      {wcReconciliation && wcReconciliation.rows.length > 0 && (
+        <div className="mt-4 rounded-lg border border-slate-600 bg-slate-900/40 p-3">
+          {reconciliationVariance && reconciliationVariance.varianceYears.length > 0 && (
+            <div className="mb-3 rounded-md border border-amber-600/50 bg-amber-950/30 p-2">
+              <p className="text-xs font-semibold text-amber-200">
+                ⚠️ Reconciliation variance exceeds 1% of revenue in: {reconciliationVariance.varianceYears.map((v) => v.year).join(", ")}.
+              </p>
+              <p className="text-[11px] text-amber-200/90 mt-1">
+                Review largest-changing WC-tagged rows and non-WC CA/CL rows below for possible reclassifications.
+              </p>
+              {reconciliationVariance.varianceYears.slice(0, 3).map(({ year }) => {
+                const h = reconciliationVariance.highlightsByYear[year];
+                if (!h) return null;
+                return (
+                  <div key={year} className="mt-2 text-[11px] text-slate-300">
+                    <span className="font-medium text-slate-200">{year}:</span>{" "}
+                    WC: {h.wcRows.map((x) => x.label).join(", ") || "—"}
+                    {" · "}
+                    Non-WC CA/CL: {h.nonWcRows.map((x) => x.label).join(", ") || "—"}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setWcReconOpen((v) => !v)}
+            className="flex w-full items-center gap-2 text-left text-xs font-medium text-slate-300"
+          >
+            <span>{wcReconOpen ? "▾" : "▸"}</span>
+            Historical WC reconciliation (ΔWC BS vs CFO)
+          </button>
+          {wcReconOpen && (
+            <div className="mt-2 overflow-x-auto">
+              <table className="min-w-full border-collapse text-[11px] text-slate-200">
+                <thead>
+                  <tr className="border-b border-slate-600">
+                    <th className="px-2 py-1.5 text-left font-medium text-slate-400">Year</th>
+                    <th className="px-2 py-1.5 text-right font-medium text-slate-400">ΔWC (BS)</th>
+                    <th className="px-2 py-1.5 text-right font-medium text-slate-400">ΔWC (CFO)</th>
+                    <th className="px-2 py-1.5 text-right font-medium text-slate-400">Other WC / Reclass</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {wcReconciliation.rows.map((row) => (
+                    <tr key={row.year} className="border-b border-slate-700/50 last:border-0">
+                      <td className="px-2 py-1.5">{row.year}</td>
+                      <td className="px-2 py-1.5 text-right">{formatVal(row.deltaWcBs)}</td>
+                      <td className="px-2 py-1.5 text-right">
+                        {row.deltaWcCfoMissing ? (
+                          <span className="text-amber-400/90">Missing</span>
+                        ) : (
+                          formatVal(row.deltaWcCfo)
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 text-right text-slate-400">
+                        {row.deltaWcCfoMissing ? "—" : formatVal(row.reclass)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-[10px] text-slate-500 mt-2">
+                Historical CFO WC is used for reconciliation only. Forecast WC is driven by projected BS balances. Other WC / Reclass = ΔWC (CFO) − ΔWC (BS).
+              </p>
+            </div>
+          )}
         </div>
       )}
     </CollapsibleSection>

@@ -525,11 +525,11 @@ function StatementTable({
         const isBSCategorySubtotal = isBalanceSheet && isBalanceSheetSubtotal && !["total_assets", "total_liabilities", "total_liab_and_equity"].includes(row.id);
         
         return (
-          <>
+          <React.Fragment key={`stmt-row-${row.id}-${flatIndex}`}>
             {/* Section Header for Balance Sheet (Assets, Liabilities, Shareholders' Equity) */}
             {/* Section Header for Cash Flow Statement (Operating, Investing, Financing) */}
             {isSectionStart && currentSection && (
-              <tr key={`section-${currentSection}-${flatIndex}`} className="border-t-2 border-slate-600">
+              <tr className="border-t-2 border-slate-600">
                 <td colSpan={1 + years.length} className={`px-3 py-2.5 ${sectionColors[currentSection]?.bg || "bg-slate-900/50"}`}>
                   <button
                     type="button"
@@ -852,7 +852,7 @@ function StatementTable({
             })}
           </tr>
             )}
-          </>
+          </React.Fragment>
         );
       })}
 
@@ -971,6 +971,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const yearColClass = (base: string) => (y: string) =>
     [
       base,
+      "min-w-[88px]", // Keep year columns readable; prevents squashing when many years
       isProjectionYear(y) ? "bg-slate-800/60" : "!text-blue-400",
       isFirstProjectionYear(y) ? "border-l-2 border-amber-500/70" : "",
     ]
@@ -1572,10 +1573,10 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
 
       {/* Table - Scrollable */}
       <div className="flex-1 overflow-y-auto overflow-x-auto p-4">
-        <table className="w-full border-collapse text-xs">
+        <table className="w-full min-w-max border-collapse text-xs">
           <thead className="sticky top-0 bg-slate-950 z-10">
             <tr className="border-b border-slate-800">
-              <th className="w-[280px] px-3 py-2 text-left font-semibold text-slate-300">
+              <th className="min-w-[220px] w-[280px] px-3 py-2 text-left font-semibold text-slate-300">
                 Line Item
               </th>
               {years.map((y) => (
@@ -2347,7 +2348,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                         })}
                       </tr>
                       
-                      {/* Difference Row - only show if not balanced */}
+                      {/* Difference Row - only show when out of balance and not incomplete */}
                       {!allBalanced && (
                         <tr className="border-b-2 border-red-700/50 bg-red-950/20">
                           <td className="px-3 py-2 font-bold text-red-300">
@@ -2356,6 +2357,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                           {years.map((y) => {
                             const check = balanceCheck.find(b => b.year === y);
                             if (!check || check.balances) return <td key={y} className="px-3 py-2"></td>;
+                            if (check.incomplete) return <td key={y} className="px-3 py-2 text-right text-slate-500">—</td>;
                             return (
                               <td key={y} className="px-3 py-2 text-right font-bold text-red-200">
                                 {formatAccountingNumber(check.difference, meta.currencyUnit, showDecimals)}

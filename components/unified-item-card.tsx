@@ -31,6 +31,11 @@ interface UnifiedItemCardProps {
   onDragLeave?: () => void;
   onDrop?: (e: React.DragEvent) => void;
   dragOverId?: string | null; // ID of item being dragged over
+  /** BS only: optional cash flow treatment dropdown (WC/CFI/CFF/non-cash) */
+  cashFlowBehaviorDropdown?: {
+    value: Row["cashFlowBehavior"];
+    onChange: (behavior: "working_capital" | "investing" | "financing" | "non_cash") => void;
+  };
 }
 
 /**
@@ -69,6 +74,7 @@ export default function UnifiedItemCard({
   onDragLeave,
   onDrop,
   dragOverId = null,
+  cashFlowBehaviorDropdown,
 }: UnifiedItemCardProps) {
   const [isExpanded, setIsExpanded] = useState(true); // Start expanded so users can edit immediately
   const [isConfirmed, setIsConfirmed] = useState(false);

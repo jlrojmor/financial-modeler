@@ -10,6 +10,8 @@ import RevenueProjectionStep from "@/components/revenue-projection-step";
 import CollapsibleSection from "@/components/collapsible-section";
 import YearsEditor from "@/components/years-editor";
 import { checkBalanceSheetBalance } from "@/lib/calculations";
+import { getUnclassifiedNonCoreBsRows } from "@/lib/bs-core-rows";
+import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 
 export default function BuilderPanel() {
   const currentStepId = useModelStore((s) => s.currentStepId);
@@ -20,7 +22,8 @@ export default function BuilderPanel() {
   const continueToNextStep = useModelStore((s) => s.continueToNextStep);
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
-  
+  const currencyUnit = meta?.currencyUnit ?? "millions";
+
   const isCurrentStepComplete = completedStepIds.includes(currentStepId);
 
   // Check if balance sheet balances for historical years (only in historicals step)
@@ -41,8 +44,15 @@ export default function BuilderPanel() {
     return { isBalanced: allBalanced, hasData, checkResults };
   }, [currentStepId, balanceSheet, meta?.years?.historical]);
 
-  // Disable Continue if balance doesn't check in historicals step
-  const canContinue = isCurrentStepComplete && (currentStepId !== "historicals" || balanceCheck.isBalanced || !balanceCheck.hasData);
+  const unclassifiedCfRows = useMemo(() => {
+    if (currentStepId !== "bs_build" || !balanceSheet?.length) return [];
+    return getUnclassifiedNonCoreBsRows(balanceSheet);
+  }, [currentStepId, balanceSheet]);
+
+  // Disable Continue if balance doesn't check in historicals step, or BS Build has unclassified CF treatment rows
+  const canContinue = isCurrentStepComplete &&
+    (currentStepId !== "historicals" || balanceCheck.isBalanced || !balanceCheck.hasData) &&
+    (currentStepId !== "bs_build" || unclassifiedCfRows.length === 0);
 
   // Save button feedback state
   const [saveFeedback, setSaveFeedback] = useState<"idle" | "saving" | "saved">("idle");
@@ -143,6 +153,8 @@ export default function BuilderPanel() {
                   ? "Please save the current step first"
                   : currentStepId === "historicals" && !balanceCheck.isBalanced && balanceCheck.hasData
                   ? "Balance sheet must balance for all historical years before continuing"
+                  : currentStepId === "bs_build" && unclassifiedCfRows.length > 0
+                  ? "Classify cash flow treatment for all custom BS rows before continuing"
                   : undefined
               }
             >
@@ -152,6 +164,22 @@ export default function BuilderPanel() {
         </div>
 
         {/* Balance Check Warning for Historicals Step */}
+        {currentStepId === "bs_build" && unclassifiedCfRows.length > 0 && (
+          <div className="mt-3 rounded-md border border-amber-600/50 bg-amber-950/30 p-3">
+            <div className="flex items-start gap-2">
+              <span className="text-amber-400 text-sm">⚠️</span>
+              <div className="flex-1">
+                <p className="text-xs font-semibold text-amber-200">
+                  Classify cash flow treatment for custom rows
+                </p>
+                <p className="text-xs text-amber-200/90 mt-1">
+                  {unclassifiedCfRows.length} custom Balance Sheet row(s) need a cash flow treatment (Working Capital, Investing, Financing, or Non-cash). Use the &quot;Cash flow&quot; dropdown on each row or the CF Treatment Check section below.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {currentStepId === "historicals" && balanceCheck.hasData && !balanceCheck.isBalanced && (
           <div className="mt-3 rounded-md border border-red-600/50 bg-red-950/30 p-3">
             <div className="flex items-start gap-2">
@@ -166,10 +194,12 @@ export default function BuilderPanel() {
                 {balanceCheck.checkResults && (
                   <div className="mt-2 text-xs text-red-300/70">
                     {balanceCheck.checkResults
-                      .filter(b => !b.balances)
+                      .filter(b => !b.balances && !b.incomplete)
                       .map(b => {
-                        const diff = Math.abs(b.difference);
-                        return `• ${b.year}: Difference of ${diff.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                        const diffDisplay = storedToDisplay(Math.abs(b.difference), currencyUnit);
+                        const unitLabel = getUnitLabel(currencyUnit);
+                        const label = unitLabel ? ` ${unitLabel}` : "";
+                        return `• ${b.year}: Difference of ${diffDisplay.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${label}`;
                       })
                       .join(" | ")}
                   </div>

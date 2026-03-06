@@ -18,7 +18,16 @@ import {
   createCashFlowTemplate,
 } from "@/lib/statement-templates";
 import { getRowsForCategory } from "@/lib/bs-category-mapper";
-import { CAPEX_IB_DEFAULT_USEFUL_LIVES, isLegacyWrongUsefulLives } from "@/lib/capex-defaults";
+import { isCoreBsRow, getCoreLockedBehavior } from "@/lib/bs-core-rows";
+import { CAPEX_IB_DEFAULT_USEFUL_LIVES, isLegacyWrongUsefulLives, CAPEX_DEFAULT_BUCKET_IDS } from "@/lib/capex-defaults";
+import { getWcScheduleItems, computeWcProjectedBalances, type WcDriverState } from "@/lib/working-capital-schedule";
+import {
+  computeCapexDaSchedule,
+  computeCapexDaScheduleByBucket,
+  computeProjectedCapexByYear,
+} from "@/lib/capex-da-engine";
+import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
+import { displayToStored } from "@/lib/currency-utils";
 
 /**
  * Helpers
@@ -146,9 +155,8 @@ function uuid() {
 }
 
 /**
- * Ensure wc_change has one child per BS current asset (except cash) and current liability (except short-term debt).
- * Only includes items that exist in the Balance Sheet; respects wcExcludedIds (user-removed items stay excluded).
- * Does NOT preserve legacy/custom WC children that are no longer in BS — WC mirrors BS only.
+ * Ensure wc_change has one child per BS row that is (1) in CA/CL, (2) tagged working_capital, (3) not cash/st_debt.
+ * Only rows with cashFlowBehavior === "working_capital" are included; investing/financing/non_cash are never in WC schedule.
  */
 function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[], wcExcludedIds: Set<string> = new Set()): Row[] {
   if (balanceSheet.length === 0) return cashFlow;
@@ -161,13 +169,13 @@ function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[], wcExcl
     "total_current_assets",
     "total_current_liabilities",
   ]);
+  const isWcRow = (r: Row) =>
+    !excludeIds.has(r.id) &&
+    !r.id.startsWith("total") &&
+    r.cashFlowBehavior === "working_capital";
   const desired = [
-    ...currentAssets.filter(
-      (r) => !excludeIds.has(r.id) && !r.id.startsWith("total")
-    ),
-    ...currentLiabilities.filter(
-      (r) => !excludeIds.has(r.id) && !r.id.startsWith("total")
-    ),
+    ...currentAssets.filter(isWcRow),
+    ...currentLiabilities.filter(isWcRow),
   ];
   const desiredById = new Map(desired.map((r) => [r.id, r]));
   const desiredList = Array.from(desiredById.values()).filter((bs) => !wcExcludedIds.has(bs.id));
@@ -198,6 +206,20 @@ function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[], wcExcl
           values: {} as Record<string, number>,
         });
       }
+    }
+
+    // Other WC / Reclass: historical reconciliation bucket (ΔWC_CFO − ΔWC_BS); forecast = 0
+    const otherReclassId = "other_wc_reclass";
+    if (!existingById.has(otherReclassId)) {
+      newChildren.push({
+        id: otherReclassId,
+        label: "Other WC / Reclass",
+        kind: "input" as const,
+        valueType: "currency" as const,
+        values: {} as Record<string, number>,
+      });
+    } else {
+      newChildren.push(existingById.get(otherReclassId)!);
     }
 
     return { ...r, children: newChildren };
@@ -451,6 +473,9 @@ export type ModelActions = {
   /** Sync Working Capital change children from Balance Sheet (CA except cash, CL except short-term debt). */
   ensureWcChildrenFromBS: () => void;
 
+  /** BS Build: persist WC, PP&E, and Intangibles schedule projections into global balanceSheet (projection years only); then recompute CFS. */
+  applyBsBuildProjectionsToModel: () => void;
+
   /** Cash Flow builder: reorder top-level row (visual order only). */
   reorderCashFlowTopLevel: (fromIndex: number, toIndex: number) => void;
   /** Cash Flow builder: reorder children of wc_change. */
@@ -461,6 +486,8 @@ export type ModelActions = {
   moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number) => void;
   /** Balance Sheet builder: reorder items within a category (e.g., current_assets, fixed_assets). */
   reorderBalanceSheetCategory: (category: "current_assets" | "fixed_assets" | "current_liabilities" | "non_current_liabilities" | "equity", fromIndex: number, toIndex: number) => void;
+  /** Balance Sheet builder: set cash flow behavior for a row (WC/CFI/CFF/non-cash). */
+  setBalanceSheetRowCashFlowBehavior: (rowId: string, behavior: "working_capital" | "investing" | "financing" | "non_cash") => void;
   /** Income Statement builder: reorder children of a parent row (e.g., SG&A breakdowns). */
   reorderIncomeStatementChildren: (parentId: string, fromIndex: number, toIndex: number) => void;
   /** Income Statement builder: reorder top-level rows (e.g., Interest & Other items). */
@@ -2462,8 +2489,206 @@ export const useModelStore = create<ModelState & ModelActions>()(
         excluded
       );
       if (cashFlow === state.cashFlow) return state;
-      return { cashFlow };
+      // Step 3B: tag BS rows that are WC children with scheduleOwner=wc, cashFlowBehavior=working_capital
+      // Do not overwrite when row explicitly has scheduleOwner "none" (custom items)
+      const wcRow = cashFlow.find((r) => r.id === "wc_change");
+      const wcChildIds = new Set((wcRow?.children ?? []).map((c) => c.id));
+      const balanceSheet = state.balanceSheet.map((r) => {
+        if (!wcChildIds.has(r.id)) return r;
+        if (r.scheduleOwner === "none") return r;
+        return {
+          ...r,
+          scheduleOwner: r.scheduleOwner ?? "wc",
+          cashFlowBehavior: r.cashFlowBehavior ?? "working_capital",
+        };
+      });
+      return { cashFlow, balanceSheet };
     });
+  },
+
+  applyBsBuildProjectionsToModel: () => {
+    const state = get();
+    const projectionYears = state.meta?.years?.projection ?? [];
+    if (projectionYears.length === 0) return;
+
+    const { incomeStatement, balanceSheet, cashFlow, meta, sbcBreakdowns, danaBreakdowns } = state;
+    const allYears = [...(meta?.years?.historical ?? []), ...projectionYears];
+    const allStatements = { incomeStatement, balanceSheet, cashFlow };
+
+    // Revenue and COGS by year (for WC and Capex/Intangibles engines)
+    const revenueByYear: Record<string, number> = {};
+    const cogsByYear: Record<string, number> = {};
+    const revRow = incomeStatement.find((r) => r.id === "rev");
+    const cogsRow = incomeStatement.find((r) => r.id === "cogs");
+    for (const year of allYears) {
+      revenueByYear[year] = revRow
+        ? computeRowValue(revRow, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns)
+        : 0;
+      cogsByYear[year] = cogsRow
+        ? computeRowValue(cogsRow, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns)
+        : 0;
+    }
+
+    // WC projected balances
+    const wcScheduleItems = getWcScheduleItems(cashFlow, balanceSheet);
+    const balanceByItemByYear: Record<string, Record<string, number>> = {};
+    for (const item of wcScheduleItems) {
+      const row = balanceSheet.find((r) => r.id === item.id);
+      balanceByItemByYear[item.id] = {};
+      for (const y of allYears) {
+        balanceByItemByYear[item.id][y] = row?.values?.[y] ?? 0;
+      }
+    }
+    const wcDriverState: WcDriverState = {
+      wcDriverTypeByItemId: state.wcDriverTypeByItemId ?? {},
+      wcDaysByItemId: state.wcDaysByItemId ?? {},
+      wcDaysByItemIdByYear: state.wcDaysByItemIdByYear ?? {},
+      wcDaysBaseByItemId: state.wcDaysBaseByItemId ?? {},
+      wcPctBaseByItemId: state.wcPctBaseByItemId ?? {},
+      wcPctByItemId: state.wcPctByItemId ?? {},
+      wcPctByItemIdByYear: state.wcPctByItemIdByYear ?? {},
+    };
+    const wcProjected =
+      wcScheduleItems.length > 0
+        ? computeWcProjectedBalances(
+            wcScheduleItems.map((i) => i.id),
+            projectionYears,
+            wcDriverState,
+            revenueByYear,
+            cogsByYear,
+            balanceByItemByYear
+          )
+        : {};
+
+    // Capex: last historical PP&E and Capex
+    const histYears = meta?.years?.historical ?? [];
+    const lastHistYear = histYears.length > 0 ? histYears[histYears.length - 1] : null;
+    const lastHistPPE = lastHistYear ? (balanceSheet.find((r) => r.id === "ppe")?.values?.[lastHistYear] ?? 0) : 0;
+    const lastHistCapex = lastHistYear ? (cashFlow.find((r) => r.id === "capex")?.values?.[lastHistYear] ?? 0) : 0;
+    const revenueByYearProj: Record<string, number> = {};
+    for (const y of projectionYears) revenueByYearProj[y] = revenueByYear[y] ?? 0;
+    const effectiveUsefulLife =
+      state.capexSplitByBucket && state.ppeUsefulLifeByBucket
+        ? (() => {
+            const allBucketIds = [...CAPEX_DEFAULT_BUCKET_IDS, ...(state.capexCustomBucketIds ?? [])];
+            const lives = allBucketIds
+              .map((id) => state.ppeUsefulLifeByBucket?.[id])
+              .filter((n): n is number => n != null && n > 0);
+            return lives.length > 0 ? lives.reduce((a, b) => a + b, 0) / lives.length : state.ppeUsefulLifeSingle;
+          })()
+        : state.ppeUsefulLifeSingle;
+    const capexEngineInput = {
+      projectionYears,
+      revenueByYear: revenueByYearProj,
+      lastHistPPE,
+      lastHistCapex,
+      method: state.capexForecastMethod,
+      pctRevenue: state.capexPctRevenue,
+      manualByYear: state.capexManualByYear ?? {},
+      growthPct: state.capexGrowthPct,
+      timingConvention: state.capexTimingConvention,
+      usefulLifeYears: effectiveUsefulLife,
+    };
+    const totalCapexByYear = computeProjectedCapexByYear(capexEngineInput);
+    const capexScheduleOutput = state.capexSplitByBucket
+      ? (() => {
+          const allBucketIds = [...CAPEX_DEFAULT_BUCKET_IDS, ...(state.capexCustomBucketIds ?? [])];
+          const landDisplay = lastHistYear && state.capexHelperPpeByBucketByYear?.["cap_b1"]?.[lastHistYear];
+          const initialLand =
+            landDisplay != null && typeof landDisplay === "number" && !Number.isNaN(landDisplay)
+              ? displayToStored(landDisplay, state.meta?.currencyUnit ?? "millions")
+              : 0;
+          return computeCapexDaScheduleByBucket({
+            projectionYears,
+            totalCapexByYear,
+            lastHistPPE,
+            timingConvention: state.capexTimingConvention,
+            bucketIds: allBucketIds,
+            allocationPct: state.capexBucketAllocationPct ?? {},
+            usefulLifeByBucket: state.ppeUsefulLifeByBucket ?? {},
+            initialLandBalance: initialLand,
+          });
+        })()
+      : computeCapexDaSchedule(capexEngineInput);
+    const ppeByYear: Record<string, number> =
+      state.capexSplitByBucket && capexScheduleOutput && "totalPpeByYear" in capexScheduleOutput
+        ? (capexScheduleOutput as { totalPpeByYear: Record<string, number> }).totalPpeByYear
+        : (capexScheduleOutput as { ppeByYear: Record<string, number> })?.ppeByYear ?? {};
+
+    // Intangibles
+    const lastHistIntangibles =
+      lastHistYear && balanceSheet.find((r) => r.id === "intangible_assets")
+        ? (balanceSheet.find((r) => r.id === "intangible_assets")!.values?.[lastHistYear] ?? 0)
+        : 0;
+    const intangiblesOutput =
+      state.capexModelIntangibles && state.intangiblesAmortizationLifeYears > 0
+        ? computeIntangiblesAmortSchedule({
+            projectionYears,
+            lastHistIntangibles,
+            additionsMethod: state.intangiblesForecastMethod,
+            pctRevenue: state.intangiblesPctRevenue,
+            manualByYear: state.intangiblesManualByYear ?? {},
+            pctOfCapex: state.intangiblesPctOfCapex,
+            capexByYear: totalCapexByYear,
+            revenueByYear: revenueByYearProj,
+            lifeYears: state.intangiblesAmortizationLifeYears,
+            timingConvention: state.capexTimingConvention,
+          })
+        : null;
+    const intangiblesEndByYear = intangiblesOutput?.endByYear ?? {};
+
+    // Build updated balanceSheet: only projection years, never touch cash or historical
+    const wcItemIds = new Set(wcScheduleItems.map((i) => i.id));
+    const idsToWrite = new Set([...wcItemIds, "ppe", "intangible_assets"]);
+    let newBS = balanceSheet.map((row) => {
+      if (!idsToWrite.has(row.id)) return row;
+      const newValues = { ...(row.values ?? {}) };
+      for (const y of projectionYears) {
+        if (row.id === "cash") continue;
+        if (wcItemIds.has(row.id)) {
+          const v = wcProjected[row.id]?.[y];
+          if (v !== undefined) newValues[y] = v;
+        } else if (row.id === "ppe") {
+          const v = ppeByYear[y];
+          if (v !== undefined) newValues[y] = v;
+        } else if (row.id === "intangible_assets") {
+          const v = intangiblesEndByYear[y];
+          if (v !== undefined) newValues[y] = v;
+        }
+      }
+      // Step 3C: tag schedule-owned rows when applying
+      if (row.id === "ppe") {
+        return {
+          ...row,
+          values: newValues,
+          scheduleOwner: row.scheduleOwner ?? "capex",
+          cashFlowBehavior: row.cashFlowBehavior ?? "investing",
+        };
+      }
+      if (row.id === "intangible_assets") {
+        return {
+          ...row,
+          values: newValues,
+          scheduleOwner: row.scheduleOwner ?? "intangibles",
+          cashFlowBehavior: row.cashFlowBehavior ?? "investing",
+        };
+      }
+      return { ...row, values: newValues };
+    });
+
+    // Recompute balanceSheet totals for each projection year
+    for (const year of projectionYears) {
+      const st = { ...allStatements, balanceSheet: newBS };
+      newBS = recomputeCalculations(newBS, year, newBS, st, sbcBreakdowns, danaBreakdowns);
+    }
+    // Recompute cashFlow for each projection year (wc_change and operating_cf use new BS)
+    let newCF = cashFlow;
+    for (const year of projectionYears) {
+      const st = { incomeStatement, balanceSheet: newBS, cashFlow: newCF };
+      newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns);
+    }
+
+    set({ balanceSheet: newBS, cashFlow: newCF });
   },
 
   reorderCashFlowTopLevel: (fromIndex, toIndex) => {
@@ -2619,6 +2844,54 @@ export const useModelStore = create<ModelState & ModelActions>()(
       
       return { balanceSheet: newBalanceSheet };
     });
+  },
+
+  setBalanceSheetRowCashFlowBehavior: (rowId, behavior) => {
+    const state = get();
+    if (isCoreBsRow(rowId)) {
+      const locked = getCoreLockedBehavior(rowId);
+      if (locked) {
+        set((s) => ({
+          balanceSheet: s.balanceSheet.map((r) =>
+            r.id === rowId
+              ? { ...r, cashFlowBehavior: locked.cashFlowBehavior, ...(locked.scheduleOwner != null && { scheduleOwner: locked.scheduleOwner }) }
+              : r
+          ),
+        }));
+      }
+      get().ensureWcChildrenFromBS();
+      const next = get();
+      const allYears = [
+        ...(next.meta?.years?.historical ?? []),
+        ...(next.meta?.years?.projection ?? []),
+      ];
+      const { incomeStatement, balanceSheet, cashFlow, sbcBreakdowns, danaBreakdowns } = next;
+      let newCF = cashFlow;
+      allYears.forEach((year) => {
+        const allStatements = { incomeStatement, balanceSheet, cashFlow: newCF };
+        newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns);
+      });
+      if (newCF !== cashFlow) set({ cashFlow: newCF });
+      return;
+    }
+    set((s) => ({
+      balanceSheet: s.balanceSheet.map((r) =>
+        r.id === rowId ? { ...r, cashFlowBehavior: behavior } : r
+      ),
+    }));
+    get().ensureWcChildrenFromBS();
+    const next = get();
+    const allYears = [
+      ...(next.meta?.years?.historical ?? []),
+      ...(next.meta?.years?.projection ?? []),
+    ];
+    const { incomeStatement, balanceSheet, cashFlow, sbcBreakdowns, danaBreakdowns } = next;
+    let newCF = cashFlow;
+    allYears.forEach((year) => {
+      const allStatements = { incomeStatement, balanceSheet, cashFlow: newCF };
+      newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns);
+    });
+    if (newCF !== cashFlow) set({ cashFlow: newCF });
   },
 
   reorderIncomeStatementChildren: (parentId, fromIndex, toIndex) => {

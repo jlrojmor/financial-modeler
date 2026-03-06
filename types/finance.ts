@@ -24,6 +24,10 @@ export interface Row {
     isItemId: string; // ID of the IS line item this links to
     description: string; // Description of the IS link (stored for memory)
   };
+  /** Optional: how this BS row flows to Cash Flow (CFO/CFI/CFF/non-cash). "unclassified" = needs user to set. */
+  cashFlowBehavior?: "working_capital" | "investing" | "financing" | "non_cash" | "unclassified";
+  /** Optional: which schedule owns this row's projections (wc/capex/intangibles/debt). */
+  scheduleOwner?: "wc" | "capex" | "intangibles" | "debt" | "none";
 }
 
 export type WizardStepId =

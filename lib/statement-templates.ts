@@ -166,6 +166,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "non_cash",
     },
     {
       id: "ar",
@@ -174,6 +175,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "working_capital",
     },
     {
       id: "inventory",
@@ -182,6 +184,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "working_capital",
     },
     {
       id: "other_ca",
@@ -190,6 +193,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "working_capital",
     },
     {
       id: "total_current_assets",
@@ -207,6 +211,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "investing",
     },
     {
       id: "intangible_assets",
@@ -215,6 +220,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "investing",
     },
     {
       id: "goodwill",
@@ -223,6 +229,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "non_cash",
     },
     {
       id: "other_assets",
@@ -231,6 +238,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "non_cash",
     },
     {
       id: "total_fixed_assets",
@@ -256,6 +264,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "working_capital",
     },
     {
       id: "accrued_liabilities",
@@ -264,6 +273,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "working_capital",
     },
     {
       id: "deferred_revenue",
@@ -272,6 +282,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "working_capital",
     },
     {
       id: "st_debt",
@@ -280,6 +291,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "financing",
     },
     {
       id: "other_cl",
@@ -288,6 +300,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "working_capital",
     },
     {
       id: "total_current_liabilities",
@@ -305,6 +318,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "financing",
     },
     {
       id: "other_liab",
@@ -313,6 +327,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "non_cash",
     },
     {
       id: "total_non_current_liabilities",
@@ -338,6 +353,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "financing",
     },
     {
       id: "apic",
@@ -346,6 +362,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "financing",
     },
     {
       id: "treasury_stock",
@@ -354,6 +371,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "financing",
     },
     {
       id: "retained_earnings",
@@ -362,6 +380,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "non_cash",
     },
     {
       id: "other_equity",
@@ -370,6 +389,7 @@ export function createBalanceSheetTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cashFlowBehavior: "non_cash",
     },
     {
       id: "total_equity",

@@ -6,8 +6,10 @@ import type { Row } from "@/types/finance";
 import { findGlossaryItem } from "@/lib/financial-glossary";
 import { getCommonBSItems, filterAlreadyAdded } from "@/lib/common-suggestions";
 import { suggestBestMatch, validateConceptForStatement } from "@/lib/ai-item-matcher";
-import { getRowsForCategory, getInsertionIndexForCategory } from "@/lib/bs-category-mapper";
+import { getRowsForCategory, getInsertionIndexForCategory, getBSCategoryForRow } from "@/lib/bs-category-mapper";
 import { getMissingRequiredBsRows, getRequiredRowTemplate } from "@/lib/bs-required-rows";
+import { isCoreBsRow, getUnclassifiedNonCoreBsRows } from "@/lib/bs-core-rows";
+import { suggestCashFlowBehaviorFromLabel } from "@/lib/bs-cf-heuristic";
 import type { BalanceSheetCategory } from "@/lib/bs-impact-rules";
 import { getSuggestedTreatment } from "@/lib/financial-terms-knowledge";
 import UnifiedItemCard from "@/components/unified-item-card";
@@ -20,6 +22,30 @@ import CapexDaScheduleCard from "@/components/capex-da-schedule-card";
 // UUID helper
 function uuid() {
   return `id_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/** Resolve cash flow behavior: glossary section first, then keyword heuristic, else unclassified. */
+function resolveCashFlowBehaviorForNewRow(
+  label: string,
+  cfsSection?: string
+): "working_capital" | "investing" | "financing" | "non_cash" | "unclassified" {
+  const sectionMap: Record<string, "operating" | "investing" | "financing"> = {
+    CFO: "operating",
+    CFI: "investing",
+    CFF: "financing",
+  };
+  const section = cfsSection ? sectionMap[cfsSection] : undefined;
+  if (section) {
+    return section === "operating" ? "non_cash" : section === "investing" ? "investing" : "financing";
+  }
+  const heuristic = suggestCashFlowBehaviorFromLabel(label);
+  return heuristic ?? "unclassified";
+}
+
+function categoryToSide(cat: string): "asset" | "liability" | "equity" {
+  if (cat === "current_assets" || cat === "fixed_assets") return "asset";
+  if (cat === "current_liabilities" || cat === "non_current_liabilities") return "liability";
+  return "equity";
 }
 
 // Extra current-asset suggestions (not all may be in glossary)
@@ -101,7 +127,9 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
   const insertRow = useModelStore((s) => s.insertRow);
   const removeRow = useModelStore((s) => s.removeRow);
   const reorderBalanceSheetCategory = useModelStore((s) => s.reorderBalanceSheetCategory);
-  
+  const applyBsBuildProjectionsToModel = useModelStore((s) => s.applyBsBuildProjectionsToModel);
+  const setBalanceSheetRowCashFlowBehavior = useModelStore((s) => s.setBalanceSheetRowCashFlowBehavior);
+
   const years = useMemo(() => {
     return meta?.years?.historical ?? [];
   }, [meta]);
@@ -133,8 +161,12 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
   const [newEquityLabel, setNewEquityLabel] = useState("");
   const [equityMatchResult, setEquityMatchResult] = useState<any>(null);
   const [equityMatching, setEquityMatching] = useState(false);
-  
+  const [aiSuggestions, setAiSuggestions] = useState<Record<string, { recommendation: "working_capital" | "investing" | "financing" | "non_cash"; confidence: number; reason: string; alternatives?: string[]; applied?: boolean }>>({});
+  const [aiClassifyLoading, setAiClassifyLoading] = useState(false);
+  const [aiSuggestLoadingRowId, setAiSuggestLoadingRowId] = useState<string | null>(null);
+
   const isLocked = useModelStore((s) => s.sectionLocks["balance_sheet"] ?? false);
+  const incomeStatement = useModelStore((s) => s.incomeStatement);
   
   // Get common suggestions by category
   const commonSuggestions = useMemo(() => {
@@ -213,27 +245,29 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       children: [],
     };
     
-    // Add CFS link if item has one (map glossary CFSSection to Row section type)
     const glossaryItem = findGlossaryItem(item.concept);
     const cfsSection = glossaryItem?.cfsSection;
-    const sectionMap: Record<string, "operating" | "investing" | "financing"> = {
-      CFO: "operating",
-      CFI: "investing",
-      CFF: "financing",
-    };
-    const section = cfsSection ? sectionMap[cfsSection] : undefined;
-    if (section) {
-      newRow.cfsLink = {
-        section,
-        cfsItemId: newRow.id,
-        impact: "positive", // Default, can be refined
-        description: glossaryItem!.description,
+    if (cfsSection && glossaryItem) {
+      const sectionMap: Record<string, "operating" | "investing" | "financing"> = {
+        CFO: "operating",
+        CFI: "investing",
+        CFF: "financing",
       };
+      const section = sectionMap[cfsSection];
+      if (section) {
+        newRow.cfsLink = {
+          section,
+          cfsItemId: newRow.id,
+          impact: "positive",
+          description: glossaryItem.description,
+        };
+      }
     }
-    
+    newRow.scheduleOwner = "none";
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(item.concept, cfsSection ?? undefined);
     insertRow("balanceSheet", insertIndex, newRow);
   };
-  
+
   const handleAddCustom = async () => {
     const trimmed = newItemLabel.trim();
     if (!trimmed || !selectedCategory) return;
@@ -254,7 +288,6 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       children: [],
     };
     
-    // Add CFS link if matched item has one
     if (matchResult?.matchedConcept) {
       const glossaryItem = matchResult.matchedConcept;
       const cfsToRowSection: Record<string, "operating" | "investing" | "financing"> = {
@@ -272,7 +305,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         };
       }
     }
-    
+    newRow.scheduleOwner = "none";
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, matchResult?.matchedConcept?.cfsSection);
     insertRow("balanceSheet", insertIndex, newRow);
     setNewItemLabel("");
     setShowAddDialog(false);
@@ -280,11 +314,178 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
     setValidationError(null);
     setMatchResult(null);
   };
-  
+
+  type CFClassifyItemInput = {
+    rowId: string;
+    label: string;
+    bsCategory: string;
+    side: "asset" | "liability" | "equity";
+    historicalValues: Record<string, number>;
+    revenueByYear?: Record<string, number>;
+    deltaPatterns?: string;
+    glossaryMatch?: string;
+    currentCashFlowBehavior?: string | null;
+  };
+
+  function buildCfClassifyPayload(rows: Row[]): CFClassifyItemInput[] {
+    const state = useModelStore.getState();
+    const bs = state.balanceSheet ?? [];
+    const hist = state.meta?.years?.historical ?? [];
+    const revRow = state.incomeStatement?.find((r) => r.id === "rev");
+    const allStatements = {
+      incomeStatement: state.incomeStatement ?? [],
+      balanceSheet: bs,
+      cashFlow: state.cashFlow ?? [],
+    };
+    const revenueByYear: Record<string, number> = {};
+    hist.forEach((y) => {
+      try {
+        revenueByYear[y] = revRow ? computeRowValue(revRow, y, state.incomeStatement ?? [], state.incomeStatement ?? [], allStatements) : 0;
+      } catch {
+        revenueByYear[y] = 0;
+      }
+    });
+    return rows.map((r) => {
+      const idx = bs.findIndex((x) => x.id === r.id);
+      const cat = getBSCategoryForRow(r.id, bs, idx) ?? "";
+      const values: Record<string, number> = {};
+      hist.forEach((y) => { values[y] = r.values?.[y] ?? 0; });
+      const deltas = hist.length >= 2
+        ? hist.slice(1).map((y, i) => (r.values?.[y] ?? 0) - (r.values?.[hist[i]] ?? 0)).join(", ")
+        : "";
+      const gloss = findGlossaryItem(r.label);
+      return {
+        rowId: r.id,
+        label: r.label,
+        bsCategory: cat,
+        side: categoryToSide(cat),
+        historicalValues: values,
+        revenueByYear,
+        deltaPatterns: deltas,
+        glossaryMatch: gloss?.cfsSection ?? gloss?.description?.slice(0, 80),
+        currentCashFlowBehavior: r.cashFlowBehavior ?? null,
+      };
+    });
+  }
+
+  async function runCfClassify(rows: Row[]): Promise<{ rowId: string; recommendation: "working_capital" | "investing" | "financing" | "non_cash"; confidence: number; reason: string; alternatives?: string[] }[]> {
+    const payload = buildCfClassifyPayload(rows);
+    try {
+      const res = await fetch("/api/ai/cf-classify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: payload }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.suggestions) && data.suggestions.length > 0) {
+        return data.suggestions;
+      }
+    } catch {
+      // fallback below
+    }
+    return rows.map((r) => {
+      const rec = suggestCashFlowBehaviorFromLabel(r.label);
+      return {
+        rowId: r.id,
+        recommendation: rec ?? "non_cash",
+        confidence: 0,
+        reason: "Heuristic fallback (AI unavailable or failed). Please review.",
+      };
+    });
+  }
+
+  const handleAiClassifyUnclassified = async () => {
+    const unclassified = getUnclassifiedNonCoreBsRows(balanceSheet ?? []);
+    if (unclassified.length === 0) return;
+    setAiClassifyLoading(true);
+    try {
+      const suggestions = await runCfClassify(unclassified);
+      const next: typeof aiSuggestions = {};
+      suggestions.forEach((s) => {
+        next[s.rowId] = {
+          recommendation: s.recommendation,
+          confidence: s.confidence,
+          reason: s.reason,
+          alternatives: s.alternatives,
+          applied: s.confidence >= 0.75,
+        };
+        if (s.confidence >= 0.75) {
+          setBalanceSheetRowCashFlowBehavior(s.rowId, s.recommendation);
+        }
+      });
+      setAiSuggestions((prev) => ({ ...prev, ...next }));
+    } finally {
+      setAiClassifyLoading(false);
+    }
+  };
+
+  const handleAiSuggestRow = async (row: Row) => {
+    if (row.kind !== "input" || isCoreBsRow(row.id) || (row.scheduleOwner ?? "none") !== "none") return;
+    setAiSuggestLoadingRowId(row.id);
+    try {
+      const suggestions = await runCfClassify([row]);
+      const s = suggestions[0];
+      if (!s) return;
+      setAiSuggestions((prev) => ({ ...prev, [s.rowId]: { recommendation: s.recommendation, confidence: s.confidence, reason: s.reason, alternatives: s.alternatives, applied: s.confidence >= 0.75 } }));
+      if (s.confidence >= 0.75) {
+        setBalanceSheetRowCashFlowBehavior(row.id, s.recommendation);
+      }
+    } finally {
+      setAiSuggestLoadingRowId(null);
+    }
+  };
+
   const protectedTotalRows = [
     "total_current_assets", "total_fixed_assets", "total_assets", "total_current_liabilities",
     "total_non_current_liabilities", "total_liabilities", "total_equity", "total_liab_and_equity",
   ];
+
+  type CashFlowBehavior = "working_capital" | "investing" | "financing" | "non_cash" | "unclassified";
+  const renderCashFlowTreatmentDropdown = (row: Row) => {
+    if (row.kind !== "input") return null;
+    if (isCoreBsRow(row.id)) return null;
+    const owner = row.scheduleOwner ?? "none";
+    if (owner !== "none") return null;
+    const value = (row.cashFlowBehavior ?? "unclassified") as CashFlowBehavior;
+    const suggestion = aiSuggestions[row.id];
+    const loading = aiSuggestLoadingRowId === row.id;
+    return (
+      <div className="mt-1.5 pl-2 border-l-2 border-slate-600 space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-[10px] text-slate-500">Cash flow:</label>
+          <select
+            value={value}
+            onChange={(e) => setBalanceSheetRowCashFlowBehavior(row.id, e.target.value as Exclude<CashFlowBehavior, "unclassified">)}
+            className="text-[11px] rounded border border-slate-600 bg-slate-800 text-slate-200 px-1.5 py-0.5"
+          >
+            <option value="unclassified" disabled>— Select treatment —</option>
+            <option value="working_capital">Working Capital (CFO)</option>
+            <option value="investing">Investing (CFI)</option>
+            <option value="financing">Financing (CFF)</option>
+            <option value="non_cash">Non-cash / No CF impact</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => handleAiSuggestRow(row)}
+            disabled={loading}
+            className="text-[10px] rounded border border-slate-500 bg-slate-700 text-slate-200 px-1.5 py-0.5 hover:bg-slate-600 disabled:opacity-50"
+          >
+            {loading ? "…" : "Suggest (AI)"}
+          </button>
+        </div>
+        {suggestion && (
+          <div className="text-[10px]">
+            {suggestion.applied || suggestion.confidence >= 0.75 ? (
+              <span className="text-emerald-400">Suggested by AI</span>
+            ) : (
+              <span className="text-amber-400">Needs review</span>
+            )}
+            {suggestion.reason && <span className="text-slate-500 ml-1">— {suggestion.reason}</span>}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const handleRemoveItem = (rowId: string) => {
     if (protectedTotalRows.includes(rowId)) return;
@@ -465,6 +666,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         };
       }
     }
+    newRow.scheduleOwner = "none";
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, caMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
     insertRow("balanceSheet", insertIndex, newRow);
     setNewCALabel("");
     setShowAddCADialog(false);
@@ -543,6 +746,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         };
       }
     }
+    newRow.scheduleOwner = "none";
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, nclMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
     insertRow("balanceSheet", insertIndex, newRow);
     setNewNCLLabel("");
     setShowAddNCLDialog(false);
@@ -595,6 +800,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         };
       }
     }
+    newRow.scheduleOwner = "none";
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, equityMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
     insertRow("balanceSheet", insertIndex, newRow);
     setNewEquityLabel("");
     setShowAddEquityDialog(false);
@@ -634,6 +841,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         };
       }
     }
+    newRow.scheduleOwner = "none";
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, clMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
     insertRow("balanceSheet", insertIndex, newRow);
     setNewCLLabel("");
     setShowAddCLDialog(false);
@@ -673,6 +882,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         };
       }
     }
+    newRow.scheduleOwner = "none";
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, faMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
     insertRow("balanceSheet", insertIndex, newRow);
     setNewFALabel("");
     setShowAddFADialog(false);
@@ -849,6 +1060,68 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         )}
         {!isHistoricalsStep && (
           <>
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+              <span className="text-xs text-slate-400">
+                Forecasts are preview-only until applied. CFS (e.g. WC change, operating CF) will use applied values.
+              </span>
+              <button
+                type="button"
+                onClick={() => applyBsBuildProjectionsToModel()}
+                className="px-4 py-2 rounded-md bg-emerald-700 text-emerald-100 text-sm font-medium hover:bg-emerald-600 transition-colors"
+              >
+                Apply Forecasts to Model
+              </button>
+            </div>
+
+            {/* CF Treatment Check: summary + unclassified rows with inline dropdown */}
+            {(() => {
+              const unclassified = getUnclassifiedNonCoreBsRows(balanceSheet ?? []);
+              const taggableTotal = (balanceSheet ?? []).filter(
+                (r) => r.kind === "input" && !isCoreBsRow(r.id) && (r.scheduleOwner ?? "none") === "none"
+              ).length;
+              const classifiedCount = taggableTotal - unclassified.length;
+              if (taggableTotal === 0) return null;
+              return (
+                <CollapsibleSection
+                  sectionId="bs_cf_treatment_check"
+                  title="CF Treatment Check"
+                  description="Classify cash flow treatment for custom Balance Sheet rows."
+                  colorClass="amber"
+                  defaultExpanded={unclassified.length > 0}
+                >
+                  <p className="text-xs text-slate-400 mb-2">
+                    {classifiedCount} classified, {unclassified.length} unclassified (custom rows must have a treatment to continue).
+                  </p>
+                  {unclassified.length > 0 && (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2 mb-2">
+                        <button
+                          type="button"
+                          onClick={handleAiClassifyUnclassified}
+                          disabled={aiClassifyLoading}
+                          className="rounded-md border border-amber-600 bg-amber-900/50 px-2 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-800/50 disabled:opacity-50"
+                        >
+                          {aiClassifyLoading ? "Classifying…" : "Auto-classify unclassified items (AI)"}
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        <p className="text-[11px] font-medium text-amber-200">Rows needing classification:</p>
+                        {unclassified.map((row) => (
+                        <div
+                          key={row.id}
+                          className="flex flex-wrap items-center gap-2 rounded-md border border-amber-700/40 bg-amber-950/20 p-2"
+                        >
+                          <span className="text-sm text-slate-200">{row.label}</span>
+                          {renderCashFlowTreatmentDropdown(row)}
+                        </div>
+                      ))}
+                      </div>
+                    </>
+                  )}
+                </CollapsibleSection>
+              );
+            })()}
+
             <WorkingCapitalScheduleCard />
             <CapexDaScheduleCard />
           </>
@@ -927,6 +1200,7 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       }}
                       dragOverId={dragOverId}
                     />
+                    {renderCashFlowTreatmentDropdown(row)}
                   </div>
                 );
               })}
@@ -1095,6 +1369,7 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       }}
                       dragOverId={dragOverId}
                     />
+                    {renderCashFlowTreatmentDropdown(row)}
                   </div>
                 );
               })}
@@ -1268,6 +1543,7 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       }}
                       dragOverId={dragOverId}
                     />
+                    {renderCashFlowTreatmentDropdown(row)}
                   </div>
                 );
               })}
@@ -1436,6 +1712,7 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       }}
                       dragOverId={dragOverId}
                     />
+                    {renderCashFlowTreatmentDropdown(row)}
                   </div>
                 );
               })}
@@ -1608,6 +1885,7 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       }}
                       dragOverId={dragOverId}
                     />
+                    {renderCashFlowTreatmentDropdown(row)}
                   </div>
                 );
               })}

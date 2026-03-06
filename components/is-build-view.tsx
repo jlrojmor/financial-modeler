@@ -6,6 +6,7 @@ import type { Row } from "@/types/finance";
 import type { RevenueProjectionMethod, RevenueProjectionInputs } from "@/types/revenue-projection";
 import { formatCurrencyDisplay, displayToStored, storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 import { computeRowValue } from "@/lib/calculations";
+import { findRowInTree } from "@/lib/row-utils";
 import CollapsibleSection from "@/components/collapsible-section";
 import RevenueForecastInputs from "@/components/revenue-forecast-inputs";
 import RevenueBreakdownAllocation from "@/components/revenue-breakdown-allocation";
@@ -172,10 +173,10 @@ export default function ISBuildView() {
   const config = revenueProjectionConfig ?? { items: {}, breakdowns: {} };
 
   // COGS: income statement rows for Gross Profit / Gross Margin; Total COGS is computed from revenue × % per line
-  const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-  const grossProfitRow = incomeStatement.find((r) => r.id === "gross_profit");
-  const grossMarginRow = incomeStatement.find((r) => r.id === "gross_margin");
-  const sgaRow = incomeStatement.find((r) => r.id === "sga");
+  const cogsRow = findRowInTree(incomeStatement ?? [], "cogs");
+  const grossProfitRow = findRowInTree(incomeStatement ?? [], "gross_profit");
+  const grossMarginRow = findRowInTree(incomeStatement ?? [], "gross_margin");
+  const sgaRow = findRowInTree(incomeStatement ?? [], "sga");
   const hasRevenueStreams = streams.length > 0;
   const years = historicalYears;
 

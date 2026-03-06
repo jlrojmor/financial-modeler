@@ -7,6 +7,8 @@
 
 import type { Row } from "@/types/finance";
 import { getBSCategoryForRow, getRowsForCategory } from "./bs-category-mapper";
+import { isOperatingExpenseRow, isNonOperatingRow, isTaxRow } from "./is-classification";
+import { findRowInTree } from "./row-utils";
 
 /** WC exclusions for BS-based WC: cash and st_debt (and totals). */
 const WC_BS_EXCLUDE_IDS = new Set([
@@ -63,9 +65,9 @@ export function getTotalSbcForYear(
   year: string
 ): number {
   let total = 0;
-  const sgaRow = incomeStatement.find((r) => r.id === "sga");
-  const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-  const rdRow = incomeStatement.find((r) => r.id === "rd");
+  const sgaRow = findRowInTree(incomeStatement, "sga");
+  const cogsRow = findRowInTree(incomeStatement, "cogs");
+  const rdRow = findRowInTree(incomeStatement, "rd");
   const sgaBreakdowns = sgaRow?.children ?? [];
   const cogsBreakdowns = cogsRow?.children ?? [];
   const rdBreakdowns = rdRow?.children ?? [];
@@ -93,6 +95,9 @@ export function getTotalSbcForYear(
   return total;
 }
 
+/** IS rows that when they have children must use parent = sum(children); parent input disabled. */
+const IS_PARENT_ROW_IDS = new Set(["rev", "cogs", "sga", "rd"]);
+
 /**
  * Get the computed value for a row in a specific year
  * Handles: sum of children, formulas, inputs
@@ -106,6 +111,15 @@ export function computeRowValue(
   sbcBreakdowns?: Record<string, Record<string, number>>,
   danaBreakdowns?: Record<string, number>
 ): number {
+  // Parent-child enforcement: Revenue, COGS, SG&A, R&D with children = sum(children) only
+  if (row.kind === "input" && IS_PARENT_ROW_IDS.has(row.id) && row.children && row.children.length > 0) {
+    return row.children.reduce(
+      (sum, child) =>
+        sum + computeRowValue(child, year, allRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns),
+      0
+    );
+  }
+
   // Special case: WC Change is input for all historical years, calculated for projection years
   if (row.id === "wc_change" && allStatements) {
     const isHistorical = year.endsWith("A");
@@ -242,7 +256,7 @@ function computeFormula(
   
   if (rowId === "danda" && isInCFS) {
     // This is CFS danda - pull from IS D&A row
-    const isDandaRow = allStatements?.incomeStatement.find(r => r.id === "danda");
+    const isDandaRow = allStatements?.incomeStatement ? findRowInTree(allStatements.incomeStatement, "danda") : null;
     if (isDandaRow && isDandaRow.values?.[year] !== undefined) {
       return isDandaRow.values[year];
     }
@@ -448,13 +462,34 @@ function computeFormula(
     return (grossProfit / revenue) * 100; // Return as percentage (e.g., 75.5 for 75.5%)
   }
 
+  // Operating Expenses = sum(children of operating_expenses row). Structural parent; children are SG&A, R&D, Other Operating, D&A, custom.
+  if (rowId === "operating_expenses") {
+    const opExRow = statementRows.find((r) => r.id === "operating_expenses");
+    if (!opExRow?.children?.length) {
+      // Legacy: no structural parent, sum top-level operating expense rows by sectionOwner
+      let sum = 0;
+      for (const r of statementRows) {
+        if (isOperatingExpenseRow(r)) sum += findRowValue(statementRows, r.id, year);
+      }
+      return sum;
+    }
+    return opExRow.children.reduce((sum, child) => sum + findRowValue(statementRows, child.id, year), 0);
+  }
+
   if (rowId === "ebit") {
-    // EBIT = Gross Profit - SG&A
-    // SG&A already includes all operating expenses (R&D, Sales & Marketing, G&A, etc.)
+    // EBIT = Gross Profit - Operating Expenses (structural parent row; fallback to sum of operating expense rows if no parent)
     const grossProfit = findRowValue(statementRows, "gross_profit", year);
-    const sga = findRowValue(statementRows, "sga", year); // This will sum all SG&A breakdowns if they exist
-    
-    return grossProfit - sga;
+    const hasOpExRow = statementRows.some((r) => r.id === "operating_expenses");
+    const operatingExpenses = hasOpExRow
+      ? findRowValue(statementRows, "operating_expenses", year)
+      : (() => {
+          let sum = 0;
+          for (const r of statementRows) {
+            if (isOperatingExpenseRow(r)) sum += findRowValue(statementRows, r.id, year);
+          }
+          return sum;
+        })();
+    return grossProfit - operatingExpenses;
   }
 
   if (rowId === "ebit_margin") {
@@ -465,42 +500,34 @@ function computeFormula(
   }
 
   if (rowId === "ebt") {
-    // EBT = EBIT + all items between EBIT margin and EBT
-    // This dynamically includes all Interest & Other items (interest_expense, interest_income, other_income, 
-    // and any user-added items like "Gains (losses) on strategic investments")
+    // EBT = EBIT + all non-operating items (sectionOwner drives which rows are included)
+    // Non-operating = sectionOwner non_operating or template interest_expense, interest_income, other_income
+    // Sign: interest expense subtracts, interest income and other add; custom non_operating we add (treat as income-like)
     const ebit = findRowValue(statementRows, "ebit", year);
-    
-    // Find the position of EBIT margin and EBT to get all items between them
-    const ebitMarginIndex = statementRows.findIndex(r => r.id === "ebit_margin");
-    const ebtIndex = statementRows.findIndex(r => r.id === "ebt");
-    
-    if (ebitMarginIndex >= 0 && ebtIndex > ebitMarginIndex) {
-      // Sum all items between EBIT margin and EBT
-      // Interest expense is subtracted (negative), others are added (positive)
-      let total = ebit;
-      for (let i = ebitMarginIndex + 1; i < ebtIndex; i++) {
-        const item = statementRows[i];
-        if (item.id === "ebt") continue; // Skip EBT itself
-        const value = findRowValue(statementRows, item.id, year);
-        // Interest expense is typically negative (subtracted), others are positive (added)
-        // But we use the actual stored value, which should already have the correct sign
+    let total = ebit;
+    for (const r of statementRows) {
+      if (!isNonOperatingRow(r)) continue;
+      const value = findRowValue(statementRows, r.id, year);
+      if (r.id === "interest_expense") {
+        total -= value;
+      } else {
         total += value;
       }
-      return total;
     }
-    
-    // Fallback to hardcoded calculation if structure is unexpected
-    const interestExpense = findRowValue(statementRows, "interest_expense", year);
-    const interestIncome = findRowValue(statementRows, "interest_income", year);
-    const otherIncome = findRowValue(statementRows, "other_income", year);
-    return ebit - interestExpense + interestIncome + otherIncome;
+    return total;
   }
 
   // Income Statement net_income (only if NOT in CFS - CFS net_income is handled above)
+  // Tax = all rows with sectionOwner tax (or id tax); classification drives which rows reduce Net Income
   if (rowId === "net_income" && !isInCFS) {
     const ebt = findRowValue(statementRows, "ebt", year);
-    const tax = findRowValue(statementRows, "tax", year);
-    return ebt - tax;
+    let taxTotal = 0;
+    for (const r of statementRows) {
+      if (isTaxRow(r)) {
+        taxTotal += findRowValue(statementRows, r.id, year);
+      }
+    }
+    return ebt - taxTotal;
   }
 
   if (rowId === "net_income_margin") {
@@ -897,14 +924,15 @@ export function recomputeCalculations(
     }
 
     // CRITICAL: For input rows with children, compute the sum and store it FIRST
-    // EXCEPT: rows with IS Build–only breakdowns keep their value so Historicals stays editable.
+    // Parent-child enforcement: rev, cogs, sga, rd ALWAYS use sum(children); no manual parent input.
+    // Other rows with IS Build breakdowns skip storing sum so projection logic can use parent.
     if (row.kind === "input" && finalChildren && finalChildren.length > 0) {
-      if (parentIdsWithProjectionBreakdowns?.has(row.id)) {
+      const isIsParentWithChildren = IS_PARENT_ROW_IDS.has(row.id);
+      if (!isIsParentWithChildren && parentIdsWithProjectionBreakdowns?.has(row.id)) {
         return { ...row, children: finalChildren };
       }
       // Sum all children values (handles nested children recursively)
       const sum = finalChildren.reduce((total, child) => {
-        // If child has its own children, recursively sum them
         if (child.children && child.children.length > 0) {
           const childSum = child.children.reduce((childTotal, grandchild) => {
             return childTotal + (grandchild.values?.[year] ?? 0);

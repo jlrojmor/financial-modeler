@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ModelState } from "@/store/useModelStore";
+import { getIncomeStatementDisplayOrder } from "@/lib/is-classification";
 import { exportStatementToExcel, exportSbcDisclosureToExcel, exportBalanceCheckToExcel, type ExportStatementContext } from "@/lib/excel-export";
 
 // Force Node runtime (ExcelJS needs Node APIs)
@@ -43,10 +44,10 @@ export async function POST(request: Request) {
     const ws = wb.addWorksheet("Financial Model");
     let currentRow = 1;
 
-    // Income Statement (first statement - includes currency note and headers)
+    // Income Statement (first statement - includes currency note and headers). Use display order: Revenue → COGS → Gross Profit → Operating Expenses → EBIT → …
     const isResult = exportStatementToExcel(
       ws,
-      modelState.incomeStatement,
+      getIncomeStatementDisplayOrder(modelState.incomeStatement ?? []),
       years,
       currentRow,
       modelState.meta.currencyUnit,

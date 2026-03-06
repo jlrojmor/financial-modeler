@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import SbcBreakdownSection from "@/components/sbc-breakdown-section";
+import { findRowInTree } from "@/lib/row-utils";
 
 /**
  * Optional SBC Section - Shows as a simple question asking if user wants to input SBC
@@ -13,9 +14,9 @@ export default function SbcOptionalSection() {
   const incomeStatement = useModelStore((s) => s.incomeStatement);
   
   // Check if there are breakdown categories available (SG&A, COGS, or R&D)
-  const sgaRow = incomeStatement.find((r) => r.id === "sga");
-  const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-  const rdRow = incomeStatement.find((r) => r.id === "rd");
+  const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
+  const cogsRow = incomeStatement ? findRowInTree(incomeStatement, "cogs") : null;
+  const rdRow = incomeStatement ? findRowInTree(incomeStatement, "rd") : null;
   const hasCategories =
     (sgaRow?.children?.length ?? 0) > 0 ||
     (cogsRow?.children?.length ?? 0) > 0 ||

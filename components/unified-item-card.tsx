@@ -36,6 +36,8 @@ interface UnifiedItemCardProps {
     value: Row["cashFlowBehavior"];
     onChange: (behavior: "working_capital" | "investing" | "financing" | "non_cash") => void;
   };
+  /** When false, enforce non-negative input (e.g. IS expense rows: absolute values only). */
+  allowNegative?: boolean;
 }
 
 /**
@@ -75,6 +77,7 @@ export default function UnifiedItemCard({
   onDrop,
   dragOverId = null,
   cashFlowBehaviorDropdown,
+  allowNegative = true,
 }: UnifiedItemCardProps) {
   const [isExpanded, setIsExpanded] = useState(true); // Start expanded so users can edit immediately
   const [isConfirmed, setIsConfirmed] = useState(false);
@@ -410,6 +413,7 @@ export default function UnifiedItemCard({
                     <input
                       type="number"
                       step={decimals > 0 ? "0.01" : "1"}
+                      min={allowNegative ? undefined : 0}
                       value={displayRounded}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -419,7 +423,8 @@ export default function UnifiedItemCard({
                         }
                         const displayNum = Number(val);
                         if (!isNaN(displayNum)) {
-                          const storedNum = displayToStored(displayNum, meta?.currencyUnit);
+                          let storedNum = displayToStored(displayNum, meta?.currencyUnit);
+                          if (!allowNegative) storedNum = Math.max(0, storedNum);
                           onUpdateValue(row.id, year, Math.round(storedNum));
                         }
                       }}
@@ -429,7 +434,8 @@ export default function UnifiedItemCard({
                         } else {
                           const displayNum = Number(e.target.value);
                           if (!isNaN(displayNum)) {
-                            const storedNum = displayToStored(displayNum, meta?.currencyUnit);
+                            let storedNum = displayToStored(displayNum, meta?.currencyUnit);
+                            if (!allowNegative) storedNum = Math.max(0, storedNum);
                             onUpdateValue(row.id, year, Math.round(storedNum));
                           }
                         }

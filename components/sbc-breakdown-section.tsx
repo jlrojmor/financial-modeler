@@ -7,6 +7,7 @@ import {
   storedToDisplay,
   getUnitLabel,
 } from "@/lib/currency-utils";
+import { findRowInTree } from "@/lib/row-utils";
 
 /**
  * SBC Breakdown Section for Income Statement Builder
@@ -26,9 +27,9 @@ export default function SbcBreakdownSection() {
   }, [meta]);
 
   // Find SG&A, COGS, and R&D rows to get their breakdowns
-  const sgaRow = incomeStatement.find((r) => r.id === "sga");
-  const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-  const rdRow = incomeStatement.find((r) => r.id === "rd");
+  const sgaRow = findRowInTree(incomeStatement ?? [], "sga");
+  const cogsRow = findRowInTree(incomeStatement ?? [], "cogs");
+  const rdRow = findRowInTree(incomeStatement ?? [], "rd");
 
   const sgaBreakdowns = sgaRow?.children ?? [];
   const cogsBreakdowns = cogsRow?.children ?? [];

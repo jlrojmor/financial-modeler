@@ -9,6 +9,7 @@ import {
   type CurrencyUnit,
 } from "@/lib/currency-utils";
 import { computeRowValue } from "@/lib/calculations";
+import { findRowInTree } from "@/lib/row-utils";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
 
 function formatAccounting(
@@ -206,7 +207,7 @@ export default function ISBuildPreview() {
 
   /** Total COGS per year: projection years from sum of line COGS; historical from IS cogs row */
   const projectedCogsByYear = useMemo(() => {
-    const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+    const cogsRow = incomeStatement ? findRowInTree(incomeStatement, "cogs") : null;
     const out: Record<string, number> = {};
     for (const y of years) {
       if (y.endsWith("E") && Object.keys(cogsByLineByYear).length > 0) {
@@ -328,7 +329,7 @@ export default function ISBuildPreview() {
 
   /** SG&A: flattened rows under sga (with depth); leaves have no children */
   const sgaRowsFlat = useMemo(() => {
-    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
     if (!sgaRow?.children?.length) return [];
     const out: Array<{ row: Row; depth: number }> = [];
     function walk(rows: Row[], depth: number) {
@@ -374,7 +375,7 @@ export default function ISBuildPreview() {
   /** SG&A value by row id by year. Top-level: revenue × % of revenue (or sum of children for display). Sub-items: parent × % of parent. */
   const projectedSgaByRowIdByYear = useMemo(() => {
     const out: Record<string, Record<string, number>> = {};
-    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
     if (!sgaRow?.children?.length) return out;
 
     function setHistoricForRow(row: Row): void {
@@ -425,7 +426,7 @@ export default function ISBuildPreview() {
 
   /** Total SG&A per year (historic from IS sga row, projection = sum of leaves) */
   const totalSgaByYear = useMemo(() => {
-    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
     const out: Record<string, number> = {};
     for (const y of years) {
       if (y.endsWith("A") && sgaRow) {

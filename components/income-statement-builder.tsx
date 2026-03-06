@@ -1,14 +1,22 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { findGlossaryItem } from "@/lib/financial-glossary";
-import { getCommonISItems, filterAlreadyAdded } from "@/lib/common-suggestions";
 import UnifiedItemCard from "@/components/unified-item-card";
 import CollapsibleSection from "@/components/collapsible-section";
 import { computeRowValue } from "@/lib/calculations";
+import { getIsRowsMissingClassification, getIsRowsClassifiedCustom, getIsSectionKey } from "@/lib/is-classification";
+import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
 import SbcOptionalSection from "@/components/sbc-optional-section";
+
+type ISClassifySuggestion = {
+  sectionOwner: Row["sectionOwner"];
+  isOperating: boolean;
+  confidence: number;
+  reason: string;
+};
 
 /**
  * Unified Income Statement Builder
@@ -32,6 +40,7 @@ export default function IncomeStatementBuilder() {
   const addChildRow = useModelStore((s) => s.addChildRow);
   const reorderIncomeStatementChildren = useModelStore((s) => s.reorderIncomeStatementChildren);
   const reorderIncomeStatementRows = useModelStore((s) => s.reorderIncomeStatementRows);
+  const updateIncomeStatementRowMetadata = useModelStore((s) => s.updateIncomeStatementRowMetadata);
   
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [dragOverTopLevelId, setDragOverTopLevelId] = useState<string | null>(null);
@@ -39,114 +48,133 @@ export default function IncomeStatementBuilder() {
   const [showAddBreakdown, setShowAddBreakdown] = useState<Record<string, boolean>>({});
   const [showAddInterestDialog, setShowAddInterestDialog] = useState(false);
   const [newInterestLabel, setNewInterestLabel] = useState("");
-  
+  const [pendingAiSuggestions, setPendingAiSuggestions] = useState<Record<string, ISClassifySuggestion>>({});
+  const [isClassifyLoading, setIsClassifyLoading] = useState(false);
+  const [lastAddedOpexLabel, setLastAddedOpexLabel] = useState<string | null>(null);
+
+  // After adding a child under operating_expenses, run AI classification (store already set fallback from label)
+  useEffect(() => {
+    if (!lastAddedOpexLabel || !incomeStatement?.length) return;
+    const opEx = incomeStatement.find((r) => r.id === "operating_expenses");
+    const child = opEx?.children?.find((c) => c.label === lastAddedOpexLabel);
+    if (child) {
+      runIsClassifyAndApply(child.id, child.label, "Operating Expenses");
+      setLastAddedOpexLabel(null);
+    }
+  }, [lastAddedOpexLabel, incomeStatement]);
+
   const years = useMemo(() => {
     return meta?.years?.historical ?? [];
   }, [meta]);
   
   const isLocked = useModelStore((s) => s.sectionLocks["income_statement"] ?? false);
+
+  const rowsMissingIsClassification = useMemo(
+    () => getIsRowsMissingClassification(incomeStatement ?? []),
+    [incomeStatement]
+  );
+  const rowsClassifiedCustom = useMemo(
+    () => getIsRowsClassifiedCustom(incomeStatement ?? []),
+    [incomeStatement]
+  );
+
+  const flattenIsRows = (rows: Row[]): Row[] =>
+    rows.flatMap((r) => [r, ...(r.children?.length ? flattenIsRows(r.children) : [])]);
+
+  const rowsWithPendingSuggestion = useMemo(() => {
+    const flat = flattenIsRows(incomeStatement ?? []);
+    return flat.filter((r) => Object.prototype.hasOwnProperty.call(pendingAiSuggestions, r.id));
+  }, [incomeStatement, pendingAiSuggestions]);
+
+  const rowsNeedingReview = useMemo(() => {
+    const missingIds = new Set(rowsMissingIsClassification.map((r) => r.id));
+    const fromPending = rowsWithPendingSuggestion.filter((r) => !missingIds.has(r.id));
+    return [...rowsMissingIsClassification, ...fromPending];
+  }, [rowsMissingIsClassification, rowsWithPendingSuggestion]);
+
+  const rowsAlreadyClassified = useMemo(
+    () => rowsClassifiedCustom.filter((r) => !Object.prototype.hasOwnProperty.call(pendingAiSuggestions, r.id)),
+    [rowsClassifiedCustom, pendingAiSuggestions]
+  );
+
+  const [showReviewClassified, setShowReviewClassified] = useState(false);
+  const [showChangeDropdownForId, setShowChangeDropdownForId] = useState<Record<string, boolean>>({});
+
+  const allStatementsForCalc = useMemo(
+    () => ({ incomeStatement: incomeStatement ?? [], balanceSheet: [], cashFlow: [] }),
+    [incomeStatement]
+  );
+  const validationWarnings = useMemo(() => {
+    const warnings: { year: string; type: "gross_margin" | "ebit_margin" | "net_margin"; value: number }[] = [];
+    if (!years.length || !incomeStatement?.length) return warnings;
+    for (const year of years) {
+      try {
+        const rev = computeRowValue(
+          incomeStatement.find((r) => r.id === "rev")!,
+          year,
+          incomeStatement,
+          incomeStatement,
+          allStatementsForCalc
+        );
+        const grossMargin = rev !== 0 ? computeRowValue(
+          incomeStatement.find((r) => r.id === "gross_margin")!,
+          year,
+          incomeStatement,
+          incomeStatement,
+          allStatementsForCalc
+        ) : 0;
+        const ebitMargin = rev !== 0 ? computeRowValue(
+          incomeStatement.find((r) => r.id === "ebit_margin")!,
+          year,
+          incomeStatement,
+          incomeStatement,
+          allStatementsForCalc
+        ) : 0;
+        const netMargin = rev !== 0 ? computeRowValue(
+          incomeStatement.find((r) => r.id === "net_income_margin")!,
+          year,
+          incomeStatement,
+          incomeStatement,
+          allStatementsForCalc
+        ) : 0;
+        if (grossMargin < -100 || grossMargin > 100) warnings.push({ year, type: "gross_margin", value: grossMargin });
+        if (ebitMargin < -200 || ebitMargin > 200) warnings.push({ year, type: "ebit_margin", value: ebitMargin });
+        if (netMargin < -200 || netMargin > 200) warnings.push({ year, type: "net_margin", value: netMargin });
+      } catch {
+        // skip year if calc fails
+      }
+    }
+    return warnings;
+  }, [incomeStatement, years, allStatementsForCalc]);
   
-  // Organize IS items by section
+  // Organize IS items by section. Operating Expenses = structural parent + children in stored order (user-controlled).
   const sections = useMemo(() => {
-    // Get main rows (not children - children are nested in children arrays, not at top level)
-    // Since children are nested, ALL items in incomeStatement are top-level rows
-    // Include ALL top-level rows to ensure the builder shows everything that appears in the Excel preview
-    const mainRows = incomeStatement;
-    
-    // Find key marker indices in the FULL incomeStatement array (not filtered mainRows)
-    // This ensures position-based detection works correctly
-    const ebitMarginIndex = incomeStatement.findIndex(r => r.id === "ebit_margin");
-    const ebtIndex = incomeStatement.findIndex(r => r.id === "ebt");
-    
-    const revenue = mainRows.filter(r => r.id === "rev");
-    const cogs = mainRows.filter(r => r.id === "cogs");
-    const grossProfit = mainRows.filter(r => r.id === "gross_profit" || r.id === "gross_margin");
-    const operatingExpenses = mainRows.filter(r => 
-      r.id === "sga" || 
-      r.id === "rd"
-    );
-    const danda = mainRows.filter(r => r.id === "danda");
-    const ebit = mainRows.filter(r => r.id === "ebit" || r.id === "ebit_margin");
-    
-    // Interest & Other section: items between EBIT margin and EBT (position-based)
-    // Use the FULL incomeStatement array to find items by position, then filter to mainRows
-    // This ensures ALL items that appear in the Excel preview also appear in the builder
-    const interest = mainRows.filter((r) => {
-      // Include known interest items by ID (from template)
-      if (r.id === "interest_expense" || r.id === "interest_income" || r.id === "other_income") {
-        return true;
-      }
-      // Include items by position (between EBIT margin and EBT) in the FULL incomeStatement array
-      // This catches user-added items and any items that might be in the wrong position
-      if (ebitMarginIndex >= 0 && ebtIndex > ebitMarginIndex) {
-        const rowIndex = incomeStatement.findIndex(item => item.id === r.id);
-        if (rowIndex > ebitMarginIndex && rowIndex < ebtIndex) {
-          return true;
-        }
-      }
-      // Fallback: if EBT index is not found, include items after EBIT margin that aren't in other sections
-      // This ensures we don't miss items even if EBT is missing
-      if (ebitMarginIndex >= 0 && ebtIndex === -1) {
-        const rowIndex = incomeStatement.findIndex(item => item.id === r.id);
-        // Only include if it's after EBIT margin and not a known item from other sections
-        if (rowIndex > ebitMarginIndex && 
-            r.id !== "tax" && 
-            r.id !== "net_income" && 
-            r.id !== "net_income_margin") {
-          return true;
-        }
-      }
-      return false;
-    });
-    
-    const ebt = mainRows.filter(r => r.id === "ebt" || r.id === "ebt_margin");
-    const tax = mainRows.filter(r => r.id === "tax");
-    const netIncome = mainRows.filter(r => r.id === "net_income" || r.id === "net_income_margin");
-    const other = mainRows.filter(r => 
-      !revenue.includes(r) &&
-      !cogs.includes(r) &&
-      !grossProfit.includes(r) &&
-      !operatingExpenses.includes(r) &&
-      !danda.includes(r) &&
-      !ebit.includes(r) &&
-      !interest.includes(r) &&
-      !ebt.includes(r) &&
-      !tax.includes(r) &&
-      !netIncome.includes(r)
-    );
-    
+    const mainRows = incomeStatement ?? [];
+    const key = (r: Row) => getIsSectionKey(r);
+
+    const revenue = mainRows.filter(r => key(r) === "revenue");
+    const cogs = mainRows.filter(r => key(r) === "cogs");
+    const interest = mainRows.filter(r => key(r) === "interest");
+    const tax = mainRows.filter(r => key(r) === "tax");
+
+    const opExRow = mainRows.find(r => r.id === "operating_expenses");
+    const opexChildren = opExRow ? (opExRow.children ?? []) : [];
+    const operatingExpenses = opExRow ? [opExRow, ...opexChildren] : [...mainRows.filter(r => key(r) === "sga"), ...mainRows.filter(r => key(r) === "rd"), ...mainRows.filter(r => key(r) === "other_operating")];
+    const sga: Row[] = [];
+    const rd: Row[] = [];
+    const other_operating: Row[] = [];
+
     return {
       revenue,
       cogs,
-      grossProfit,
+      sga,
+      rd,
+      other_operating,
       operatingExpenses,
-      danda,
-      ebit,
       interest,
-      ebt,
       tax,
-      netIncome,
-      other,
     };
   }, [incomeStatement]);
-  
-  // Get suggestions for Interest & Other section (items that go below EBIT)
-  const interestOtherSuggestions = useMemo(() => {
-    // Get items that are common/mandatory and typically appear below EBIT
-    const interestOtherItems = getCommonISItems().filter(item => {
-      const concept = item.concept.toLowerCase();
-      return concept.includes("interest") || 
-             concept.includes("other income") || 
-             concept.includes("strategic investment") ||
-             concept.includes("foreign currency") ||
-             concept.includes("asset sale") ||
-             concept.includes("gain") ||
-             concept.includes("loss");
-    });
-    const existingInterestItems = sections.interest.map(r => ({ label: r.label, id: r.id }));
-    return filterAlreadyAdded(interestOtherItems, existingInterestItems);
-  }, [sections.interest]);
-  
   
   const handleDragStart = (e: React.DragEvent, payload: { parentId: string; childId: string; fromIndex: number }) => {
     e.dataTransfer.setData("application/json", JSON.stringify(payload));
@@ -229,26 +257,103 @@ export default function IncomeStatementBuilder() {
     }
   };
 
+  const runIsClassifyAndApply = async (
+    rowId: string,
+    label: string,
+    parentContext: string,
+    historicalValues?: Record<string, number>
+  ) => {
+    setIsClassifyLoading(true);
+    setPendingAiSuggestions((prev) => {
+      const next = { ...prev };
+      delete next[rowId];
+      return next;
+    });
+    let appliedSource: "ai" | "fallback" | "user" | "pending" = "fallback";
+    let appliedSectionOwner: Row["sectionOwner"] = "other_operating";
+    let appliedIsOperating = true;
+    let appliedConfidence = 0;
+    try {
+      const res = await fetch("/api/ai/is-classify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: [{ label, parentContext, nearbySection: parentContext, historicalValues }],
+        }),
+      });
+      const data = await res.json();
+      const suggestions = data.suggestions as ISClassifySuggestion[] | undefined;
+      const s = Array.isArray(suggestions) && suggestions[0] ? suggestions[0] : null;
+      if (s && s.confidence > 0.75) {
+        appliedSource = "ai";
+        appliedSectionOwner = s.sectionOwner;
+        appliedIsOperating = s.isOperating;
+        appliedConfidence = s.confidence;
+        updateIncomeStatementRowMetadata(rowId, {
+          sectionOwner: s.sectionOwner,
+          isOperating: s.isOperating,
+          classificationSource: "ai",
+          classificationReason: s.reason,
+          classificationConfidence: s.confidence,
+        });
+      } else if (s) {
+        setPendingAiSuggestions((prev) => ({ ...prev, [rowId]: s }));
+        appliedSectionOwner = s.sectionOwner;
+        appliedIsOperating = s.isOperating;
+        appliedConfidence = s.confidence;
+        appliedSource = "pending";
+      } else {
+        const fallback = getFallbackIsClassification(label);
+        appliedSectionOwner = fallback.sectionOwner;
+        appliedIsOperating = fallback.isOperating;
+        updateIncomeStatementRowMetadata(rowId, {
+          sectionOwner: fallback.sectionOwner,
+          isOperating: fallback.isOperating,
+          classificationSource: "fallback",
+        });
+      }
+    } catch {
+      const fallback = getFallbackIsClassification(label);
+      appliedSectionOwner = fallback.sectionOwner;
+      appliedIsOperating = fallback.isOperating;
+      updateIncomeStatementRowMetadata(rowId, {
+        sectionOwner: fallback.sectionOwner,
+        isOperating: fallback.isOperating,
+        classificationSource: "fallback",
+      });
+    } finally {
+      if (appliedSource === "ai") appliedConfidence = (await (async () => {
+        const flat = (rows: Row[]): Row[] => rows.flatMap((r) => [r, ...(r.children?.length ? flat(r.children) : [])]);
+        const r = flat(incomeStatement ?? []).find((x) => x.id === rowId);
+        return r?.classificationConfidence ?? 0;
+      })()) ?? 0;
+      console.log(
+        "IS AI CLASSIFICATION RESULT: label:",
+        label,
+        "sectionOwner:",
+        appliedSectionOwner,
+        "isOperating:",
+        appliedIsOperating,
+        "confidence:",
+        appliedSource === "ai" ? appliedConfidence : appliedSource === "pending" ? appliedConfidence : "(fallback)",
+        "classificationSource:",
+        appliedSource
+      );
+      setIsClassifyLoading(false);
+    }
+  };
+
   const handleRemoveItem = (rowId: string) => {
-    // All calculated output items (cannot be removed - they're calculations)
     const calculatedOutputItems = [
       "gross_profit", "gross_margin",
       "ebit", "ebit_margin",
       "ebt", "ebt_margin",
       "net_income", "net_income_margin"
     ];
-    
-    // Core input items that form the skeleton (can be edited but not removed)
-    // Note: interest_expense, interest_income, and other_income are NOT protected
-    // because users should be able to remove them if they want (they can always re-add via suggestions)
-    const coreInputItems = [
-      "rev", "cogs", "sga", "danda", "tax"
-    ];
-    
+    // Core anchors only; operating-expense children (sga, rd, other_opex, danda, custom) are removable
+    const coreInputItems = ["rev", "cogs", "tax", "operating_expenses"];
     const protectedRows = [...calculatedOutputItems, ...coreInputItems];
-    if (protectedRows.includes(rowId)) {
-      return; // Don't allow removing protected rows
-    }
+    if (protectedRows.includes(rowId)) return;
     removeRow("incomeStatement", rowId);
   };
   
@@ -276,29 +381,35 @@ export default function IncomeStatementBuilder() {
         defaultExpanded={true}
       >
         <div className="space-y-3">
-          {items.map((row) => {
+          {sectionId === "is_operating_expenses" && items.length > 0 && (() => {
+            const childIds = items.length > 1 ? items.slice(1).map((r) => r.id) : [];
+            console.log("OPERATING_EXPENSES_CHILD_IDS:", childIds);
+            return null;
+          })()}
+          {items.map((row, itemIndex) => {
             const globalIndex = incomeStatement.findIndex((r) => r.id === row.id);
+            const isOperatingExpensesSection = sectionId === "is_operating_expenses";
+            const isOpExParent = isOperatingExpensesSection && row.id === "operating_expenses";
+            const isOpExChild = isOperatingExpensesSection && itemIndex > 0;
+            const opExParentId = "operating_expenses";
+            const opExChildIndex = isOpExChild ? itemIndex - 1 : 0;
+            if (isOpExChild) console.log("RENDERING OPEX CHILD ROW:", row.id);
             const glossaryItem = findGlossaryItem(row.label);
             const isCalculated = (row.kind === "calc" || row.kind === "total") && 
                                  !["rev", "cogs", "sga", "danda", "tax", "interest_expense", "interest_income", "other_income"].includes(row.id);
             
             // All calculated/output items that cannot be removed
-            // These are outputs/calculations, not user inputs
+            // These are outputs/calculations, not user inputs (operating_expenses = structural parent, sum of children)
             const calculatedOutputItems = [
               "gross_profit", "gross_margin",
+              "operating_expenses",
               "ebit", "ebit_margin",
               "ebt", "ebt_margin",
               "net_income", "net_income_margin"
             ];
             
-            // Core input items that form the skeleton (can be edited but not removed)
-            // Note: interest_expense, interest_income, and other_income are NOT protected
-            // because users should be able to remove them if they want (they can always re-add via suggestions)
-            const coreInputItems = [
-              "rev", "cogs", "sga", "danda", "tax"
-            ];
-            
-            // All protected items (calculated outputs + core inputs)
+            // Core anchors; operating-expense children (sga, rd, custom) are not protected
+            const coreInputItems = ["rev", "cogs", "tax", "operating_expenses"];
             const allProtectedItems = [...calculatedOutputItems, ...coreInputItems];
             
             // Check if this is a calculated output (should never show remove button)
@@ -320,10 +431,15 @@ export default function IncomeStatementBuilder() {
               }
             }
             
-            // Check if this row can have breakdowns (children)
-            const canHaveBreakdowns = ["rev", "cogs", "sga", "rd"].includes(row.id);
+            // Breakdowns: rev, cogs, operating_expenses, and any child of operating_expenses
+            const canHaveBreakdowns = ["rev", "cogs", "operating_expenses"].includes(row.id) || (isOperatingExpensesSection && isOpExChild);
             const hasChildren = row.children && row.children.length > 0;
-            
+            // Parent-child enforcement: parent value = sum(children); disable parent input when children exist
+            const isParentWithChildren = canHaveBreakdowns && hasChildren;
+            // Sign discipline: expense categories use absolute values only (no negative input); any child of operating_expenses is an expense
+            const expenseRowIds = ["cogs", "sga", "rd", "danda", "interest_expense", "tax", "other_opex"];
+            const allowNegative = !expenseRowIds.includes(row.id) && row.id !== "rev" && !(isOperatingExpensesSection && isOpExChild);
+
             return (
               <div
                 key={row.id}
@@ -333,6 +449,11 @@ export default function IncomeStatementBuilder() {
                   onDragLeave: handleDragLeaveTopLevel,
                   onDrop: (e: React.DragEvent) => handleDropTopLevel(e, globalIndex),
                 })}
+                {...(isOpExChild && {
+                  onDragOver: (e: React.DragEvent) => handleDragOver(e, row.id),
+                  onDragLeave: handleDragLeave,
+                  onDrop: (e: React.DragEvent) => handleDrop(e, { parentId: opExParentId, childId: row.id, toIndex: opExChildIndex }),
+                })}
               >
                 <UnifiedItemCard
                   row={row}
@@ -340,27 +461,28 @@ export default function IncomeStatementBuilder() {
                   meta={meta}
                   glossaryItem={glossaryItem ?? undefined}
                   isLocked={isLocked}
-                  isCalculated={isCalculated || isCalculatedOutput}
+                  isCalculated={isCalculated || isCalculatedOutput || isParentWithChildren || isOpExParent}
                   autoValue={computedValue}
+                  allowNegative={allowNegative}
                   colorClass={colorClass}
                   onUpdateValue={updateRowValue.bind(null, "incomeStatement")}
                   onRemove={handleRemoveItem}
                   showRemove={!isCalculatedOutput && !allProtectedItems.includes(row.id)}
                   showConfirm={!isCalculatedOutput}
                   protectedRows={allProtectedItems}
-                  draggable={isInterestSection && !isLocked}
-                  onDragStart={isInterestSection ? (e) => { e.stopPropagation(); handleDragStartTopLevel(e, globalIndex); } : undefined}
-                  onDragOver={isInterestSection ? (e) => handleDragOverTopLevel(e, row.id) : undefined}
-                  onDragLeave={isInterestSection ? handleDragLeaveTopLevel : undefined}
-                  onDrop={isInterestSection ? (e) => handleDropTopLevel(e, globalIndex) : undefined}
-                  dragOverId={isInterestSection ? dragOverTopLevelId : undefined}
+                  draggable={(isInterestSection || isOpExChild) && !isLocked}
+                  onDragStart={isInterestSection ? (e) => { e.stopPropagation(); handleDragStartTopLevel(e, globalIndex); } : isOpExChild ? (e) => { e.stopPropagation(); handleDragStart(e, { parentId: opExParentId, childId: row.id, fromIndex: opExChildIndex }); } : undefined}
+                  onDragOver={isInterestSection ? (e) => handleDragOverTopLevel(e, row.id) : isOpExChild ? (e) => handleDragOver(e, row.id) : undefined}
+                  onDragLeave={isInterestSection ? handleDragLeaveTopLevel : isOpExChild ? handleDragLeave : undefined}
+                  onDrop={isInterestSection ? (e) => handleDropTopLevel(e, globalIndex) : isOpExChild ? (e) => handleDrop(e, { parentId: opExParentId, childId: row.id, toIndex: opExChildIndex }) : undefined}
+                  dragOverId={isInterestSection ? dragOverTopLevelId : isOpExChild ? dragOverId : undefined}
                 />
                 
-                {/* Breakdown Section - for Revenue, COGS, SG&A */}
+                {/* Breakdown Section - for Revenue, COGS, and (non-parent) op-ex rows. Operating-expenses parent's children are rendered in the section list below, not here. */}
                 {canHaveBreakdowns && (
                   <div className="ml-6 space-y-2">
-                    {/* Show existing breakdowns */}
-                    {hasChildren && (
+                    {/* Show existing breakdowns — skip for operating_expenses parent so children are not rendered twice (they're already in items as section-level rows) */}
+                    {hasChildren && !isOpExParent && (
                       <div className="space-y-2">
                         {row.children!.map((child, childIndex) => {
                           const childGlossaryItem = findGlossaryItem(child.label);
@@ -384,6 +506,7 @@ export default function IncomeStatementBuilder() {
                                 showRemove={true}
                                 showConfirm={true}
                                 protectedRows={[]}
+                                allowNegative={row.id === "rev"}
                                 draggable={!isLocked}
                                 onDragStart={(e) => {
                                   e.stopPropagation();
@@ -412,7 +535,7 @@ export default function IncomeStatementBuilder() {
                             }}
                             className="text-xs text-blue-400 hover:text-blue-300 underline"
                           >
-                            + Add {row.id === "rev" ? "Revenue Stream" : row.id === "cogs" ? "COGS Breakdown" : row.id === "sga" ? "Operating Expense Item" : "Breakdown"}
+                            + Add {row.id === "rev" ? "Revenue Stream" : row.id === "cogs" ? "COGS Breakdown" : isOperatingExpensesSection && row.id === "operating_expenses" ? "Operating expense item" : "Breakdown"}
                           </button>
                         ) : (
                           <div className="flex gap-2 items-center">
@@ -432,6 +555,9 @@ export default function IncomeStatementBuilder() {
                                       if (cogsRow) {
                                         addChildRow("incomeStatement", "cogs", `${label} COGS`);
                                       }
+                                    } else if (isOperatingExpensesSection && row.id === "operating_expenses") {
+                                      setLastAddedOpexLabel(label);
+                                      addChildRow("incomeStatement", "operating_expenses", label);
                                     } else {
                                       addChildRow("incomeStatement", row.id, label);
                                     }
@@ -448,8 +574,8 @@ export default function IncomeStatementBuilder() {
                                   ? "e.g., Product Revenue, Service Revenue"
                                   : row.id === "cogs"
                                   ? "e.g., Product COGS"
-                                  : row.id === "sga"
-                                  ? "e.g., Sales & Marketing, Customer Support"
+                                  : isOperatingExpensesSection && row.id === "operating_expenses"
+                                  ? "e.g., Payroll, Occupancy, Restructuring"
                                   : "Enter breakdown name"
                               }
                               className="flex-1 rounded-md border border-slate-700 bg-slate-900/50 px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-blue-500 focus:outline-none"
@@ -466,6 +592,9 @@ export default function IncomeStatementBuilder() {
                                     if (cogsRow) {
                                       addChildRow("incomeStatement", "cogs", `${label} COGS`);
                                     }
+                                  } else if (isOperatingExpensesSection && row.id === "operating_expenses") {
+                                    setLastAddedOpexLabel(label);
+                                    addChildRow("incomeStatement", "operating_expenses", label);
                                   } else {
                                     addChildRow("incomeStatement", row.id, label);
                                   }
@@ -497,109 +626,28 @@ export default function IncomeStatementBuilder() {
             );
           })}
           
-          {/* Suggestions for Interest & Other Section */}
-          {showSuggestions && !isLocked && (
+          {/* Interest & Other: section-level add only (no suggestion cards) */}
+          {showSuggestions && !isLocked && sectionId === "is_interest" && (
             <div className="mt-4 space-y-2">
-              {interestOtherSuggestions.length > 0 && (
-                <>
-                  <div className="text-xs text-slate-400 italic mb-2">
-                    💡 Suggested items for {title}:
-                  </div>
-                  {interestOtherSuggestions.map((item, idx) => {
-                    return (
-                      <div
-                        key={idx}
-                        className={`rounded-lg border ${colorClass === "orange" ? "border-orange-700/40 bg-orange-950/20" : "border-slate-700/40 bg-slate-950/20"} p-3`}
-                      >
-                        <div className="flex items-start justify-between mb-2">
-                          <div className="flex-1">
-                            <div className="text-sm font-medium text-slate-200">
-                              {item.concept}
-                            </div>
-                            <p className="text-xs text-slate-300/70 mt-1">
-                              {item.description}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              // Find where to insert - after EBIT margin, before EBT
-                              const ebitMarginIndex = incomeStatement.findIndex(r => r.id === "ebit_margin");
-                              const ebtIndex = incomeStatement.findIndex(r => r.id === "ebt");
-                              const insertIndex = ebtIndex >= 0 ? ebtIndex : 
-                                                 ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : 
-                                                 incomeStatement.length;
-                              
-                              const newRow: Row = {
-                                id: `is_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                                label: item.concept,
-                                kind: "input",
-                                valueType: "currency",
-                                values: {},
-                                children: [],
-                              };
-                              insertRow("incomeStatement", insertIndex, newRow);
-                            }}
-                            className={`rounded-md ${colorClass === "orange" ? "bg-orange-700 hover:bg-orange-600" : "bg-slate-700 hover:bg-slate-600"} px-3 py-1.5 text-xs font-semibold text-white transition`}
-                          >
-                            Add
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </>
-              )}
-              
-              {/* Manual Add Option - Always show for Interest & Other section */}
-              <div className="mt-3">
-                {!showAddInterestDialog ? (
-                  <button
-                    type="button"
-                    onClick={() => setShowAddInterestDialog(true)}
-                    className="text-xs text-slate-400 hover:text-slate-300 underline"
-                  >
-                    + Add custom item
-                  </button>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <input
-                      type="text"
-                      value={newInterestLabel}
-                      onChange={(e) => setNewInterestLabel(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          const trimmed = newInterestLabel.trim();
-                          if (!trimmed) return;
-                          const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
-                          const ebtIndex = incomeStatement.findIndex((r) => r.id === "ebt");
-                          const insertIndex = ebtIndex >= 0 ? ebtIndex : ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : incomeStatement.length;
-                          const newRow: Row = {
-                            id: `is_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                            label: trimmed,
-                            kind: "input",
-                            valueType: "currency",
-                            values: {},
-                            children: [],
-                          };
-                          insertRow("incomeStatement", insertIndex, newRow);
-                          setShowAddInterestDialog(false);
-                          setNewInterestLabel("");
-                        }
-                        if (e.key === "Escape") {
-                          setShowAddInterestDialog(false);
-                          setNewInterestLabel("");
-                        }
-                      }}
-                      placeholder="Label for new item"
-                      className="rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-sm text-slate-200 placeholder-slate-500 w-48"
-                      autoFocus
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
+              {!showAddInterestDialog ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAddInterestDialog(true)}
+                  className="text-xs text-slate-400 hover:text-slate-300 underline"
+                >
+                  + Add custom item
+                </button>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={newInterestLabel}
+                    onChange={(e) => setNewInterestLabel(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
                         const trimmed = newInterestLabel.trim();
                         if (!trimmed) return;
+                        const fallback = getFallbackIsClassification(trimmed);
                         const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
                         const ebtIndex = incomeStatement.findIndex((r) => r.id === "ebt");
                         const insertIndex = ebtIndex >= 0 ? ebtIndex : ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : incomeStatement.length;
@@ -610,29 +658,66 @@ export default function IncomeStatementBuilder() {
                           valueType: "currency",
                           values: {},
                           children: [],
+                          sectionOwner: fallback.sectionOwner,
+                          isOperating: fallback.isOperating,
+                          classificationSource: "fallback",
                         };
                         insertRow("incomeStatement", insertIndex, newRow);
+                        runIsClassifyAndApply(newRow.id, newRow.label, "Interest & Other");
                         setShowAddInterestDialog(false);
                         setNewInterestLabel("");
-                      }}
-                      disabled={!newInterestLabel.trim()}
-                      className="rounded-md bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50"
-                    >
-                      Add
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
+                      }
+                      if (e.key === "Escape") {
                         setShowAddInterestDialog(false);
                         setNewInterestLabel("");
-                      }}
-                      className="rounded-md border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                )}
-              </div>
+                      }
+                    }}
+                    placeholder="Label for new item"
+                    className="rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-sm text-slate-200 placeholder-slate-500 w-48"
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const trimmed = newInterestLabel.trim();
+                      if (!trimmed) return;
+                      const ebitMarginIndex = incomeStatement.findIndex((r) => r.id === "ebit_margin");
+                      const ebtIndex = incomeStatement.findIndex((r) => r.id === "ebt");
+                      const insertIndex = ebtIndex >= 0 ? ebtIndex : ebitMarginIndex >= 0 ? ebitMarginIndex + 1 : incomeStatement.length;
+                      const fallback = getFallbackIsClassification(trimmed);
+                      const newRow: Row = {
+                        id: `is_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                        label: trimmed,
+                        kind: "input",
+                        valueType: "currency",
+                        values: {},
+                        children: [],
+                        sectionOwner: fallback.sectionOwner,
+                        isOperating: fallback.isOperating,
+                        classificationSource: "fallback",
+                      };
+                      insertRow("incomeStatement", insertIndex, newRow);
+                      runIsClassifyAndApply(newRow.id, newRow.label, "Interest & Other");
+                      setShowAddInterestDialog(false);
+                      setNewInterestLabel("");
+                    }}
+                    disabled={!newInterestLabel.trim() || isClassifyLoading}
+                    className="rounded-md bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50"
+                  >
+                    Add
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddInterestDialog(false);
+                      setNewInterestLabel("");
+                    }}
+                    className="rounded-md border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -640,6 +725,25 @@ export default function IncomeStatementBuilder() {
     );
   };
   
+  const sectionOwnerOptions: { value: Row["sectionOwner"]; label: string }[] = [
+    { value: "revenue", label: "Revenue" },
+    { value: "cogs", label: "Cost of Goods Sold" },
+    { value: "sga", label: "SG&A" },
+    { value: "rd", label: "Research & Development" },
+    { value: "other_operating", label: "Other Operating" },
+    { value: "non_operating", label: "Non-operating" },
+    { value: "tax", label: "Tax" },
+  ];
+
+  const aiClassifiedCount = useMemo(
+    () => rowsClassifiedCustom.filter((r) => r.classificationSource === "ai").length,
+    [rowsClassifiedCustom]
+  );
+  const manualClassifiedCount = useMemo(
+    () => rowsClassifiedCustom.filter((r) => r.classificationSource === "user" || r.classificationSource == null).length,
+    [rowsClassifiedCustom]
+  );
+
   return (
     <CollapsibleSection
       sectionId="income_statement_all"
@@ -649,38 +753,203 @@ export default function IncomeStatementBuilder() {
       defaultExpanded={true}
     >
       <div className="space-y-6">
+        {/* Classification panel: two subsections so classified rows don't disappear */}
+        {!isLocked && (rowsNeedingReview.length > 0 || rowsAlreadyClassified.length > 0) && (
+          <div className="rounded-lg border border-amber-600/50 bg-amber-950/30 p-3 space-y-4">
+            <p className="text-xs font-semibold text-amber-200">Custom row classification</p>
+            <p className="text-xs text-amber-200/90">
+              {rowsNeedingReview.length} row{rowsNeedingReview.length !== 1 ? "s" : ""} need review · AI classified: {aiClassifiedCount} · Other (fallback/user): {rowsClassifiedCustom.length - aiClassifiedCount}
+            </p>
+            <p className="text-[11px] text-amber-200/80">
+              Operating = included in EBIT / operating profit. Non-operating = below EBIT (interest, investment gains/losses, etc.).
+            </p>
+
+            {/* A) Needs review (missing classification or low-confidence AI suggestion) */}
+            {rowsNeedingReview.length > 0 && (
+              <div>
+                <p className="text-xs font-medium text-amber-300 mb-2">Needs review</p>
+                <div className="space-y-3">
+                  {rowsNeedingReview.map((row) => (
+                    <div key={row.id} className="rounded border border-slate-700 bg-slate-900/50 p-2">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="text-slate-300 font-medium min-w-[140px]">{row.label}</span>
+                        <select
+                          value={row.sectionOwner ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value as Row["sectionOwner"];
+                            if (v) {
+                              updateIncomeStatementRowMetadata(row.id, {
+                                sectionOwner: v,
+                                isOperating: ["revenue", "cogs", "sga", "rd", "other_operating"].includes(v),
+                                classificationSource: "user",
+                              });
+                              setPendingAiSuggestions((prev) => {
+                                const next = { ...prev };
+                                delete next[row.id];
+                                return next;
+                              });
+                            }
+                          }}
+                          className="rounded border border-slate-600 bg-slate-800 text-slate-200 px-2 py-1"
+                        >
+                          <option value="">— Section —</option>
+                          {sectionOwnerOptions.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                        <label className="flex items-center gap-1 text-slate-400" title="Operating = in EBIT; Non-operating = below EBIT">
+                          <input
+                            type="checkbox"
+                            checked={row.isOperating === true}
+                            onChange={(e) => {
+                              updateIncomeStatementRowMetadata(row.id, { isOperating: e.target.checked, classificationSource: "user" });
+                              setPendingAiSuggestions((prev) => {
+                                const next = { ...prev };
+                                delete next[row.id];
+                                return next;
+                              });
+                            }}
+                            className="rounded border-slate-600 bg-slate-800"
+                          />
+                          Operating
+                        </label>
+                      </div>
+                      {pendingAiSuggestions[row.id] && (
+                        <p className="text-[11px] text-slate-400 mt-1.5 pl-0">
+                          AI suggests: {sectionOwnerOptions.find((o) => o.value === pendingAiSuggestions[row.id].sectionOwner)?.label ?? pendingAiSuggestions[row.id].sectionOwner}, {pendingAiSuggestions[row.id].isOperating ? "Operating" : "Non-operating"} ({pendingAiSuggestions[row.id].reason})
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* B) Already classified — collapsible, not main focus; hide dropdown for strong AI classification unless "Change" */}
+            {rowsAlreadyClassified.length > 0 && (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setShowReviewClassified((prev) => !prev)}
+                  className="text-xs font-medium text-amber-300 mb-2 flex items-center gap-1 hover:text-amber-200"
+                >
+                  {showReviewClassified ? "▼" : "▶"} Review classified rows ({rowsAlreadyClassified.length})
+                </button>
+                {showReviewClassified && (
+                  <div className="space-y-2">
+                    {rowsAlreadyClassified.map((row) => {
+                      const isAiClassified = row.classificationSource === "ai" && (row.classificationConfidence ?? 0) > 0.75;
+                      const showDropdown = !isAiClassified || showChangeDropdownForId[row.id];
+                      return (
+                        <div key={row.id} className="rounded border border-slate-700 bg-slate-900/50 p-2 text-xs">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-slate-300 font-medium min-w-[140px]">{row.label}</span>
+                            <span className="text-slate-400">
+                              {sectionOwnerOptions.find((o) => o.value === row.sectionOwner)?.label ?? row.sectionOwner}
+                            </span>
+                            <span className="text-slate-500">·</span>
+                            <span className={row.isOperating ? "text-emerald-400" : "text-slate-400"}>
+                              {row.isOperating ? "Operating" : "Non-operating"}
+                            </span>
+                            {isAiClassified && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-300">
+                                Suggested by AI{row.classificationConfidence != null ? ` (${Math.round(row.classificationConfidence * 100)}%)` : ""}
+                              </span>
+                            )}
+                            {isAiClassified && !showDropdown && (
+                              <button
+                                type="button"
+                                onClick={() => setShowChangeDropdownForId((prev) => ({ ...prev, [row.id]: true }))}
+                                className="text-[11px] text-slate-400 hover:text-slate-300 underline"
+                              >
+                                Change
+                              </button>
+                            )}
+                            {showDropdown && (
+                              <>
+                                <select
+                                  value={row.sectionOwner ?? ""}
+                                  onChange={(e) => {
+                                    const v = e.target.value as Row["sectionOwner"];
+                                    if (v) updateIncomeStatementRowMetadata(row.id, {
+                                      sectionOwner: v,
+                                      isOperating: ["revenue", "cogs", "sga", "rd", "other_operating"].includes(v),
+                                      classificationSource: "user",
+                                    });
+                                  }}
+                                  className="rounded border border-slate-600 bg-slate-800 text-slate-200 px-2 py-0.5 text-[11px]"
+                                >
+                                  {sectionOwnerOptions.map((o) => (
+                                    <option key={o.value} value={o.value}>{o.label}</option>
+                                  ))}
+                                </select>
+                                <label className="flex items-center gap-1 text-slate-400">
+                                  <input
+                                    type="checkbox"
+                                    checked={row.isOperating === true}
+                                    onChange={(e) => updateIncomeStatementRowMetadata(row.id, { isOperating: e.target.checked, classificationSource: "user" })}
+                                    className="rounded border-slate-600 bg-slate-800"
+                                  />
+                                  Operating
+                                </label>
+                              </>
+                            )}
+                          </div>
+                          {row.classificationSource === "ai" && (row.classificationReason || row.classificationConfidence != null) && (
+                            <p className="text-[11px] text-slate-500 mt-1.5 pl-0">
+                              Suggested by AI: {sectionOwnerOptions.find((o) => o.value === row.sectionOwner)?.label ?? row.sectionOwner}
+                              {row.classificationConfidence != null && ` (${Math.round(row.classificationConfidence * 100)}%)`}.
+                              {row.classificationReason && ` Reason: ${row.classificationReason}`}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {isClassifyLoading && (
+              <p className="text-xs text-amber-300/80">Classifying with AI…</p>
+            )}
+          </div>
+        )}
+
+        {/* Non-blocking validation warnings (margins) */}
+        {validationWarnings.length > 0 && (
+          <div className="rounded-lg border border-slate-600 bg-slate-900/50 p-3">
+            <p className="text-xs font-semibold text-slate-300 mb-1">Margin check</p>
+            <p className="text-xs text-slate-400">
+              {validationWarnings.map((w) => (
+                <span key={`${w.year}-${w.type}`} className="mr-2">
+                  {w.year} {w.type === "gross_margin" ? "Gross margin" : w.type === "ebit_margin" ? "EBIT margin" : "Net margin"}: {w.value.toFixed(1)}%
+                </span>
+              ))}
+              — Review if these values are intended.
+            </p>
+          </div>
+        )}
+
         {/* Revenue Section */}
         {renderSection("Revenue", sections.revenue, "blue", "is_revenue")}
         
         {/* COGS Section */}
         {renderSection("Cost of Goods Sold (COGS)", sections.cogs, "orange", "is_cogs")}
         
-        {/* Gross Profit Section */}
-        {renderSection("Gross Profit", sections.grossProfit, "green", "is_gross_profit")}
-        
-        {/* Operating Expenses Section */}
-        {renderSection("Operating Expenses", sections.operatingExpenses, "purple", "is_operating_expenses")}
-        
-        {/* D&A Section */}
-        {renderSection("Depreciation & Amortization", sections.danda, "amber", "is_danda")}
-        
-        {/* EBIT Section */}
-        {renderSection("EBIT (Operating Income)", sections.ebit, "green", "is_ebit")}
+        {/* Operating Expenses: structural parent (calculated, non-editable) + children (SG&A, R&D, Other OpEx, D&A, custom). Always show section. */}
+        {(() => {
+          const opExItems = sections.operatingExpenses;
+          const sectionRootId = opExItems.length > 0 ? opExItems[0].id : null;
+          console.log("Operating Expenses section: parent row id used for section =", sectionRootId);
+          return renderSection("Operating Expenses", opExItems, "purple", "is_operating_expenses", true);
+        })()}
         
         {/* Interest & Other Section */}
         {renderSection("Interest & Other", sections.interest, "orange", "is_interest", true)}
         
-        {/* EBT Section */}
-        {sections.ebt.length > 0 && renderSection("EBT (Earnings Before Tax)", sections.ebt, "green", "is_ebt")}
-        
         {/* Tax Section */}
         {renderSection("Income Tax", sections.tax, "slate", "is_tax")}
-        
-        {/* Net Income Section */}
-        {renderSection("Net Income", sections.netIncome, "green", "is_net_income")}
-        
-        {/* Other Items Section */}
-        {sections.other.length > 0 && renderSection("Other Items", sections.other, "slate", "is_other")}
         
         {/* Stock-Based Compensation (SBC) Section - Optional */}
         {!isLocked && <SbcOptionalSection />}

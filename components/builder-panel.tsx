@@ -11,6 +11,7 @@ import CollapsibleSection from "@/components/collapsible-section";
 import YearsEditor from "@/components/years-editor";
 import { checkBalanceSheetBalance } from "@/lib/calculations";
 import { getUnclassifiedNonCoreBsRows } from "@/lib/bs-core-rows";
+import { getIsRowsMissingClassification } from "@/lib/is-classification";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 
 export default function BuilderPanel() {
@@ -49,9 +50,15 @@ export default function BuilderPanel() {
     return getUnclassifiedNonCoreBsRows(balanceSheet);
   }, [currentStepId, balanceSheet]);
 
-  // Disable Continue if balance doesn't check in historicals step, or BS Build has unclassified CF treatment rows
+  const incomeStatement = useModelStore((s) => s.incomeStatement);
+  const rowsMissingIsClassification = useMemo(() => {
+    if (currentStepId !== "historicals" || !incomeStatement?.length) return [];
+    return getIsRowsMissingClassification(incomeStatement);
+  }, [currentStepId, incomeStatement]);
+
+  // Disable Continue if balance doesn't check in historicals step, BS Build has unclassified CF rows, or IS has rows missing classification
   const canContinue = isCurrentStepComplete &&
-    (currentStepId !== "historicals" || balanceCheck.isBalanced || !balanceCheck.hasData) &&
+    (currentStepId !== "historicals" || (balanceCheck.isBalanced || !balanceCheck.hasData) && rowsMissingIsClassification.length === 0) &&
     (currentStepId !== "bs_build" || unclassifiedCfRows.length === 0);
 
   // Save button feedback state
@@ -151,6 +158,8 @@ export default function BuilderPanel() {
               title={
                 !isCurrentStepComplete
                   ? "Please save the current step first"
+                  : currentStepId === "historicals" && rowsMissingIsClassification.length > 0
+                  ? "Classify all custom Income Statement rows (section & operating vs non-operating) before continuing"
                   : currentStepId === "historicals" && !balanceCheck.isBalanced && balanceCheck.hasData
                   ? "Balance sheet must balance for all historical years before continuing"
                   : currentStepId === "bs_build" && unclassifiedCfRows.length > 0
@@ -162,6 +171,23 @@ export default function BuilderPanel() {
             </button>
           </div>
         </div>
+
+        {/* IS classification warning (Historicals): custom rows need sectionOwner + isOperating */}
+        {currentStepId === "historicals" && rowsMissingIsClassification.length > 0 && (
+          <div className="mt-3 rounded-md border border-amber-600/50 bg-amber-950/30 p-3">
+            <div className="flex items-start gap-2">
+              <span className="text-amber-400 text-sm">⚠️</span>
+              <div className="flex-1">
+                <p className="text-xs font-semibold text-amber-200">
+                  Classify custom Income Statement rows
+                </p>
+                <p className="text-xs text-amber-200/90 mt-1">
+                  {rowsMissingIsClassification.length} custom row(s) need section and operating/non-operating classification. Set them in the Income Statement Builder (Interest &amp; Other section or per-row classification).
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Balance Check Warning for Historicals Step */}
         {currentStepId === "bs_build" && unclassifiedCfRows.length > 0 && (

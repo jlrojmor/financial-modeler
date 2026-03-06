@@ -19,6 +19,8 @@ import {
 import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
 import { findCFIItem } from "@/lib/cfi-intelligence";
 import { findCFFItem } from "@/lib/cff-intelligence";
+import { getIncomeStatementDisplayOrder, getIsSectionKey } from "@/lib/is-classification";
+import { findRowInTree } from "@/lib/row-utils";
 
 const CAPEX_DEFAULT_BUCKET_IDS_PREVIEW = ["cap_b1", "cap_b2", "cap_b3", "cap_b4", "cap_b5", "cap_b6", "cap_b7", "cap_b8", "cap_b9", "cap_b10"];
 const CAPEX_DEFAULT_BUCKET_LABELS_PREVIEW: Record<string, string> = {
@@ -197,6 +199,30 @@ function getCFOSign(
 
 type FlattenOptions = { forStatement?: "income" | "balance" | "cashflow" };
 
+/** Find a row by id in the tree (top-level + children). */
+function findRowById(rows: Row[], id: string): Row | null {
+  for (const r of rows) {
+    if (r.id === id) return r;
+    if (r.children?.length) {
+      const found = findRowById(r.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Income Statement display section: presentation layer.
+ * Maps classification (sga, rd, other_operating) to one grouped header "Operating Expenses".
+ */
+function getISDisplaySection(row: Row, parentId: string | undefined, rows: Row[]): string | null {
+  const rowToUse = parentId ? findRowById(rows, parentId) : row;
+  if (!rowToUse) return null;
+  const key = getIsSectionKey(rowToUse);
+  if (key === "sga" || key === "rd" || key === "other_operating") return "operating_expenses";
+  return key;
+}
+
 function flattenRows(
   rows: Row[],
   depth = 0,
@@ -358,6 +384,7 @@ function StatementTable({
   );
   const isBalanceSheet = label === "Balance Sheet";
   const isCashFlow = label === "Cash Flow Statement";
+  const isIncomeStatement = label === "Income Statement";
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
 
@@ -445,7 +472,7 @@ function StatementTable({
       
       {/* Statement Rows */}
       {flat.map(({ row, depth, parentId }, flatIndex) => {
-        const currentSection = isBalanceSheet ? getBSSection(row.id, rows) : isCashFlow ? getCFSSection(row.id, rows, parentId) : null;
+        const currentSection = isBalanceSheet ? getBSSection(row.id, rows) : isCashFlow ? getCFSSection(row.id, rows, parentId) : isIncomeStatement ? getISDisplaySection(row, parentId, rows) : null;
         const currentCategory = isBalanceSheet ? getBSCategory(row.id, rows) : null;
         const isSectionCollapsed =
           isBalanceSheet && currentSection ? collapsedSections[currentSection] === true : false;
@@ -453,14 +480,21 @@ function StatementTable({
           isBalanceSheet && currentCategory ? collapsedCategories[currentCategory] === true : false;
         const prevRow = flatIndex > 0 ? flat[flatIndex - 1] : null;
         const prevSection =
-          (isBalanceSheet || isCashFlow) && prevRow
-            ? isBalanceSheet
+          prevRow == null
+            ? null
+            : isBalanceSheet
               ? getBSSection(prevRow.row.id, rows)
-              : getCFSSection(prevRow.row.id, rows, prevRow.parentId)
-            : null;
+              : isCashFlow
+                ? getCFSSection(prevRow.row.id, rows, prevRow.parentId)
+                : isIncomeStatement
+                  ? getISDisplaySection(prevRow.row, prevRow.parentId, rows)
+                  : null;
         const prevCategory = isBalanceSheet && prevRow ? getBSCategory(prevRow.row.id, rows) : null;
-        // Show section header only when section actually changes (prevSection !== currentSection). First row of CFS: prevSection is null, so show once.
-        const isSectionStart = (isBalanceSheet || isCashFlow) && currentSection != null && currentSection !== prevSection;
+        // Show section header when section changes. For IS: only show "Operating Expenses" header when the block is not already the structural parent (row.id !== "operating_expenses").
+        const isSectionStart =
+          (isBalanceSheet || isCashFlow) && currentSection != null && currentSection !== prevSection
+            ? true
+            : isIncomeStatement && currentSection === "operating_expenses" && prevSection !== "operating_expenses" && row.id !== "operating_expenses";
         // Show category subtitle if: (1) category changed, or (2) it's the first category in a new section
         const isCategoryStart = isBalanceSheet && currentCategory && (currentCategory !== prevCategory || isSectionStart);
         
@@ -504,6 +538,7 @@ function StatementTable({
           operating: { bg: "bg-blue-950/20", text: "text-blue-300", border: "border-blue-700/30" },
           investing: { bg: "bg-green-950/20", text: "text-green-300", border: "border-green-700/30" },
           financing: { bg: "bg-orange-950/20", text: "text-orange-300", border: "border-orange-700/30" },
+          operating_expenses: { bg: "bg-purple-950/20", text: "text-purple-300", border: "border-purple-700/30" },
         };
         
         // Category subtitle colors (same as section but lighter)
@@ -552,6 +587,7 @@ function StatementTable({
                       {currentSection === "operating" && "Operating Activities"}
                       {currentSection === "investing" && "Investing Activities"}
                       {currentSection === "financing" && "Financing Activities"}
+                      {currentSection === "operating_expenses" && "Operating Expenses"}
                     </span>
                   </button>
                 </td>
@@ -957,13 +993,27 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
     });
   };
 
+  // Income Statement in display order: section-driven explicit order (Revenue → COGS → Gross Profit → Operating Expenses → EBIT → Interest → EBT → Tax → Net Income)
+  const incomeStatementOrdered = useMemo(
+    () => getIncomeStatementDisplayOrder(incomeStatement ?? []),
+    [incomeStatement]
+  );
+
+  // Temporary: log ordered top-level row ids used by IS preview (must show operating_expenses between gross_profit and ebit)
+  useEffect(() => {
+    const ids = (incomeStatementOrdered ?? []).map((r) => r.id);
+    if (ids.length > 0) {
+      console.log("IS PREVIEW ORDER:\n" + ids.join("\n"));
+    }
+  }, [incomeStatementOrdered]);
+
   // Calculate total rows for display (use same flatten options as StatementTable so CFS includes SBC)
   const totalRows = useMemo(() => {
-    const isFlat = flattenRows(incomeStatement ?? [], 0, expandedRows, { forStatement: "income" });
+    const isFlat = flattenRows(incomeStatementOrdered, 0, expandedRows, { forStatement: "income" });
     const bsFlat = flattenRows(balanceSheet ?? [], 0, expandedRows, { forStatement: "balance" });
     const cfsFlat = flattenRows(cashFlow ?? [], 0, expandedRows, { forStatement: "cashflow" });
     return isFlat.length + bsFlat.length + cfsFlat.length;
-  }, [incomeStatement, balanceSheet, cashFlow, expandedRows]);
+  }, [incomeStatementOrdered, balanceSheet, cashFlow, expandedRows]);
 
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
   const isProjectionYear = (y: string) => y.endsWith("E") || projectionYears.includes(y);
@@ -1106,7 +1156,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
 
   /** Projected COGS per historical/fixed COGS child row (stream-level): cogsChildId -> year -> value. Only IS Build results for those fixed categories. */
   const projectedCogsByCogsChild = useMemo(() => {
-    const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+    const cogsRow = incomeStatement ? findRowInTree(incomeStatement, "cogs") : null;
     const cogsChildren = cogsRow?.children ?? [];
     if (cogsChildren.length === 0 || Object.keys(cogsByLineByYear).length === 0) return {};
     const rev = incomeStatement?.find((r) => r.id === "rev");
@@ -1136,7 +1186,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
 
   /** Projected SG&A by row id (projection years only). Same logic as IS Build: top-level = revenue × % of revenue, sub = parent × % of parent. */
   const projectedSgaByRowIdByYear = useMemo(() => {
-    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
     if (!sgaRow?.children?.length || !projectedRevenue) return {};
     const projYears = meta?.years?.projection ?? [];
     const revenueTotalByYear: Record<string, number> = {};
@@ -1186,7 +1236,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
 
   /** Projected SG&A per fixed SG&A category for Historicals: sum of LEAVES only under each fixed category (avoids double-counting parent + children). */
   const projectedSgaBySgaChild = useMemo(() => {
-    const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+    const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
     const sgaChildren = sgaRow?.children ?? [];
     if (sgaChildren.length === 0 || Object.keys(projectedSgaByRowIdByYear).length === 0) return {};
     const projYears = meta?.years?.projection ?? [];
@@ -1235,7 +1285,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   }, [incomeStatement, years, projectedRevenue]);
   const cogsByYearForWc = useMemo(() => {
     const out: Record<string, number> = {};
-    const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+    const cogsRow = incomeStatement ? findRowInTree(incomeStatement, "cogs") : null;
     const allSt = { incomeStatement: incomeStatement ?? [], balanceSheet: balanceSheet ?? [], cashFlow: cashFlow ?? [] };
     for (const y of years) {
       if (y.endsWith("E") && projectedCogs?.[y] != null) {
@@ -1595,7 +1645,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
             {/* Income Statement — only when showing full model */}
             {focusStatement === "all" && (
               <StatementTable
-                rows={incomeStatement.filter(r => 
+                rows={incomeStatementOrdered.filter(r => 
                   r.id !== "ebitda" && 
                   r.id !== "ebitda_margin" && 
                   r.id !== "sbc" &&
@@ -1621,9 +1671,9 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
 
             {/* Stock-Based Compensation Disclosure */}
             {focusStatement === "all" && (() => {
-              const sgaRow = incomeStatement.find((r) => r.id === "sga");
-              const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-              const rdRow = incomeStatement.find((r) => r.id === "rd");
+              const sgaRow = findRowInTree(incomeStatement, "sga");
+              const cogsRow = findRowInTree(incomeStatement, "cogs");
+              const rdRow = findRowInTree(incomeStatement, "rd");
               const sgaBreakdowns = sgaRow?.children ?? [];
               const cogsBreakdowns = cogsRow?.children ?? [];
               const rdBreakdowns = rdRow?.children ?? [];
@@ -2055,7 +2105,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                       <td className="px-3 py-2 text-xs font-semibold text-slate-200">Total Depreciation</td>
                       {years.map((y) => {
                         const isProj = projectionYears.includes(y);
-                        const val = isProj ? capexScheduleOutputBucketed.totalDandaByYear[y] : (danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null);
+                        const val = isProj ? capexScheduleOutputBucketed.totalDandaByYear[y] : (danaBreakdowns?.[y] ?? (incomeStatement ? findRowInTree(incomeStatement, "danda") : null)?.values?.[y] ?? null);
                         return (
                           <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-medium text-slate-200")(y)}>
                             {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
@@ -2095,7 +2145,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                       <td className="px-3 py-2 text-xs font-medium text-slate-200 pl-6">Depreciation</td>
                       {years.map((y) => {
                         const isProj = projectionYears.includes(y);
-                        const val = isProj && capexScheduleOutput ? capexScheduleOutput.dandaByYear[y] : (danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null);
+                        const val = isProj && capexScheduleOutput ? capexScheduleOutput.dandaByYear[y] : (danaBreakdowns?.[y] ?? (incomeStatement ? findRowInTree(incomeStatement, "danda") : null)?.values?.[y] ?? null);
                         return (
                           <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
                             {val == null ? "—" : formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals)}
@@ -2235,7 +2285,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                       const amort = intangiblesScheduleOutput?.amortByYear[y] ?? 0;
                       total = dep != null ? dep + amort : null;
                     } else {
-                      total = danaBreakdowns?.[y] ?? incomeStatement?.find((r) => r.id === "danda")?.values?.[y] ?? null;
+                      total = danaBreakdowns?.[y] ?? (incomeStatement ? findRowInTree(incomeStatement, "danda") : null)?.values?.[y] ?? null;
                     }
                     return (
                       <td key={y} className={yearColClass("px-3 py-2 text-right text-xs font-bold text-slate-200")(y)}>

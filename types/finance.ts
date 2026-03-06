@@ -28,6 +28,18 @@ export interface Row {
   cashFlowBehavior?: "working_capital" | "investing" | "financing" | "non_cash" | "unclassified";
   /** Optional: which schedule owns this row's projections (wc/capex/intangibles/debt). */
   scheduleOwner?: "wc" | "capex" | "intangibles" | "debt" | "none";
+  /** Income Statement: section this row belongs to (for custom rows; template rows have implicit section). operating_expenses = structural parent row for the Operating Expenses block. */
+  sectionOwner?: "revenue" | "cogs" | "sga" | "rd" | "other_operating" | "non_operating" | "tax" | "operating_expenses";
+  /** Income Statement: true = above EBIT (operating), false = Interest & Other (non-operating). */
+  isOperating?: boolean;
+  /** Who set classification; "user" = do not overwrite with AI; "fallback" = label-based rules when AI unavailable. */
+  classificationSource?: "user" | "ai" | "fallback";
+  /** AI suggestion reason (when classificationSource === "ai"). */
+  classificationReason?: string;
+  /** AI confidence 0–1 when classificationSource === "ai". */
+  classificationConfidence?: number;
+  /** True for rows from statement template; they never require classification. */
+  isTemplateRow?: boolean;
 }
 
 export type WizardStepId =

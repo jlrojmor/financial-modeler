@@ -8,6 +8,7 @@ import type { CurrencyUnit } from "@/lib/currency-utils";
 import { getColumnLetter, getCellName, sanitizeIdForExcel } from "./excel-formulas";
 import { storedToDisplay } from "./currency-utils";
 import { computeRowValue } from "@/lib/calculations";
+import { findRowInTree } from "@/lib/row-utils";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
 import type {
   RevenueProjectionConfig,
@@ -19,6 +20,7 @@ import type {
   ProductLineInputs,
 } from "@/types/revenue-projection";
 import { DEFAULT_REVENUE_PROJECTION_CONFIG } from "@/types/revenue-projection";
+import { findRowInTree } from "@/lib/row-utils";
 
 const IB_DARK_BLUE = "FF1E3A5F";
 const IB_INPUT_BLUE = "FFD6E4F0";
@@ -325,9 +327,9 @@ export function exportISBuildToExcel(
   }
 
   const revExcelRow = rowIdToExcelRow.get("rev") ?? headerRow + 1;
-  const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
-  const grossProfitRow = incomeStatement?.find((r) => r.id === "gross_profit");
-  const grossMarginRow = incomeStatement?.find((r) => r.id === "gross_margin");
+  const cogsRow = incomeStatement ? findRowInTree(incomeStatement, "cogs") : null;
+  const grossProfitRow = incomeStatement ? findRowInTree(incomeStatement, "gross_profit") : null;
+  const grossMarginRow = incomeStatement ? findRowInTree(incomeStatement, "gross_margin") : null;
 
   const leafRevenueLinesForCogs = revenueRows.filter((r) => r.id !== "rev");
   // Try to map each revenue stream to a matching COGS breakdown row by label (e.g. "Subscription" ↔ "Subscription COGS").
@@ -526,7 +528,7 @@ export function exportISBuildToExcel(
   }
 
   // SG&A section: Revenue ref + SG&A items (sga.children only, no sub-expansion) + Total SG&A
-  const sgaRow = incomeStatement?.find((r) => r.id === "sga");
+  const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
   const sgaChildren = sgaRow?.children ?? [];
   type SgaFlatItem = { row: Row; depth: number; parentId: string | null };
   const sgaRowsFlat: SgaFlatItem[] = [];

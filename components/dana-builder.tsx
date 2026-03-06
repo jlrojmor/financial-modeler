@@ -8,6 +8,7 @@ import {
   getUnitLabel,
 } from "@/lib/currency-utils";
 import CollapsibleSection from "@/components/collapsible-section";
+import { findRowInTree } from "@/lib/row-utils";
 
 /**
  * Guided D&A (Depreciation & Amortization) Builder
@@ -28,7 +29,7 @@ export default function DanaBuilder() {
   }, [meta]);
 
   // Find D&A row
-  const danaRow = incomeStatement.find((r) => r.id === "danda");
+  const danaRow = findRowInTree(incomeStatement ?? [], "danda");
 
   if (!danaRow) {
     return (

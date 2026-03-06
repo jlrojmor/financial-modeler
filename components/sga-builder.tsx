@@ -9,6 +9,7 @@ import {
   formatCurrencyDisplay,
 } from "@/lib/currency-utils";
 import CollapsibleSection from "@/components/collapsible-section";
+import { findRowInTree } from "@/lib/row-utils";
 
 /**
  * Standard SG&A breakdown suggestions (IB-grade)
@@ -51,7 +52,7 @@ export default function SgaBuilder() {
   }, [meta]);
 
   // Find SG&A row - same pattern as RevenueCogsBuilder
-  const sgaRow = incomeStatement.find((r) => r.id === "sga");
+  const sgaRow = findRowInTree(incomeStatement ?? [], "sga");
   const sgaBreakdowns = sgaRow?.children ?? [];
   const hasBreakdowns = sgaBreakdowns.length > 0;
 

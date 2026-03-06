@@ -18,6 +18,7 @@ import {
   createCashFlowTemplate,
 } from "@/lib/statement-templates";
 import { getRowsForCategory } from "@/lib/bs-category-mapper";
+import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
 import { isCoreBsRow, getCoreLockedBehavior } from "@/lib/bs-core-rows";
 import { CAPEX_IB_DEFAULT_USEFUL_LIVES, isLegacyWrongUsefulLives, CAPEX_DEFAULT_BUCKET_IDS } from "@/lib/capex-defaults";
 import { getWcScheduleItems, computeWcProjectedBalances, type WcDriverState } from "@/lib/working-capital-schedule";
@@ -43,6 +44,64 @@ function addChildRow(rows: Row[], parentId: string, child: Row): Row[] {
     }
     return r;
   });
+}
+
+function isOpexRow(row: Row): boolean {
+  if (["sga", "rd", "other_opex", "danda"].includes(row.id)) return true;
+  const so = row.sectionOwner;
+  return so === "sga" || so === "rd" || so === "other_operating";
+}
+
+/**
+ * Guarantees operating_expenses exists as a top-level row after gross_margin and before ebit.
+ * Children are user-controlled: legacy top-level opex rows are moved under it in their current order;
+ * if none exist, operating_expenses is created with empty children (no forced SG&A).
+ */
+function normalizeIncomeStatementOperatingExpenses(incomeStatement: Row[]): Row[] {
+  const rows = incomeStatement ?? [];
+  const opExIndex = rows.findIndex((r) => r.id === "operating_expenses");
+  const grossMarginIndex = rows.findIndex((r) => r.id === "gross_margin");
+
+  if (opExIndex >= 0) {
+    // operating_expenses exists: move any top-level opex rows into it, preserving their current order
+    const opExRow = rows[opExIndex];
+    const topLevelOpex = rows.filter((r, i) => i !== opExIndex && isOpexRow(r));
+    if (topLevelOpex.length === 0) return rows;
+    const existingChildIds = new Set((opExRow.children ?? []).map((c) => c.id));
+    const toAdd = topLevelOpex.filter((r) => !existingChildIds.has(r.id));
+    if (toAdd.length === 0) {
+      const withoutTopLevelOpex = rows.filter((_, i) => i === opExIndex || !isOpexRow(rows[i]));
+      return withoutTopLevelOpex;
+    }
+    // Append in the order they appear at top level (user/stored order)
+    const newChildren = [...(opExRow.children ?? []), ...toAdd];
+    const updatedOpEx = { ...opExRow, children: newChildren };
+    const withoutTopLevelOpex = rows.filter((_, i) => i !== opExIndex && !isOpexRow(rows[i]));
+    const insertIdx = withoutTopLevelOpex.findIndex((r) => r.id === "gross_margin") + 1;
+    const insertAt = insertIdx > 0 ? insertIdx : withoutTopLevelOpex.length;
+    withoutTopLevelOpex.splice(insertAt, 0, updatedOpEx);
+    return withoutTopLevelOpex;
+  }
+
+  // operating_expenses does not exist: collect top-level opex rows in current order, or empty
+  const topLevelOpex = rows.filter(isOpexRow);
+  const children: Row[] = topLevelOpex.length > 0 ? [...topLevelOpex] : [];
+
+  const opExRow: Row = {
+    id: "operating_expenses",
+    label: "Operating Expenses",
+    kind: "calc",
+    valueType: "currency",
+    values: {},
+    children,
+    sectionOwner: "operating_expenses",
+    isTemplateRow: true,
+  };
+
+  const withoutOpex = rows.filter((r) => !isOpexRow(r));
+  const insertAt = grossMarginIndex >= 0 ? grossMarginIndex + 1 : withoutOpex.length;
+  withoutOpex.splice(insertAt, 0, opExRow);
+  return withoutOpex;
 }
 
 function updateRowValueDeep(
@@ -144,6 +203,28 @@ function updateRowKindDeep(
     }
     if (r.children?.length) {
       return { ...r, children: updateRowKindDeep(r.children, rowId, kind) };
+    }
+    return r;
+  });
+}
+
+function updateIsRowMetadataDeep(
+  rows: Row[],
+  rowId: string,
+  patch: {
+    sectionOwner?: Row["sectionOwner"];
+    isOperating?: boolean;
+    classificationSource?: "user" | "ai" | "fallback";
+    classificationReason?: string;
+    classificationConfidence?: number;
+  }
+): Row[] {
+  return rows.map((r) => {
+    if (r.id === rowId) {
+      return { ...r, ...patch };
+    }
+    if (r.children?.length) {
+      return { ...r, children: updateIsRowMetadataDeep(r.children, rowId, patch) };
     }
     return r;
   });
@@ -469,6 +550,14 @@ export type ModelActions = {
   renameRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, label: string) => void;
   updateRowValue: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, year: string, value: number) => void;
   updateRowKind: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string, kind: "input" | "calc" | "subtotal" | "total") => void;
+  /** Income Statement: set sectionOwner / isOperating / classificationSource / classificationReason / classificationConfidence on a row. */
+  updateIncomeStatementRowMetadata: (rowId: string, patch: {
+    sectionOwner?: Row["sectionOwner"];
+    isOperating?: boolean;
+    classificationSource?: "user" | "ai" | "fallback";
+    classificationReason?: string;
+    classificationConfidence?: number;
+  }) => void;
 
   /** Sync Working Capital change children from Balance Sheet (CA except cash, CL except short-term debt). */
   ensureWcChildrenFromBS: () => void;
@@ -812,10 +901,11 @@ function applyProjectSnapshot(
   set: (fn: (s: ModelState & ModelActions) => Partial<ModelState>) => void,
   snapshot: ProjectSnapshot
 ) {
+  const normalizedIS = normalizeIncomeStatementOperatingExpenses(snapshot.incomeStatement ?? []);
   set(() => ({
     meta: snapshot.meta,
     isInitialized: true, // Always true when loading a snapshot (if snapshot exists, project is initialized)
-    incomeStatement: snapshot.incomeStatement,
+    incomeStatement: normalizedIS,
     balanceSheet: snapshot.balanceSheet,
     cashFlow: snapshot.cashFlow,
     schedules: snapshot.schedules,
@@ -907,18 +997,15 @@ export const useModelStore = create<ModelState & ModelActions>()(
         ? createCashFlowTemplate()
         : [...state.cashFlow];
 
-      // Migration: Ensure core Income Statement skeleton items always exist
-      // These are the fundamental structure of an IS and cannot be removed
+      // Migration: Ensure core Income Statement skeleton items (no sga/danda - operating_expenses children are user-built)
       const coreISItems = [
         { id: "rev", label: "Revenue", kind: "input", valueType: "currency", after: null },
         { id: "cogs", label: "Cost of Goods Sold (COGS)", kind: "input", valueType: "currency", after: "rev" },
         { id: "gross_profit", label: "Gross Profit", kind: "calc", valueType: "currency", after: "cogs" },
         { id: "gross_margin", label: "Gross Margin %", kind: "calc", valueType: "percent", after: "gross_profit" },
-        { id: "sga", label: "Selling, General & Administrative (SG&A)", kind: "input", valueType: "currency", after: "gross_margin" },
-        { id: "ebit", label: "EBIT (Operating Income)", kind: "calc", valueType: "currency", after: "sga" },
+        { id: "ebit", label: "EBIT (Operating Income)", kind: "calc", valueType: "currency", after: "operating_expenses" },
         { id: "ebit_margin", label: "EBIT Margin %", kind: "calc", valueType: "percent", after: "ebit" },
-        { id: "danda", label: "Depreciation & Amortization (D&A)", kind: "input", valueType: "currency", after: "ebit_margin" },
-        { id: "interest_expense", label: "Interest Expense", kind: "input", valueType: "currency", after: "danda" },
+        { id: "interest_expense", label: "Interest Expense", kind: "input", valueType: "currency", after: "ebit_margin" },
         { id: "interest_income", label: "Interest Income", kind: "input", valueType: "currency", after: "interest_expense" },
         { id: "other_income", label: "Other Income / (Expense), net", kind: "input", valueType: "currency", after: "interest_income" },
         { id: "ebt", label: "EBT (Earnings Before Tax)", kind: "calc", valueType: "currency", after: "other_income" },
@@ -926,20 +1013,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
         { id: "net_income", label: "Net Income", kind: "calc", valueType: "currency", after: "tax" },
         { id: "net_income_margin", label: "Net Income Margin %", kind: "calc", valueType: "percent", after: "net_income" },
       ];
-      
-      // Ensure each core item exists, and if not, add it in the correct position
       coreISItems.forEach((coreItem) => {
         const exists = incomeStatement.some((r) => r.id === coreItem.id);
         if (!exists) {
-          // Find the correct position based on the "after" reference
           let insertIndex = incomeStatement.length;
           if (coreItem.after) {
             const afterIndex = incomeStatement.findIndex((r) => r.id === coreItem.after);
-            if (afterIndex >= 0) {
-              insertIndex = afterIndex + 1;
-            }
+            if (afterIndex >= 0) insertIndex = afterIndex + 1;
           } else {
-            // First item (rev) - insert at beginning
             insertIndex = 0;
           }
           incomeStatement.splice(insertIndex, 0, {
@@ -958,7 +1039,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
       if (!hasGrossMargin) {
         const grossProfitIndex = incomeStatement.findIndex((r) => r.id === "gross_profit");
         if (grossProfitIndex >= 0) {
-          // Insert gross_margin right after gross_profit
           incomeStatement.splice(grossProfitIndex + 1, 0, {
             id: "gross_margin",
             label: "Gross Margin %",
@@ -968,22 +1048,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
             children: [],
           });
         }
-      }
-
-      // Migration: Ensure SG&A exists (should always be in template, but check anyway)
-      const hasSga = incomeStatement.some((r) => r.id === "sga");
-      if (!hasSga) {
-        const grossMarginIndex = incomeStatement.findIndex((r) => r.id === "gross_margin");
-        const insertIndex = grossMarginIndex >= 0 ? grossMarginIndex + 1 : incomeStatement.length;
-        // Insert SG&A after gross_margin (or at end if gross_margin not found)
-        incomeStatement.splice(insertIndex, 0, {
-          id: "sga",
-          label: "Selling, General & Administrative (SG&A)",
-          kind: "input",
-          valueType: "currency",
-          values: {},
-          children: [],
-        });
       }
 
       // Migration: Ensure EBITDA exists (should be in template, but check anyway)
@@ -1033,14 +1097,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
         incomeStatement.splice(ebitdaMarginIndex, 1);
       }
 
-      // Migration: Ensure EBIT exists and is in the correct position (after SG&A)
+      // Normalize: guarantee operating_expenses exists at top level (after gross_margin) with sga/rd/other_opex/danda as children
+      incomeStatement = normalizeIncomeStatementOperatingExpenses(incomeStatement);
+
+      // Migration: Ensure EBIT exists and is in the correct position (after operating_expenses)
       const hasEbit = incomeStatement.some((r) => r.id === "ebit");
       const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
-      const sgaIndex = incomeStatement.findIndex((r) => r.id === "sga");
-      
+      const opExIndexAfterNorm = incomeStatement.findIndex((r) => r.id === "operating_expenses");
+      const insertAfterIndex = opExIndexAfterNorm >= 0 ? opExIndexAfterNorm : incomeStatement.findIndex((r) => r.id === "gross_margin") + 1;
       if (!hasEbit) {
-        // Insert EBIT after SG&A
-        const insertIndex = sgaIndex >= 0 ? sgaIndex + 1 : incomeStatement.length;
+        // Insert EBIT after Operating Expenses (or after SG&A in legacy)
+        const insertIndex = insertAfterIndex >= 0 ? insertAfterIndex + 1 : incomeStatement.length;
         incomeStatement.splice(insertIndex, 0, {
           id: "ebit",
           label: "EBIT (Operating Income)",
@@ -1049,20 +1116,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
           values: {},
           children: [],
         });
-      } else if (ebitIndex >= 0 && sgaIndex >= 0) {
+      } else if (ebitIndex >= 0 && insertAfterIndex >= 0) {
         // EBIT exists - check if it needs to be moved
-        if (ebitIndex < sgaIndex) {
-          // EBIT exists but is before SG&A - move it after SG&A
+        if (ebitIndex < insertAfterIndex) {
+          // EBIT exists but is before Operating Expenses / SG&A - move it after
           const ebitRow = incomeStatement[ebitIndex];
           incomeStatement.splice(ebitIndex, 1);
-          const newIndex = sgaIndex; // sgaIndex is now correct since we removed EBIT
+          const newIndex = insertAfterIndex; // correct since we removed EBIT
           incomeStatement.splice(newIndex + 1, 0, ebitRow);
-        } else if (ebitIndex > sgaIndex + 3) {
-          // EBIT exists but is too far after SG&A (likely at the end) - move it right after SG&A
+        } else if (ebitIndex > insertAfterIndex + 3) {
+          // EBIT exists but is too far after operating_expenses (likely at the end) - move it right after
           const ebitRow = incomeStatement[ebitIndex];
           incomeStatement.splice(ebitIndex, 1);
-          const newIndex = sgaIndex;
-          incomeStatement.splice(newIndex + 1, 0, ebitRow);
+          incomeStatement.splice(insertAfterIndex + 1, 0, ebitRow);
         }
       }
       
@@ -1364,7 +1430,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
       // Recalculate all years for all statements. Preserve values for rows with IS Build breakdowns (e.g. R&D with sub-items).
       const allYears = [...(meta.years.historical || []), ...(meta.years.projection || [])];
-      const sgaChildrenForInit = incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+      const sgaChildrenForInit = findRowDeep(incomeStatement, "sga")?.children ?? [];
       const sgaParentIdsInit = collectParentIdsWithChildren(sgaChildrenForInit);
       const revBreakdownIdsInit = new Set(Object.keys(get().revenueProjectionConfig?.breakdowns ?? {}));
       const parentIdsWithProjectionBreakdownsInit = new Set([...revBreakdownIdsInit, ...sgaParentIdsInit]);
@@ -1378,6 +1444,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
         allStatements = { incomeStatement, balanceSheet, cashFlow };
         cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
       });
+
+      // Temporary: verify top-level IS order and operating_expenses structure after normalization
+      const topLevelIds = incomeStatement.map((r) => r.id);
+      console.log("TOP-LEVEL IS IDS AFTER NORMALIZATION:\n" + topLevelIds.join("\n"));
+      const opExRowForLog = incomeStatement.find((r) => r.id === "operating_expenses");
+      console.log("operating_expenses children:\n" + (opExRowForLog?.children ?? []).map((c) => c.id).join("\n"));
 
       set({
         meta,
@@ -1422,18 +1494,15 @@ export const useModelStore = create<ModelState & ModelActions>()(
     
     const boundaries = findSectionBoundaries();
 
-    // Migration: Ensure core Income Statement skeleton items always exist
-    // These are the fundamental structure of an IS and cannot be removed
-    const coreISItems = [
+    // Migration: Ensure core Income Statement skeleton (no sga/danda; operating_expenses children are user-built)
+    const coreISItemsRecalc = [
       { id: "rev", label: "Revenue", kind: "input", valueType: "currency", after: null },
       { id: "cogs", label: "Cost of Goods Sold (COGS)", kind: "input", valueType: "currency", after: "rev" },
       { id: "gross_profit", label: "Gross Profit", kind: "calc", valueType: "currency", after: "cogs" },
       { id: "gross_margin", label: "Gross Margin %", kind: "calc", valueType: "percent", after: "gross_profit" },
-      { id: "sga", label: "Selling, General & Administrative (SG&A)", kind: "input", valueType: "currency", after: "gross_margin" },
-      { id: "ebit", label: "EBIT (Operating Income)", kind: "calc", valueType: "currency", after: "sga" },
+      { id: "ebit", label: "EBIT (Operating Income)", kind: "calc", valueType: "currency", after: "operating_expenses" },
       { id: "ebit_margin", label: "EBIT Margin %", kind: "calc", valueType: "percent", after: "ebit" },
-      { id: "danda", label: "Depreciation & Amortization (D&A)", kind: "input", valueType: "currency", after: "ebit_margin" },
-      { id: "interest_expense", label: "Interest Expense", kind: "input", valueType: "currency", after: "danda" },
+      { id: "interest_expense", label: "Interest Expense", kind: "input", valueType: "currency", after: "ebit_margin" },
       { id: "interest_income", label: "Interest Income", kind: "input", valueType: "currency", after: "interest_expense" },
       { id: "other_income", label: "Other Income / (Expense), net", kind: "input", valueType: "currency", after: "interest_income" },
       { id: "ebt", label: "EBT (Earnings Before Tax)", kind: "calc", valueType: "currency", after: "other_income" },
@@ -1441,20 +1510,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
       { id: "net_income", label: "Net Income", kind: "calc", valueType: "currency", after: "tax" },
       { id: "net_income_margin", label: "Net Income Margin %", kind: "calc", valueType: "percent", after: "net_income" },
     ];
-    
-    // Ensure each core item exists, and if not, add it in the correct position
-    coreISItems.forEach((coreItem) => {
+    coreISItemsRecalc.forEach((coreItem) => {
       const exists = incomeStatement.some((r) => r.id === coreItem.id);
       if (!exists) {
-        // Find the correct position based on the "after" reference
         let insertIndex = incomeStatement.length;
         if (coreItem.after) {
           const afterIndex = incomeStatement.findIndex((r) => r.id === coreItem.after);
-          if (afterIndex >= 0) {
-            insertIndex = afterIndex + 1;
-          }
+          if (afterIndex >= 0) insertIndex = afterIndex + 1;
         } else {
-          // First item (rev) - insert at beginning
           insertIndex = 0;
         }
         incomeStatement.splice(insertIndex, 0, {
@@ -1647,31 +1710,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
       }
     }
 
-    // Migration: Ensure SG&A exists (should always be in template, but check anyway)
-    const hasSga = incomeStatement.some((r) => r.id === "sga");
-    if (!hasSga) {
-      const grossMarginIndex = incomeStatement.findIndex((r) => r.id === "gross_margin");
-      const insertIndex = grossMarginIndex >= 0 ? grossMarginIndex + 1 : incomeStatement.length;
-      // Insert SG&A after gross_margin (or at end if gross_margin not found)
-      incomeStatement.splice(insertIndex, 0, {
-        id: "sga",
-        label: "Selling, General & Administrative (SG&A)",
-        kind: "input",
-        valueType: "currency",
-        values: {},
-        children: [],
-      });
-    }
-
     // Migration: Ensure EBITDA exists (should be in template, but check anyway)
     const hasEbitda = incomeStatement.some((r) => r.id === "ebitda");
     if (!hasEbitda) {
-      // Find where to insert EBITDA - after Other Operating Expenses
-      const otherOpexIndex = incomeStatement.findIndex((r) => r.id === "other_opex");
-      const rdIndex = incomeStatement.findIndex((r) => r.id === "rd");
-      const insertIndex = otherOpexIndex >= 0 ? otherOpexIndex + 1 : 
-                         rdIndex >= 0 ? rdIndex + 1 : 
-                         incomeStatement.length;
+      const opExIndexForEbitda = incomeStatement.findIndex((r) => r.id === "operating_expenses");
+      const insertIndex = opExIndexForEbitda >= 0 ? opExIndexForEbitda + 1 : incomeStatement.length;
       // Insert EBITDA
       incomeStatement.splice(insertIndex, 0, {
         id: "ebitda",
@@ -2019,7 +2062,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
 
     // Recalculate all years for all statements. Preserve values for rows with IS Build breakdowns (e.g. R&D with sub-items).
-    const sgaChildrenRecalc = incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+    const sgaChildrenRecalc = findRowDeep(incomeStatement, "sga")?.children ?? [];
     const sgaParentIdsRecalc = collectParentIdsWithChildren(sgaChildrenRecalc);
     const revBreakdownIdsRecalc = new Set(Object.keys(get().revenueProjectionConfig?.breakdowns ?? {}));
     const parentIdsWithProjectionBreakdownsRecalc = new Set([...revBreakdownIdsRecalc, ...sgaParentIdsRecalc]);
@@ -2121,6 +2164,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
       return;
     }
 
+    const isSectionMap: Record<string, { sectionOwner: Row["sectionOwner"]; isOperating: boolean }> = {
+      rev: { sectionOwner: "revenue", isOperating: true },
+      cogs: { sectionOwner: "cogs", isOperating: true },
+      sga: { sectionOwner: "sga", isOperating: true },
+      rd: { sectionOwner: "rd", isOperating: true },
+    };
+    let sectionMeta: { sectionOwner: Row["sectionOwner"]; isOperating: boolean } | undefined =
+      statement === "incomeStatement" ? isSectionMap[parentId] : undefined;
+    if (statement === "incomeStatement" && parentId === "operating_expenses") {
+      sectionMeta = getFallbackIsClassification(trimmed);
+    }
     const child: Row = {
       id: uuid(),
       label: trimmed,
@@ -2128,6 +2182,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
       valueType: "currency",
       values: {},
       children: [],
+      ...(sectionMeta && {
+        sectionOwner: sectionMeta.sectionOwner,
+        isOperating: sectionMeta.isOperating,
+        ...(statement === "incomeStatement" && parentId === "operating_expenses" && { classificationSource: "fallback" as const }),
+      }),
     };
 
     console.log("addChildRow: Adding child", child.label, "to parent", parentId, "in", statement);
@@ -2138,16 +2197,23 @@ export const useModelStore = create<ModelState & ModelActions>()(
       console.log("addChildRow: Available row IDs:", currentRows.map(r => r.id));
       
       // Check if parent exists anywhere in the tree (nested parents e.g. SG&A sub-items)
-      const parentExists = findRowDeep(currentRows, parentId) !== null;
-      
+      let rowsToUse = currentRows;
+      let parentExists = findRowDeep(rowsToUse, parentId) !== null;
+
+      // If adding under operating_expenses and parent missing, normalize IS first then add
+      if (!parentExists && statement === "incomeStatement" && parentId === "operating_expenses") {
+        rowsToUse = normalizeIncomeStatementOperatingExpenses(JSON.parse(JSON.stringify(rowsToUse)));
+        parentExists = findRowDeep(rowsToUse, parentId) !== null;
+      }
+
       if (!parentExists) {
         console.error("addChildRow: Parent row not found!", parentId, "in statement:", statement);
         console.error("addChildRow: Available rows:", currentRows.map(r => ({ id: r.id, label: r.label })));
         return state; // Don't update if parent not found
       }
-      
+
       // Deep clone to avoid mutation issues
-      const updated = addChildRow(JSON.parse(JSON.stringify(currentRows)), parentId, child);
+      const updated = addChildRow(JSON.parse(JSON.stringify(rowsToUse)), parentId, child);
       
       // Verify the child was added (parent may be nested, so find in tree)
       const parentRowAfterAdd = findRowDeep(updated, parentId);
@@ -2161,7 +2227,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       // If adding first child to Revenue, COGS, or SG&A (top-level only), convert them to calc
       let finalRows = updated;
       
-      if (parentId === "rev" || parentId === "cogs" || parentId === "sga") {
+      if (parentId === "rev" || parentId === "cogs" || parentId === "sga" || parentId === "operating_expenses") {
         if (parentRowAfterAdd.children && parentRowAfterAdd.children.length > 0 && parentRowAfterAdd.kind === "input") {
           // First child added, convert to calc - but preserve children!
           finalRows = updated.map((r) => {
@@ -2185,7 +2251,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const sgaParentIdsWithBreakdowns =
         statement === "incomeStatement"
           ? collectParentIdsWithChildren(
-              recalculatedRows.find((r) => r.id === "sga")?.children ?? []
+              findRowDeep(recalculatedRows, "sga")?.children ?? []
             )
           : new Set<string>();
       const revBreakdownIds = new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}));
@@ -2311,10 +2377,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
   },
 
   removeRow: (statement, rowId) => {
-    // Core Income Statement items that form the skeleton - cannot be removed
+    // Core Income Statement: only structural anchors. Children of operating_expenses (sga, rd, other_opex, danda, custom) are removable.
     const coreISItems = [
-      "rev", "cogs", "gross_profit", "gross_margin", 
-      "sga", "danda", "ebit", "ebit_margin",
+      "rev", "cogs", "gross_profit", "gross_margin",
+      "operating_expenses",
+      "ebit", "ebit_margin",
       "interest_expense", "interest_income", "other_income",
       "ebt", "tax", "net_income", "net_income_margin"
     ];
@@ -2366,9 +2433,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       
       // Check if we removed the last child from Revenue, COGS, or SG&A
       // If so, convert them back to input
-      const revenueRow = updated.find((r) => r.id === "rev");
-      const cogsRow = updated.find((r) => r.id === "cogs");
-      const sgaRow = updated.find((r) => r.id === "sga");
+      const revenueRow = findRowDeep(updated, "rev");
+      const cogsRow = findRowDeep(updated, "cogs");
+      const sgaRow = findRowDeep(updated, "sga");
       
       let finalUpdated = updated;
       
@@ -2448,7 +2515,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
           ? new Set([
               ...Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}),
               ...collectParentIdsWithChildren(
-                state.incomeStatement.find((r) => r.id === "sga")?.children ?? []
+                findRowDeep(state.incomeStatement, "sga")?.children ?? []
               ),
             ])
           : undefined;
@@ -2477,6 +2544,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const currentRows = state[statement];
       const updated = updateRowKindDeep(currentRows, rowId, kind);
       return { [statement]: updated };
+    });
+  },
+
+  updateIncomeStatementRowMetadata: (rowId, patch) => {
+    set((state) => {
+      const updated = updateIsRowMetadataDeep(state.incomeStatement, rowId, patch);
+      if (updated === state.incomeStatement) return state;
+      return { ...state, incomeStatement: updated };
     });
   },
 
@@ -3061,7 +3136,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
   updateIncomeStatementValue: (rowId, year, value) => {
     set((state) => {
       const updated = updateRowValueDeep(state.incomeStatement, rowId, year, value);
-      const sgaChildren = state.incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+      const sgaChildren = findRowDeep(state.incomeStatement, "sga")?.children ?? [];
       const parentIdsWithProjectionBreakdowns = new Set([
         ...Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}),
         ...collectParentIdsWithChildren(sgaChildren),
@@ -3148,7 +3223,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       // Recalculate all formulas for all new years. Preserve historical values for rows with IS Build breakdowns (e.g. R&D with sub-items).
       const sbcBreakdowns = state.sbcBreakdowns;
       const danaBreakdowns = state.danaBreakdowns;
-      const sgaChildren = incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+      const sgaChildren = findRowDeep(incomeStatement, "sga")?.children ?? [];
       const sgaParentIdsWithBreakdowns = collectParentIdsWithChildren(sgaChildren);
       const revBreakdownIds = new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}));
       const parentIdsWithProjectionBreakdowns = new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns]);
@@ -3786,22 +3861,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
             }
           }
 
-          // Migration: Ensure SG&A exists (should always be in template, but check anyway)
-          const hasSga = incomeStatement.some((r) => r.id === "sga");
-          if (!hasSga) {
-            const grossMarginIndex = incomeStatement.findIndex((r) => r.id === "gross_margin");
-            const insertIndex = grossMarginIndex >= 0 ? grossMarginIndex + 1 : incomeStatement.length;
-            // Insert SG&A after gross_margin (or at end if gross_margin not found)
-            incomeStatement.splice(insertIndex, 0, {
-              id: "sga",
-              label: "Selling, General & Administrative (SG&A)",
-              kind: "input",
-              valueType: "currency",
-              values: {},
-              children: [],
-            });
-          }
-
           // Migration: Ensure EBITDA exists (should be in template, but check anyway)
           const hasEbitda = incomeStatement.some((r) => r.id === "ebitda");
           if (!hasEbitda) {
@@ -3849,6 +3908,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
             incomeStatement.splice(ebitdaMarginIndex, 1);
           }
 
+          // Normalize: guarantee operating_expenses exists at top level with sga/rd/other_opex/danda as children
+          incomeStatement = normalizeIncomeStatementOperatingExpenses(incomeStatement);
+
           // Migration: Ensure D&A exists (should be in template, but check anyway)
           const hasDana = incomeStatement.some((r) => r.id === "danda");
           if (!hasDana) {
@@ -3869,14 +3931,15 @@ export const useModelStore = create<ModelState & ModelActions>()(
             });
           }
 
-          // Migration: Ensure EBIT exists and is in the correct position (after SG&A)
+          // Migration: Ensure EBIT exists and is in the correct position (after Operating Expenses or SG&A)
           const hasEbit = incomeStatement.some((r) => r.id === "ebit");
           const ebitIndex = incomeStatement.findIndex((r) => r.id === "ebit");
-          const sgaIndex = incomeStatement.findIndex((r) => r.id === "sga");
-          
+          const opExIndexMig = incomeStatement.findIndex((r) => r.id === "operating_expenses");
+          const sgaIndexMig = incomeStatement.findIndex((r) => r.id === "sga");
+          const insertAfterIndexMig = opExIndexMig >= 0 ? opExIndexMig : sgaIndexMig;
           if (!hasEbit) {
-            // Insert EBIT after SG&A
-            const insertIndex = sgaIndex >= 0 ? sgaIndex + 1 : incomeStatement.length;
+            // Insert EBIT after Operating Expenses (or SG&A in legacy)
+            const insertIndex = insertAfterIndexMig >= 0 ? insertAfterIndexMig + 1 : incomeStatement.length;
             incomeStatement.splice(insertIndex, 0, {
               id: "ebit",
               label: "EBIT (Operating Income)",
@@ -3885,19 +3948,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
               values: {},
               children: [],
             });
-          } else if (ebitIndex >= 0 && sgaIndex >= 0) {
+          } else if (ebitIndex >= 0 && insertAfterIndexMig >= 0) {
             // EBIT exists - check if it needs to be moved
-            if (ebitIndex < sgaIndex) {
-              // EBIT exists but is before SG&A - move it after SG&A
+            if (ebitIndex < insertAfterIndexMig) {
+              // EBIT exists but is before Operating Expenses / SG&A - move it after
               const ebitRow = incomeStatement[ebitIndex];
               incomeStatement.splice(ebitIndex, 1);
-              const newIndex = sgaIndex; // sgaIndex is now correct since we removed EBIT
-              incomeStatement.splice(newIndex + 1, 0, ebitRow);
-            } else if (ebitIndex > sgaIndex + 3) {
-              // EBIT exists but is too far after SG&A (likely at the end) - move it right after SG&A
+              const newIndex = insertAfterIndexMig; // correct since we removed EBIT
+              incomeStatement.splice(newIndex, 0, ebitRow);
+            } else if (ebitIndex > insertAfterIndexMig + 3) {
+              // EBIT exists but is too far after Operating Expenses / SG&A - move it right after
               const ebitRow = incomeStatement[ebitIndex];
               incomeStatement.splice(ebitIndex, 1);
-              const newIndex = sgaIndex;
+              const newIndex = insertAfterIndexMig;
               incomeStatement.splice(newIndex + 1, 0, ebitRow);
             }
           }
@@ -4219,7 +4282,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
           }
 
           // Recalculate all years for all statements. Preserve historical values for rows with IS Build breakdowns (rev/cogs/sga parents and SG&A children like R&D that have sub-items).
-          const sgaChildren = state.incomeStatement.find((r) => r.id === "sga")?.children ?? [];
+          const sgaChildren = findRowDeep(state.incomeStatement, "sga")?.children ?? [];
           const sgaParentIdsWithBreakdowns = collectParentIdsWithChildren(sgaChildren);
           const revBreakdownIds = new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}));
           const parentIdsWithProjectionBreakdowns = new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns]);
@@ -4233,13 +4296,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
             cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
           });
 
-          // Return updated state
-          return {
-            ...state,
+          // Temporary: verify top-level IS after rehydration normalization
+          console.log("TOP-LEVEL IS IDS AFTER NORMALIZATION (rehydrate):\n" + incomeStatement.map((r) => r.id).join("\n"));
+          const opExRehydrate = incomeStatement.find((r) => r.id === "operating_expenses");
+          if (opExRehydrate?.children?.length) {
+            console.log("operating_expenses children:\n" + opExRehydrate.children.map((c) => c.id).join("\n"));
+          }
+
+          // Apply migrated state to store so normalized IS is used
+          useModelStore.setState({
             incomeStatement,
             balanceSheet,
             cashFlow,
-          };
+          });
         }
         return state;
       },

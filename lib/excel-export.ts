@@ -13,6 +13,7 @@ import { storedToDisplay, getUnitLabel, type CurrencyUnit } from "./currency-uti
 import { findCFIItem } from "./cfi-intelligence";
 import { findCFFItem } from "./cff-intelligence";
 import { computeRowValue } from "@/lib/calculations";
+import { findRowInTree } from "@/lib/row-utils";
 
 type FlattenOptions = {
   forStatement?: "income" | "balance" | "cashflow";
@@ -932,9 +933,9 @@ export function exportSbcDisclosureToExcel(
   currencyUnit?: string
 ): number {
   const IB_DARK_BLUE = "FF1E3A5F";
-  const sgaRow = incomeStatement.find((r) => r.id === "sga");
-  const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-  const rdRow = incomeStatement.find((r) => r.id === "rd");
+  const sgaRow = findRowInTree(incomeStatement, "sga");
+  const cogsRow = findRowInTree(incomeStatement, "cogs");
+  const rdRow = findRowInTree(incomeStatement, "rd");
   const sgaBreakdowns = sgaRow?.children ?? [];
   const cogsBreakdowns = cogsRow?.children ?? [];
   const rdBreakdowns = rdRow?.children ?? [];

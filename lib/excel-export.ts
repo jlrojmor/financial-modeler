@@ -7,7 +7,7 @@
  * - Proper number formatting
  */
 
-import type { Row } from "@/types/finance";
+import type { Row, EmbeddedDisclosureItem } from "@/types/finance";
 import { generateExcelFormula, getCellName, getColumnLetter, sanitizeIdForExcel } from "./excel-formulas";
 import { storedToDisplay, getUnitLabel, type CurrencyUnit } from "./currency-utils";
 import { findCFIItem } from "./cfi-intelligence";
@@ -329,7 +329,7 @@ export type ExportStatementContext = {
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
   sbcBreakdowns?: Record<string, Record<string, number>>;
   danaBreakdowns?: Record<string, number>;
-  embeddedDisclosures?: Array<{ id: string; label: string; valuesByYear: Record<string, number> }>;
+  embeddedDisclosures?: EmbeddedDisclosureItem[];
   isBuildRefs?: ISBuildRefMap;
 };
 

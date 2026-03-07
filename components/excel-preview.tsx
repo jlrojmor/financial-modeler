@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
-import type { Row } from "@/types/finance";
+import type { Row, EmbeddedDisclosureItem } from "@/types/finance";
 import { formatCurrencyDisplay, storedToDisplay, displayToStored, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
 import { checkBalanceSheetBalance, computeBalanceSheetTotalsWithOverrides, computeRowValue } from "@/lib/calculations";
 import { resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
@@ -387,7 +387,7 @@ function StatementTable({
   sbcBreakdowns?: Record<string, Record<string, number>>;
   danaBreakdowns?: Record<string, number>;
   /** CFS CFO source resolution: reported → embedded disclosure → 0 for SBC/D&A. */
-  embeddedDisclosures?: Array<{ id: string; label: string; valuesByYear: Record<string, number> }>;
+  embeddedDisclosures?: EmbeddedDisclosureItem[];
   /** For Income Statement: rev and its direct children use this for projection years (sum of IS Build breakdowns). */
   projectedRevenue?: Record<string, Record<string, number>>;
   /** For Income Statement: total COGS per projection year from revenue × COGS % per line. */

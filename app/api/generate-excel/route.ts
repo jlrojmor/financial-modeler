@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ModelState } from "@/store/useModelStore";
+import type { EmbeddedDisclosureItem } from "@/types/finance";
 import { getIncomeStatementDisplayOrder } from "@/lib/is-classification";
 import { exportStatementToExcel, exportSbcDisclosureToExcel, exportBalanceCheckToExcel, type ExportStatementContext } from "@/lib/excel-export";
 
@@ -33,11 +34,12 @@ export async function POST(request: Request) {
     };
     const sbcBreakdowns = modelState.sbcBreakdowns ?? {};
     const danaBreakdowns = modelState.danaBreakdowns ?? {};
+    const embeddedDisclosures: EmbeddedDisclosureItem[] = modelState.embeddedDisclosures ?? [];
     const exportContext: ExportStatementContext = {
       allStatements,
       sbcBreakdowns,
       danaBreakdowns,
-      embeddedDisclosures: modelState.embeddedDisclosures ?? [],
+      embeddedDisclosures,
       isBuildRefs: isBuildResult.refMap,
     };
 

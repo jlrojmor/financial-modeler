@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useEffect, Fragment } from "react";
 import { useModelStore } from "@/store/useModelStore";
-import type { Row } from "@/types/finance";
+import type { Row, EmbeddedDisclosureItem } from "@/types/finance";
 import {
   displayToStored,
   storedToDisplay,
@@ -172,7 +172,7 @@ function CFSSectionComponent({
   balanceSheet: Row[];
   danaBreakdowns: Record<string, number>;
   danaLocation: "cogs" | "sga" | "both" | null;
-  embeddedDisclosures?: Array<{ id: string; label: string; valuesByYear: Record<string, number> }>;
+  embeddedDisclosures?: EmbeddedDisclosureItem[];
 }) {
   // Get current cashFlow from store to ensure we have the latest state
   // This ensures we always have the most up-to-date data after insertions
@@ -477,7 +477,7 @@ function CFSSectionComponent({
   const operatingDisplayBlocks = useMemo(() => {
     if (section.id !== "operating") return [];
     const nonTotal = sectionItems.filter((r) => r.id !== section.totalRowId);
-    const blocks: { type: "header"; label: string } | { type: "row"; row: Row }[] = [];
+    const blocks: ({ type: "header"; label: string } | { type: "row"; row: Row })[] = [];
     for (const sg of CFO_OPERATING_SUBGROUPS) {
       if (sg.id === "total") continue;
       const rowsInGroup = nonTotal.filter((r) => getOperatingSubgroup(r.id) === sg.id);

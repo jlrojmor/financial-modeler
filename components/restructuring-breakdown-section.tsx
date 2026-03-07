@@ -1,11 +1,13 @@
 "use client";
 
 import { useMemo, useState, useEffect } from "react";
+import type { Row } from "@/types/finance";
 import { useModelStore } from "@/store/useModelStore";
 import {
   displayToStored,
   storedToDisplay,
   getUnitLabel,
+  type CurrencyUnit,
 } from "@/lib/currency-utils";
 import { getEligibleRowsForSbc } from "@/lib/is-disclosure-eligible";
 import { getRestructuringDisclosures, getTotalRestructuringByYearFromEmbedded } from "@/lib/embedded-disclosure-restructuring";
@@ -28,10 +30,10 @@ export default function RestructuringBreakdownSection() {
   );
 
   const allStatements = useMemo(
-    () => ({
+    (): { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] } => ({
       incomeStatement: incomeStatement ?? [],
-      balanceSheet: [],
-      cashFlow: [],
+      balanceSheet: [] as Row[],
+      cashFlow: [] as Row[],
     }),
     [incomeStatement]
   );
@@ -85,8 +87,8 @@ export default function RestructuringBreakdownSection() {
             <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-5">
               {years.map((y) => {
                 const total = totalRestructByYear[y] ?? 0;
-                const displayValue = storedToDisplay(total, meta?.currencyUnit);
-                const unitLabel = getUnitLabel(meta?.currencyUnit);
+                const displayValue = storedToDisplay(total, (meta?.currencyUnit ?? "units") as CurrencyUnit);
+                const unitLabel = getUnitLabel((meta?.currencyUnit ?? "units") as CurrencyUnit);
                 return (
                   <div key={y} className="block">
                     <div className="mb-1 text-[10px] text-rose-400/70">
@@ -125,7 +127,7 @@ function RestructuringRowCard({
   years: string[];
   meta: { currencyUnit?: string };
   incomeStatement: import("@/types/finance").Row[];
-  allStatements: { incomeStatement: import("@/types/finance").Row[]; balanceSheet: unknown[]; cashFlow: unknown[] };
+  allStatements: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
   valuesByYear: Record<string, number>;
   setValue: (year: string, value: number) => void;
 }) {
@@ -152,11 +154,11 @@ function RestructuringRowCard({
     const values: Record<string, string> = {};
     years.forEach((y) => {
       const storedValue = getRestructValue(y);
-      const displayValue = storedToDisplay(storedValue, meta?.currencyUnit);
+      const displayValue = storedToDisplay(storedValue, (meta?.currencyUnit ?? "units") as CurrencyUnit);
       values[y] = displayValue === 0 ? "" : String(displayValue);
     });
     return values;
-  }, [years, valuesByYear, meta?.currencyUnit]);
+  }, [years, valuesByYear, (meta?.currencyUnit ?? "units") as CurrencyUnit]);
 
   const [isExpanded, setIsExpanded] = useState(true);
   const [isConfirmed, setIsConfirmed] = useState(false);
@@ -180,10 +182,10 @@ function RestructuringRowCard({
       }
       const displayNum = Number(localVal);
       if (!isNaN(displayNum) && displayNum >= 0) {
-        const storedNum = displayToStored(displayNum, meta?.currencyUnit);
+        const storedNum = displayToStored(displayNum, (meta?.currencyUnit ?? "units") as CurrencyUnit);
         const max = maxByYear[y] ?? Infinity;
         if (storedNum > max) {
-          err = `${y}: Restructuring cannot exceed reported line value (${storedToDisplay(max, meta?.currencyUnit)})`;
+          err = `${y}: Restructuring cannot exceed reported line value (${storedToDisplay(max, (meta?.currencyUnit ?? "units") as CurrencyUnit)})`;
         } else {
           setValue(y, storedNum);
         }
@@ -209,7 +211,7 @@ function RestructuringRowCard({
     setValidationError(null);
   };
 
-  const unitLabel = getUnitLabel(meta?.currencyUnit);
+  const unitLabel = getUnitLabel((meta?.currencyUnit ?? "units") as CurrencyUnit);
 
   if (!isExpanded && isConfirmed) {
     return (
@@ -230,7 +232,7 @@ function RestructuringRowCard({
                   .map((y) => {
                     const val = getRestructValue(y);
                     return val !== 0
-                      ? `${y}: ${storedToDisplay(val, meta?.currencyUnit)}${unitLabel ? ` ${unitLabel}` : ""}`
+                      ? `${y}: ${storedToDisplay(val, (meta?.currencyUnit ?? "units") as CurrencyUnit)}${unitLabel ? ` ${unitLabel}` : ""}`
                       : null;
                   })
                   .filter(Boolean)
@@ -296,10 +298,10 @@ function RestructuringRowCard({
         <div className="ml-5 mt-3">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
             {years.map((year) => {
-              const displayValue = storedToDisplay(getRestructValue(year), meta?.currencyUnit);
+              const displayValue = storedToDisplay(getRestructValue(year), (meta?.currencyUnit ?? "units") as CurrencyUnit);
               const localValue =
                 localValues[year] ?? (displayValue === 0 ? "" : String(displayValue));
-              const maxDisplay = maxByYear[year] != null ? storedToDisplay(maxByYear[year], meta?.currencyUnit) : "—";
+              const maxDisplay = maxByYear[year] != null ? storedToDisplay(maxByYear[year], (meta?.currencyUnit ?? "units") as CurrencyUnit) : "—";
               return (
                 <div key={year} className="flex flex-col">
                   <label className="text-xs text-rose-300/70 mb-1">

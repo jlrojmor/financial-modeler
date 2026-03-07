@@ -5,10 +5,11 @@
  * IB-grade standards: formulas are computed and stored for Excel export.
  */
 
-import type { Row } from "@/types/finance";
+import type { Row, EmbeddedDisclosureItem } from "@/types/finance";
 import { getBSCategoryForRow, getRowsForCategory } from "./bs-category-mapper";
 import { isOperatingExpenseRow, isNonOperatingRow, isTaxRow } from "./is-classification";
 import { findRowInTree } from "./row-utils";
+import { resolveHistoricalCfoValueOnly } from "./cfo-source-resolution";
 
 /** WC exclusions for BS-based WC: cash and st_debt (and totals). */
 const WC_BS_EXCLUDE_IDS = new Set([
@@ -109,13 +110,14 @@ export function computeRowValue(
   statementRows: Row[],
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] },
   sbcBreakdowns?: Record<string, Record<string, number>>,
-  danaBreakdowns?: Record<string, number>
+  danaBreakdowns?: Record<string, number>,
+  embeddedDisclosures?: EmbeddedDisclosureItem[]
 ): number {
   // Parent-child enforcement: Revenue, COGS, SG&A, R&D with children = sum(children) only
   if (row.kind === "input" && IS_PARENT_ROW_IDS.has(row.id) && row.children && row.children.length > 0) {
     return row.children.reduce(
       (sum, child) =>
-        sum + computeRowValue(child, year, allRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns),
+        sum + computeRowValue(child, year, allRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures),
       0
     );
   }
@@ -126,7 +128,7 @@ export function computeRowValue(
     const isProjection = year.endsWith("E");
 
     if (isHistorical) {
-      // Historical: if we have component children, sum them; otherwise use aggregate input
+      // Historical: reported only (if we have component children, sum them; otherwise use aggregate input)
       if (row.children && row.children.length > 0) {
         return row.children.reduce(
           (sum, child) =>
@@ -138,7 +140,8 @@ export function computeRowValue(
               statementRows,
               allStatements,
               sbcBreakdowns,
-              danaBreakdowns
+              danaBreakdowns,
+              embeddedDisclosures
             ),
           0
         );
@@ -146,7 +149,7 @@ export function computeRowValue(
       return row.values?.[year] ?? 0;
     }
     if (isProjection) {
-      return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
+      return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
     }
     return row.values?.[year] ?? 0;
   }
@@ -161,12 +164,12 @@ export function computeRowValue(
       // If it has children, sum them
       if (row.children && row.children.length > 0) {
         return row.children.reduce((sum, child) => {
-          return sum + computeRowValue(child, year, allRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
+          return sum + computeRowValue(child, year, allRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
         }, 0);
       }
 
     // Otherwise, use a formula based on row ID (standard IB patterns)
-    return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
+    return computeFormula(row, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
   }
 
   return 0;
@@ -177,12 +180,13 @@ export function computeRowValue(
  * @param allStatements - Optional: all statements (IS, BS, CFS) for cross-statement references
  */
 function computeFormula(
-  row: Row, 
-  year: string, 
-  statementRows: Row[], 
+  row: Row,
+  year: string,
+  statementRows: Row[],
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] },
   sbcBreakdowns?: Record<string, Record<string, number>>,
-  danaBreakdowns?: Record<string, number>
+  danaBreakdowns?: Record<string, number>,
+  embeddedDisclosures?: EmbeddedDisclosureItem[]
 ): number {
   const rowId = row.id;
   
@@ -242,33 +246,34 @@ function computeFormula(
     return 0;
   }
   
+  // Historical CFO source hierarchy: use single resolver (no sbcBreakdowns in CFS path for SBC)
   if (rowId === "net_income" && isInCFS && allStatements) {
-    // This is CFS net_income - pull from IS
-    // CRITICAL: Only use stored values to avoid recursion
-    // The IS net_income should already be computed and stored by recomputeCalculations
-    const isNetIncomeRow = allStatements.incomeStatement.find(r => r.id === "net_income");
-    if (isNetIncomeRow && isNetIncomeRow.values?.[year] !== undefined) {
-      return isNetIncomeRow.values[year];
-    }
-    // If no stored value, return 0 (don't try to compute - that would cause recursion)
-    return 0;
+    return resolveHistoricalCfoValueOnly(rowId, year, {
+      cashFlowRows: statementRows,
+      incomeStatement: allStatements.incomeStatement,
+      balanceSheet: allStatements.balanceSheet,
+      embeddedDisclosures: embeddedDisclosures ?? [],
+      danaBreakdowns: danaBreakdowns ?? {},
+    });
   }
-  
-  if (rowId === "danda" && isInCFS) {
-    // This is CFS danda - pull from IS D&A row
-    const isDandaRow = allStatements?.incomeStatement ? findRowInTree(allStatements.incomeStatement, "danda") : null;
-    if (isDandaRow && isDandaRow.values?.[year] !== undefined) {
-      return isDandaRow.values[year];
-    }
-    // Fallback to danaBreakdowns if available
-    if (danaBreakdowns && danaBreakdowns[year] !== undefined) {
-      return danaBreakdowns[year];
-    }
-    return 0;
+
+  if (rowId === "danda" && isInCFS && allStatements) {
+    return resolveHistoricalCfoValueOnly(rowId, year, {
+      cashFlowRows: statementRows,
+      incomeStatement: allStatements.incomeStatement,
+      balanceSheet: allStatements.balanceSheet,
+      embeddedDisclosures: embeddedDisclosures ?? [],
+      danaBreakdowns: danaBreakdowns ?? {},
+    });
   }
-  
-  if (rowId === "sbc" && isInCFS && sbcBreakdowns && allStatements) {
-    return getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns, year);
+
+  if (rowId === "sbc" && isInCFS && allStatements) {
+    return resolveHistoricalCfoValueOnly(rowId, year, {
+      cashFlowRows: statementRows,
+      incomeStatement: allStatements.incomeStatement,
+      balanceSheet: allStatements.balanceSheet,
+      embeddedDisclosures: embeddedDisclosures ?? [],
+    });
   }
   
   // Working Capital Change calculation from Balance Sheet
@@ -328,16 +333,28 @@ function computeFormula(
       return total;
     }
 
-    // Fallback: hardcoded formula when structure is unexpected
-    const netIncome = isInCFS && allStatements
-      ? findRowValue(allStatements.incomeStatement, "net_income", year)
-      : findRowValue(statementRows, "net_income", year);
-    const danda = isInCFS && allStatements
-      ? findRowValue(allStatements.incomeStatement, "danda", year)
-      : findRowValue(statementRows, "danda", year);
-    const sbc = isInCFS && sbcBreakdowns && allStatements
-      ? getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns, year)
-      : findRowValue(statementRows, "sbc", year);
+    // Fallback: use same CFO source hierarchy when in CFS
+    const cfoContext = isInCFS && allStatements
+      ? {
+          cashFlowRows: statementRows,
+          incomeStatement: allStatements.incomeStatement,
+          balanceSheet: allStatements.balanceSheet,
+          embeddedDisclosures: embeddedDisclosures ?? [],
+          danaBreakdowns: danaBreakdowns ?? {},
+        }
+      : null;
+    const netIncome =
+      cfoContext != null
+        ? resolveHistoricalCfoValueOnly("net_income", year, cfoContext)
+        : findRowValue(statementRows, "net_income", year);
+    const danda =
+      cfoContext != null
+        ? resolveHistoricalCfoValueOnly("danda", year, cfoContext)
+        : findRowValue(statementRows, "danda", year);
+    const sbc =
+      cfoContext != null
+        ? resolveHistoricalCfoValueOnly("sbc", year, cfoContext)
+        : findRowValue(statementRows, "sbc", year);
     const wcChange = findRowValue(statementRows, "wc_change", year);
     const otherOperating = findRowValue(statementRows, "other_operating", year);
     let cfoIntelligenceItems = 0;
@@ -889,13 +906,14 @@ export function recomputeCalculations(
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] },
   sbcBreakdowns?: Record<string, Record<string, number>>,
   danaBreakdowns?: Record<string, number>,
-  parentIdsWithProjectionBreakdowns?: ParentIdsWithProjectionBreakdowns
+  parentIdsWithProjectionBreakdowns?: ParentIdsWithProjectionBreakdowns,
+  embeddedDisclosures?: EmbeddedDisclosureItem[]
 ): Row[] {
   // First pass: update all rows and their children
   const updatedRows = rows.map((row) => {
       // Recursively update children first
         const newChildren = row.children
-        ? recomputeCalculations(row.children, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns)
+        ? recomputeCalculations(row.children, year, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, embeddedDisclosures)
         : undefined;
 
     // WC Change: set Other WC / Reclass child so historical total ties to CFO; forecast = 0
@@ -954,7 +972,7 @@ export function recomputeCalculations(
     if (row.id === "wc_change" && allStatements && finalChildren?.length) {
       const isProjection = year.endsWith("E");
       if (isProjection) {
-        const calculatedValue = computeRowValue(row, year, statementRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns);
+        const calculatedValue = computeRowValue(row, year, statementRows, statementRows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
         const newValues = { ...(row.values ?? {}), [year]: calculatedValue };
         return {
           ...row,
@@ -994,7 +1012,7 @@ export function recomputeCalculations(
       if (row.kind === "calc" || row.kind === "subtotal" || row.kind === "total") {
         // For CFS rows, we need to pass allStatements and sbcBreakdowns to computeFormula
         // Use computeRowValue to get the computed value (it handles all the logic)
-        const computed = computeRowValue(row, year, currentRows, currentRows, allStatements, sbcBreakdowns, danaBreakdowns);
+        const computed = computeRowValue(row, year, currentRows, currentRows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
         const currentValue = row.values?.[year] ?? 0;
         
         // Only update if value changed (to detect when we've stabilized)

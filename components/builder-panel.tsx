@@ -21,6 +21,7 @@ export default function BuilderPanel() {
   const saveCurrentStep = useModelStore((s) => s.saveCurrentStep);
   const saveCurrentProject = useModelStore((s) => s.saveCurrentProject);
   const continueToNextStep = useModelStore((s) => s.continueToNextStep);
+  const resetFinancialInputs = useModelStore((s) => s.resetFinancialInputs);
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const currencyUnit = meta?.currencyUnit ?? "millions";
@@ -63,6 +64,7 @@ export default function BuilderPanel() {
 
   // Save button feedback state
   const [saveFeedback, setSaveFeedback] = useState<"idle" | "saving" | "saved">("idle");
+  const [showResetModal, setShowResetModal] = useState(false);
 
   // Handle save with feedback (step completion + project state so no progress is lost)
   const handleSave = () => {
@@ -94,6 +96,14 @@ export default function BuilderPanel() {
           </div>
 
           <div className="flex gap-2">
+            <button
+              type="button"
+              className="rounded-md px-4 py-2 text-xs font-semibold border border-slate-600 text-slate-200 bg-slate-800/80 hover:bg-slate-700/80 transition-colors"
+              onClick={() => setShowResetModal(true)}
+            >
+              Reset Inputs
+            </button>
+
             <button
               className={[
                 "rounded-md px-4 py-2 text-xs font-semibold",
@@ -172,6 +182,39 @@ export default function BuilderPanel() {
           </div>
         </div>
 
+        {/* Reset Inputs confirmation modal */}
+        {showResetModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" role="dialog" aria-modal="true" aria-labelledby="reset-modal-title">
+            <div className="rounded-lg border border-slate-700 bg-slate-900 shadow-xl max-w-md w-full p-5">
+              <h2 id="reset-modal-title" className="text-sm font-semibold text-slate-100 mb-3">
+                Reset all entered financial data?
+              </h2>
+              <p className="text-xs text-slate-300 mb-5">
+                This will remove historical financial values, disclosure inputs, custom rows, and schedule values. Your financial statement structure and configuration will remain unchanged.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="rounded-md px-4 py-2 text-xs font-semibold border border-slate-600 text-slate-200 hover:bg-slate-700 transition-colors"
+                  onClick={() => setShowResetModal(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md px-4 py-2 text-xs font-semibold bg-slate-100 text-slate-900 hover:bg-white transition-colors"
+                  onClick={() => {
+                    setShowResetModal(false);
+                    resetFinancialInputs();
+                  }}
+                >
+                  Confirm Reset
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* IS classification warning (Historicals): custom rows need sectionOwner + isOperating */}
         {currentStepId === "historicals" && rowsMissingIsClassification.length > 0 && (
           <div className="mt-3 rounded-md border border-amber-600/50 bg-amber-950/30 p-3">
@@ -245,16 +288,25 @@ export default function BuilderPanel() {
         
         {currentStepId === "historicals" && (
           <div className="space-y-6">
-            <div className="rounded-lg border border-blue-800/40 bg-blue-950/20 p-4">
-              <h3 className="text-sm font-semibold text-blue-200 mb-2">
-                Enter Historical Financial Data
+            {/* Workflow Guide - static guidance only */}
+            <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 p-4">
+              <h3 className="text-sm font-semibold text-slate-200 mb-2">
+                Workflow Guide
               </h3>
-              <p className="text-xs text-blue-300/80">
-                Enter historical values for Income Statement, Balance Sheet, and Cash Flow Statement.
-                Start with IS, then move to BS, then CFS. All sections can be collapsed/expanded.
+              <p className="text-xs text-slate-300/90 mb-2">
+                Build your historical model in this order:
+              </p>
+              <ol className="text-xs text-slate-300/90 list-decimal list-inside space-y-1 mb-2">
+                <li>Income Statement</li>
+                <li>Expense Disclosures (optional, only if reported in notes)</li>
+                <li>Balance Sheet</li>
+                <li>Cash Flow Statement</li>
+              </ol>
+              <p className="text-[11px] text-slate-400 border-t border-slate-700/50 pt-2 mt-2">
+                Disclosures do not change reported historical values. They are note breakdowns used later for analysis and cash flow construction.
               </p>
             </div>
-            
+
             {/* Income Statement Section - Using Unified Builder */}
             <IncomeStatementBuilder />
 

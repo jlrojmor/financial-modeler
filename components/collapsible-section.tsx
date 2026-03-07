@@ -62,15 +62,16 @@ export default function CollapsibleSection({
   const sectionExpanded = useModelStore((s) => s.sectionExpanded[sectionId]);
   const setSectionExpanded = useModelStore((s) => s.setSectionExpanded);
   
-  // Use stored state if exists, otherwise use defaultExpanded
-  const isExpanded = sectionExpanded !== undefined ? sectionExpanded : defaultExpanded;
+  // When section is Done (locked), default to collapsed so the panel stays clean. User can still reopen.
+  const effectiveDefault = isLocked ? false : defaultExpanded;
+  const isExpanded = sectionExpanded !== undefined ? sectionExpanded : effectiveDefault;
   
-  // Initialize expanded state if not set
+  // Initialize expanded state if not set (collapsed when locked, otherwise use defaultExpanded)
   useEffect(() => {
     if (sectionExpanded === undefined) {
-      setSectionExpanded(sectionId, defaultExpanded);
+      setSectionExpanded(sectionId, effectiveDefault);
     }
-  }, [sectionId, defaultExpanded, sectionExpanded, setSectionExpanded]);
+  }, [sectionId, defaultExpanded, sectionExpanded, setSectionExpanded, isLocked, effectiveDefault]);
   const lockSection = useModelStore((s) => s.lockSection);
   const unlockSection = useModelStore((s) => s.unlockSection);
   const toggleSectionExpanded = useModelStore((s) => s.toggleSectionExpanded);
@@ -115,26 +116,28 @@ export default function CollapsibleSection({
           )}
         </div>
 
-        {/* Action buttons */}
-        <div className="flex gap-2">
-          {isLocked ? (
-            <button
-              onClick={handleUnlock}
-              className="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-600 transition"
-              type="button"
-            >
-              Unlock
-            </button>
-          ) : (
-            <button
-              onClick={handleConfirm}
-              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 transition"
-              type="button"
-            >
-              {confirmButtonLabel}
-            </button>
-          )}
-        </div>
+        {/* Action buttons - only when section has confirm/lock or is locked */}
+        {(onConfirm != null || isLocked) && (
+          <div className="flex gap-2">
+            {isLocked ? (
+              <button
+                onClick={handleUnlock}
+                className="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-600 transition"
+                type="button"
+              >
+                Unlock
+              </button>
+            ) : (
+              <button
+                onClick={handleConfirm}
+                className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 transition"
+                type="button"
+              >
+                {confirmButtonLabel}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Content - only show when expanded */}

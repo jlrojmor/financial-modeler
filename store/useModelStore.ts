@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Row, WizardStepId } from "@/types/finance";
+import type { Row, WizardStepId, EmbeddedDisclosureItem, EmbeddedDisclosureType } from "@/types/finance";
 import { WIZARD_STEPS } from "@/types/finance";
 import type {
   RevenueProjectionConfig,
@@ -44,6 +44,15 @@ function addChildRow(rows: Row[], parentId: string, child: Row): Row[] {
     }
     return r;
   });
+}
+
+/** Clear values from every row in a tree (recursive); keeps structure and row ids/labels. */
+function clearRowValues(rows: Row[]): Row[] {
+  return rows.map((r) => ({
+    ...r,
+    values: {},
+    children: r.children?.length ? clearRowValues(r.children) : [],
+  }));
 }
 
 function isOpexRow(row: Row): boolean {
@@ -336,6 +345,7 @@ export type ProjectSnapshot = {
   cashFlow: Row[];
   schedules: { workingCapital: Row[]; debt: Row[]; capex: Row[] };
   sbcBreakdowns: Record<string, Record<string, number>>;
+  embeddedDisclosures: EmbeddedDisclosureItem[];
   danaLocation: "cogs" | "sga" | "both" | null;
   danaBreakdowns: Record<string, number>;
   currentStepId: WizardStepId;
@@ -447,7 +457,9 @@ export type ModelState = {
 
   // Stock-Based Compensation annotation (for transparency, doesn't affect calculations)
   sbcBreakdowns: Record<string, Record<string, number>>; // { [categoryId]: { [year]: value } }
-  
+  /** Generic embedded disclosures (SBC, future: amortization). Does not modify reported IS values. */
+  embeddedDisclosures: EmbeddedDisclosureItem[];
+
   // D&A location tracking (where D&A is embedded: "cogs", "sga", or "both")
   danaLocation: "cogs" | "sga" | "both" | null;
   // D&A values by year (only if we have exact allocation)
@@ -584,7 +596,9 @@ export type ModelActions = {
 
   // SBC annotation
   updateSbcValue: (categoryId: string, year: string, value: number) => void;
-  
+  /** Set one year value for an embedded disclosure (e.g. SBC). One entry per (type, rowId). Optional label stored for preview when row is not in statement tree. */
+  setEmbeddedDisclosureValue: (type: EmbeddedDisclosureItem["type"], rowId: string, year: string, value: number, label?: string) => void;
+
   // Section lock and expand management
   lockSection: (sectionId: string) => void;
   unlockSection: (sectionId: string) => void;
@@ -603,7 +617,9 @@ export type ModelActions = {
   saveCurrentProject: () => void;
   renameProject: (projectId: string, name: string) => void;
   deleteProject: (projectId: string) => void;
-  
+  /** Clear all entered financial data (historical values, disclosures, schedule inputs); keeps statement structure and config. */
+  resetFinancialInputs: () => void;
+
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => void;
   updateIncomeStatementValue: (rowId: string, year: string, value: number) => void;
@@ -766,7 +782,8 @@ const defaultState: ModelState = {
   },
 
   sbcBreakdowns: {},
-  
+  embeddedDisclosures: [],
+
   danaLocation: null,
   danaBreakdowns: {},
 
@@ -839,6 +856,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     cashFlow: state.cashFlow,
     schedules: state.schedules,
     sbcBreakdowns: state.sbcBreakdowns,
+    embeddedDisclosures: state.embeddedDisclosures ?? [],
     danaLocation: state.danaLocation,
     danaBreakdowns: state.danaBreakdowns,
     currentStepId: state.currentStepId,
@@ -910,6 +928,7 @@ function applyProjectSnapshot(
     cashFlow: snapshot.cashFlow,
     schedules: snapshot.schedules,
     sbcBreakdowns: snapshot.sbcBreakdowns,
+    embeddedDisclosures: snapshot.embeddedDisclosures ?? [],
     danaLocation: snapshot.danaLocation,
     danaBreakdowns: snapshot.danaBreakdowns,
     currentStepId: snapshot.currentStepId,
@@ -1438,11 +1457,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
         const sbcBreakdowns = get().sbcBreakdowns;
         const danaBreakdowns = get().danaBreakdowns;
         let allStatements = { incomeStatement, balanceSheet, cashFlow };
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsInit);
-        allStatements = { incomeStatement, balanceSheet, cashFlow };
-        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
-        allStatements = { incomeStatement, balanceSheet, cashFlow };
-        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsInit, state.embeddedDisclosures ?? []);
+      allStatements = { incomeStatement, balanceSheet, cashFlow };
+        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+      allStatements = { incomeStatement, balanceSheet, cashFlow };
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
 
       // Temporary: verify top-level IS order and operating_expenses structure after normalization
@@ -1451,6 +1470,67 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const opExRowForLog = incomeStatement.find((r) => r.id === "operating_expenses");
       console.log("operating_expenses children:\n" + (opExRowForLog?.children ?? []).map((c) => c.id).join("\n"));
 
+      // When force (e.g. new project), also clear all financial input state so no data leaks from a previous project
+      const cleanInputState = force
+        ? {
+            embeddedDisclosures: [] as EmbeddedDisclosureItem[],
+            sbcBreakdowns: {} as Record<string, Record<string, number>>,
+            danaLocation: null as "cogs" | "sga" | "both" | null,
+            danaBreakdowns: {} as Record<string, number>,
+            sectionLocks: {} as Record<string, boolean>,
+            sectionExpanded: {} as Record<string, boolean>,
+            confirmedRowIds: {} as Record<string, boolean>,
+            wcExcludedIds: [] as string[],
+            revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+            cogsPctByRevenueLine: {},
+            cogsPctModeByRevenueLine: {},
+            cogsPctByRevenueLineByYear: {},
+            sgaPctByItemId: {},
+            sgaPctModeByItemId: {},
+            sgaPctByItemIdByYear: {},
+            sgaPctOfParentByItemId: {},
+            sgaPctOfParentModeByItemId: {},
+            sgaPctOfParentByItemIdByYear: {},
+            sgaHistoricAmountByItemIdByYear: {},
+            wcDriverTypeByItemId: {},
+            wcDaysByItemId: {},
+            wcDaysByItemIdByYear: {},
+            wcDaysBaseByItemId: {},
+            wcPctBaseByItemId: {},
+            wcPctByItemId: {},
+            wcPctByItemIdByYear: {},
+            capexForecastMethod: "pct_revenue" as const,
+            capexPctRevenue: 0,
+            capexManualByYear: {},
+            capexGrowthPct: 0,
+            capexSplitByBucket: true,
+            capexForecastBucketsIndependently: false,
+            capexTimingConvention: "mid" as const,
+            capexBucketAllocationPct: {},
+            capexBucketLabels: {},
+            capexCustomBucketIds: [] as string[],
+            capexBucketMethod: {},
+            capexBucketPctRevenue: {},
+            capexBucketManualByYear: {},
+            capexBucketGrowthPct: {},
+            ppeUsefulLifeByBucket: { ...CAPEX_IB_DEFAULT_USEFUL_LIVES },
+            ppeUsefulLifeSingle: 10,
+            capexHistoricByBucketByYear: {},
+            capexHelperPpeByBucketByYear: {},
+            capexIncludeInAllocationByBucket: {},
+            capexModelIntangibles: true,
+            intangiblesForecastMethod: "pct_revenue" as const,
+            intangiblesAmortizationLifeYears: 7,
+            intangiblesPctRevenue: 0,
+            intangiblesManualByYear: {},
+            intangiblesPctOfCapex: 0,
+            intangiblesHasHistoricalAmortization: false,
+            intangiblesHistoricalAmortizationByYear: {},
+            schedules: { workingCapital: [], debt: [], capex: [] } as { workingCapital: Row[]; debt: Row[]; capex: Row[] },
+            bsBuildPreviewOverrides: {},
+          }
+        : {};
+
       set({
         meta,
         isInitialized: true,
@@ -1458,6 +1538,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         incomeStatement,
         balanceSheet,
         cashFlow,
+        ...cleanInputState,
       });
     } else {
       // If already initialized, just update meta if needed
@@ -2070,11 +2151,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const sbcBreakdowns = get().sbcBreakdowns;
       const danaBreakdowns = get().danaBreakdowns;
       let allStatements = { incomeStatement, balanceSheet, cashFlow };
-      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsRecalc);
+      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsRecalc, state.embeddedDisclosures ?? []);
       allStatements = { incomeStatement, balanceSheet, cashFlow };
-      balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
+      balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       allStatements = { incomeStatement, balanceSheet, cashFlow };
-      cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
+      cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
     });
 
     set({
@@ -2274,7 +2355,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
           allStatements,
           sbcBreakdowns,
           danaBreakdowns,
-          parentIdsWithProjectionBreakdowns
+          parentIdsWithProjectionBreakdowns,
+          state.embeddedDisclosures ?? []
         );
       });
       
@@ -2319,7 +2401,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         };
         const sbcBreakdowns = state.sbcBreakdowns;
         const danaBreakdowns = state.danaBreakdowns;
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns);
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
       
       return { [statement]: recalculatedRows };
@@ -2369,7 +2451,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         };
         const sbcBreakdowns = state.sbcBreakdowns;
         const danaBreakdowns = state.danaBreakdowns;
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns);
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
       
       return { [statement]: recalculatedRows };
@@ -2476,7 +2558,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
             recalculated,
             updatedAllStatements,
             sbcBreakdowns,
-            danaBreakdowns
+            danaBreakdowns,
+            undefined,
+            state.embeddedDisclosures ?? []
           );
         });
         
@@ -2519,7 +2603,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
               ),
             ])
           : undefined;
-      const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns);
+      const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? []);
       
       // If Balance Sheet was updated, also recalculate Cash Flow (WC Change depends on BS)
       let updatedCashFlow = state.cashFlow;
@@ -2529,7 +2613,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
           balanceSheet: recomputed,
           cashFlow: state.cashFlow,
         };
-        updatedCashFlow = recomputeCalculations(state.cashFlow, year, state.cashFlow, updatedAllStatements, sbcBreakdowns, danaBreakdowns);
+        updatedCashFlow = recomputeCalculations(state.cashFlow, year, state.cashFlow, updatedAllStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       }
       
       return { 
@@ -2754,13 +2838,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // Recompute balanceSheet totals for each projection year
     for (const year of projectionYears) {
       const st = { ...allStatements, balanceSheet: newBS };
-      newBS = recomputeCalculations(newBS, year, newBS, st, sbcBreakdowns, danaBreakdowns);
+      newBS = recomputeCalculations(newBS, year, newBS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
     }
     // Recompute cashFlow for each projection year (wc_change and operating_cf use new BS)
     let newCF = cashFlow;
     for (const year of projectionYears) {
       const st = { incomeStatement, balanceSheet: newBS, cashFlow: newCF };
-      newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns);
+      newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
     }
 
     set({ balanceSheet: newBS, cashFlow: newCF });
@@ -2784,7 +2868,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = rows;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow: rows };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
       return { cashFlow: recalculated };
     });
@@ -2803,7 +2887,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = cashFlow;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
       return { cashFlow: recalculated };
     });
@@ -2824,7 +2908,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = cashFlow;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
       return { cashFlow: recalculated };
     });
@@ -2848,7 +2932,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = cashFlow;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
       return { cashFlow: recalculated };
     });
@@ -2944,7 +3028,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let newCF = cashFlow;
       allYears.forEach((year) => {
         const allStatements = { incomeStatement, balanceSheet, cashFlow: newCF };
-        newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns);
+        newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
       if (newCF !== cashFlow) set({ cashFlow: newCF });
       return;
@@ -2964,7 +3048,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     let newCF = cashFlow;
     allYears.forEach((year) => {
       const allStatements = { incomeStatement, balanceSheet, cashFlow: newCF };
-      newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns);
+      newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
     });
     if (newCF !== cashFlow) set({ cashFlow: newCF });
   },
@@ -3008,7 +3092,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
           recalculated,
           allStatements,
           state.sbcBreakdowns,
-          state.danaBreakdowns
+          state.danaBreakdowns,
+          undefined,
+          state.embeddedDisclosures ?? []
         );
       });
       
@@ -3042,7 +3128,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
           recalculated,
           allStatements,
           state.sbcBreakdowns,
-          state.danaBreakdowns
+          state.danaBreakdowns,
+          undefined,
+          state.embeddedDisclosures ?? []
         );
       });
       return { incomeStatement: recalculated };
@@ -3062,6 +3150,98 @@ export const useModelStore = create<ModelState & ModelActions>()(
         },
       };
     });
+  },
+
+  setEmbeddedDisclosureValue: (type, rowId, year, value, label) => {
+    set((state) => {
+      const list = state.embeddedDisclosures ?? [];
+      const idx = list.findIndex((d) => d.type === type && d.rowId === rowId);
+      const existing = idx >= 0 ? list[idx] : null;
+      const newValues =
+        existing
+          ? { ...existing.values, [year]: value }
+          : { [year]: value };
+      const item: EmbeddedDisclosureItem = {
+        type,
+        rowId,
+        values: newValues,
+        label: label ?? existing?.label,
+      };
+      const next =
+        idx >= 0
+          ? list.map((d, i) => (i === idx ? item : d))
+          : [...list, item];
+      return { embeddedDisclosures: next };
+    });
+  },
+
+  resetFinancialInputs: () => {
+    const state = get();
+    const clearedIS = clearRowValues(state.incomeStatement);
+    const clearedBS = clearRowValues(state.balanceSheet);
+    const clearedCF = clearRowValues(state.cashFlow);
+    const clearedSchedules = {
+      workingCapital: clearRowValues(state.schedules.workingCapital),
+      debt: clearRowValues(state.schedules.debt),
+      capex: clearRowValues(state.schedules.capex),
+    };
+    set({
+      embeddedDisclosures: [],
+      sbcBreakdowns: {},
+      danaLocation: null,
+      danaBreakdowns: {},
+      incomeStatement: clearedIS,
+      balanceSheet: clearedBS,
+      cashFlow: clearedCF,
+      schedules: clearedSchedules,
+      revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+      cogsPctByRevenueLine: {},
+      cogsPctModeByRevenueLine: {},
+      cogsPctByRevenueLineByYear: {},
+      sgaPctByItemId: {},
+      sgaPctModeByItemId: {},
+      sgaPctByItemIdByYear: {},
+      sgaPctOfParentByItemId: {},
+      sgaPctOfParentModeByItemId: {},
+      sgaPctOfParentByItemIdByYear: {},
+      sgaHistoricAmountByItemIdByYear: {},
+      wcDriverTypeByItemId: {},
+      wcDaysByItemId: {},
+      wcDaysByItemIdByYear: {},
+      wcDaysBaseByItemId: {},
+      wcPctBaseByItemId: {},
+      wcPctByItemId: {},
+      wcPctByItemIdByYear: {},
+      capexForecastMethod: "pct_revenue",
+      capexPctRevenue: 0,
+      capexManualByYear: {},
+      capexGrowthPct: 0,
+      capexSplitByBucket: true,
+      capexForecastBucketsIndependently: false,
+      capexTimingConvention: "mid",
+      capexBucketAllocationPct: {},
+      capexBucketLabels: {},
+      capexCustomBucketIds: [],
+      capexBucketMethod: {},
+      capexBucketPctRevenue: {},
+      capexBucketManualByYear: {},
+      capexBucketGrowthPct: {},
+      ppeUsefulLifeByBucket: { ...CAPEX_IB_DEFAULT_USEFUL_LIVES },
+      ppeUsefulLifeSingle: 10,
+      capexHistoricByBucketByYear: {},
+      capexHelperPpeByBucketByYear: {},
+      capexIncludeInAllocationByBucket: {},
+      capexModelIntangibles: true,
+      intangiblesForecastMethod: "pct_revenue",
+      intangiblesAmortizationLifeYears: 7,
+      intangiblesPctRevenue: 0,
+      intangiblesManualByYear: {},
+      intangiblesPctOfCapex: 0,
+      intangiblesHasHistoricalAmortization: false,
+      intangiblesHistoricalAmortizationByYear: {},
+      bsBuildPreviewOverrides: {},
+    });
+    get().recalculateAll();
   },
 
   // Section lock and expand management
@@ -3153,7 +3333,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
         allStatements,
         state.sbcBreakdowns,
         state.danaBreakdowns,
-        parentIdsWithProjectionBreakdowns
+        parentIdsWithProjectionBreakdowns,
+        state.embeddedDisclosures ?? []
       );
       return { incomeStatement: recomputed };
     });
@@ -3229,11 +3410,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const parentIdsWithProjectionBreakdowns = new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns]);
       allNewYears.forEach((year) => {
         const allStatements = { incomeStatement, balanceSheet, cashFlow };
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns);
-        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
-        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? []);
+        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
       });
-      
+
       return {
         meta: {
           ...state.meta,
@@ -4291,9 +4472,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
             const allStatements = { incomeStatement, balanceSheet, cashFlow };
             const sbcBreakdowns = state.sbcBreakdowns;
             const danaBreakdowns = state.danaBreakdowns || {};
-            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns);
-            balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns);
-            cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns);
+            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? []);
+            balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+            cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
           });
 
           // Temporary: verify top-level IS after rehydration normalization

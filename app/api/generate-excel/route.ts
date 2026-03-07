@@ -37,6 +37,7 @@ export async function POST(request: Request) {
       allStatements,
       sbcBreakdowns,
       danaBreakdowns,
+      embeddedDisclosures: modelState.embeddedDisclosures ?? [],
       isBuildRefs: isBuildResult.refMap,
     };
 

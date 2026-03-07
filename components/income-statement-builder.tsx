@@ -10,6 +10,9 @@ import { computeRowValue } from "@/lib/calculations";
 import { getIsRowsMissingClassification, getIsRowsClassifiedCustom, getIsSectionKey } from "@/lib/is-classification";
 import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
 import SbcOptionalSection from "@/components/sbc-optional-section";
+import AmortizationOptionalSection from "@/components/amortization-optional-section";
+import DepreciationOptionalSection from "@/components/depreciation-optional-section";
+import RestructuringOptionalSection from "@/components/restructuring-optional-section";
 
 type ISClassifySuggestion = {
   sectionOwner: Row["sectionOwner"];
@@ -951,8 +954,23 @@ export default function IncomeStatementBuilder() {
         {/* Tax Section */}
         {renderSection("Income Tax", sections.tax, "slate", "is_tax")}
         
-        {/* Stock-Based Compensation (SBC) Section - Optional */}
-        {!isLocked && <SbcOptionalSection />}
+        {/* Expense Disclosures (Optional) - expandable/collapsible parent card */}
+        {!isLocked && (
+          <CollapsibleSection
+            sectionId="expense_disclosures_optional"
+            title="Expense Disclosures (Optional)"
+            description="Use these only if the company discloses embedded expense components in its notes."
+            colorClass="slate"
+            defaultExpanded={true}
+          >
+            <div className="space-y-4">
+              <SbcOptionalSection />
+              <AmortizationOptionalSection />
+              <DepreciationOptionalSection />
+              <RestructuringOptionalSection />
+            </div>
+          </CollapsibleSection>
+        )}
       </div>
     </CollapsibleSection>
   );

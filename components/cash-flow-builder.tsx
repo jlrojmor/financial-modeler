@@ -13,7 +13,8 @@ import { findTermKnowledge } from "@/lib/financial-terms-knowledge";
 import { analyzeBSItemsForCFO, type CFOItem } from "@/lib/cfo-intelligence";
 import { getSuggestedCFIItems, validateCFIItem, findCFIItem, type CFIItem } from "@/lib/cfi-intelligence";
 import { getSuggestedCFFItems, validateCFFItem, findCFFItem, type CFFItem } from "@/lib/cff-intelligence";
-import { computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
+import { computeRowValue } from "@/lib/calculations";
+import { resolveHistoricalCfoValue, resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
 // UUID helper
 function uuid() {
   return `id_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -89,6 +90,24 @@ interface CFSSectionConfig {
   standardItems: string[]; // IDs of standard items in this section
 }
 
+/** Display-only subgroup labels for Operating Activities (IB-grade structure). Not stored in model. */
+const CFO_OPERATING_SUBGROUPS: { id: "earnings_base" | "non_cash" | "working_capital" | "other_operating" | "total"; label: string }[] = [
+  { id: "earnings_base", label: "Earnings Base" },
+  { id: "non_cash", label: "Non-Cash Adjustments" },
+  { id: "working_capital", label: "Working Capital Adjustments" },
+  { id: "other_operating", label: "Other Operating Activities" },
+  { id: "total", label: "Cash from Operating Activities" },
+];
+
+function getOperatingSubgroup(rowId: string): "earnings_base" | "non_cash" | "working_capital" | "other_operating" | "total" {
+  if (rowId === "net_income") return "earnings_base";
+  if (rowId === "danda" || rowId === "sbc") return "non_cash";
+  if (rowId === "wc_change") return "working_capital";
+  if (rowId === "operating_cf") return "total";
+  if (rowId === "other_operating") return "other_operating";
+  return "other_operating"; // custom operating rows
+}
+
 const CFS_SECTIONS: CFSSectionConfig[] = [
   {
     id: "operating",
@@ -137,6 +156,7 @@ function CFSSectionComponent({
   balanceSheet,
   danaBreakdowns,
   danaLocation,
+  embeddedDisclosures,
 }: {
   section: CFSSectionConfig;
   rows: Row[];
@@ -152,6 +172,7 @@ function CFSSectionComponent({
   balanceSheet: Row[];
   danaBreakdowns: Record<string, number>;
   danaLocation: "cogs" | "sga" | "both" | null;
+  embeddedDisclosures?: Array<{ id: string; label: string; valuesByYear: Record<string, number> }>;
 }) {
   // Get current cashFlow from store to ensure we have the latest state
   // This ensures we always have the most up-to-date data after insertions
@@ -452,6 +473,48 @@ function CFSSectionComponent({
   const totalRow = sectionItems.find(r => r.id === section.totalRowId);
   const isLocked = useModelStore((s) => s.sectionLocks[section.sectionId] ?? false);
 
+  /** For Operating only: display blocks (subgroup headers + rows) in IB-grade order. */
+  const operatingDisplayBlocks = useMemo(() => {
+    if (section.id !== "operating") return [];
+    const nonTotal = sectionItems.filter((r) => r.id !== section.totalRowId);
+    const blocks: { type: "header"; label: string } | { type: "row"; row: Row }[] = [];
+    for (const sg of CFO_OPERATING_SUBGROUPS) {
+      if (sg.id === "total") continue;
+      const rowsInGroup = nonTotal.filter((r) => getOperatingSubgroup(r.id) === sg.id);
+      if (rowsInGroup.length > 0) {
+        blocks.push({ type: "header", label: sg.label });
+        rowsInGroup.forEach((row) => blocks.push({ type: "row", row }));
+      }
+    }
+    return blocks;
+  }, [section.id, section.totalRowId, sectionItems]);
+
+  /** Resolve source badge label for key CFO rows (display only). Uses first year if available. */
+  const getSourceBadgeLabel = (rowId: string): string | null => {
+    if (section.id !== "operating" || !allStatements) return null;
+    const year = years[0];
+    if (!year) return null;
+    if (!["net_income", "danda", "sbc", "wc_change"].includes(rowId)) return null;
+    try {
+      const result = resolveHistoricalCfoValue(rowId, year, {
+        cashFlowRows: allStatements.cashFlow,
+        incomeStatement: allStatements.incomeStatement,
+        balanceSheet: allStatements.balanceSheet,
+        embeddedDisclosures: embeddedDisclosures ?? [],
+        danaBreakdowns: danaBreakdowns ?? {},
+      });
+      if (result.sourceType === "income_statement") return "Source: Income Statement";
+      if (result.sourceType === "reported") return "Source: Reported CFS";
+      if (result.sourceType === "embedded_disclosure") return "Source: Disclosure";
+      if (result.sourceType === "derived") return "Source: Derived";
+      if (result.sourceType === "manual" && rowId === "wc_change") return "Source: Reported CFS";
+      if (result.sourceType === "manual") return null;
+      return `Source: ${result.sourceDetail}`;
+    } catch {
+      return null;
+    }
+  };
+
   // Get the sign indicator for CFO/CFI items
   const getCFOSign = (row: Row): string | null => {
     // Show signs for operating and investing section items
@@ -539,7 +602,7 @@ function CFSSectionComponent({
     // Standard links
     if (row.id === "net_income") return { text: "✨ Auto-populated from Income Statement", isAutoPopulated: true };
     // D&A is now a manual input - no auto-population
-    if (row.id === "sbc") return { text: "✨ Auto-calculated from SBC breakdowns", isAutoPopulated: true };
+    if (row.id === "sbc") return { text: "✨ Reported CFS or embedded disclosure total", isAutoPopulated: true };
     if (row.id === "wc_change") {
       // All historical years are manual input, projection years are calculated
       return { 
@@ -559,16 +622,21 @@ function CFSSectionComponent({
       }
       // Try computing it if not stored
       try {
-        const computed = computeRowValue(isRow || row, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns);
+        const computed = computeRowValue(isRow || row, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
         return computed !== 0 ? computed : null;
       } catch {
         return null;
       }
     }
-    // D&A is now a manual input - no auto-population
+    // SBC: CFO source hierarchy (reported CFS → embedded disclosure total → 0); no sbcBreakdowns in CFS path
     if (row.id === "sbc" && allStatements) {
-      const total = getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns || {}, year);
-      return total > 0 ? total : null;
+      const value = resolveHistoricalCfoValueOnly("sbc", year, {
+        cashFlowRows: allStatements.cashFlow,
+        incomeStatement: allStatements.incomeStatement,
+        balanceSheet: allStatements.balanceSheet,
+        embeddedDisclosures: embeddedDisclosures ?? [],
+      });
+      return value !== 0 ? value : null;
     }
     if (row.id === "wc_change") {
       // All historical years are manual input
@@ -583,7 +651,7 @@ function CFSSectionComponent({
       } else if (isProjection) {
         // Projection year - calculate from BS changes
         try {
-          const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns);
+          const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
           return computed;
         } catch {
           return null;
@@ -744,12 +812,21 @@ function CFSSectionComponent({
       defaultExpanded={true}
     >
       <div className="space-y-4">
-        {/* Items List */}
+        {/* Items List: Operating = grouped with subgroup headers; Investing/Financing = flat */}
         {sectionItems.length > 0 ? (
-          sectionItems
-            .filter(r => r.id !== section.totalRowId) // Don't show total in the list
-            .map((row) => {
+          (section.id === "operating" ? operatingDisplayBlocks : sectionItems.filter((r) => r.id !== section.totalRowId).map((row) => ({ type: "row" as const, row }))).map((block) => {
+            if (block.type === "header") {
+              return (
+                <div key={`cfo-h-${block.label}`} className="pt-2 first:pt-0">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-400 border-b border-slate-700/60 pb-1.5 mb-2">
+                    {block.label}
+                  </div>
+                </div>
+              );
+            }
+            const row = block.row;
             const linkInfo = getLinkInfo(row);
+            const sourceBadge = section.id === "operating" ? getSourceBadgeLabel(row.id) : null;
             const isStandard = section.standardItems.includes(row.id);
             // D&A and WC Change are editable even if marked as "calc"
             // For D&A, always treat as input (not calculated)
@@ -810,16 +887,17 @@ function CFSSectionComponent({
                           {linkInfo.isAutoPopulated ? "✨ " : "🔗 "}{linkInfo.text}
                         </span>
                       )}
+                      {sourceBadge && (
+                        <span className="text-[10px] text-slate-500 ml-1" title="Resolved source for this row">
+                          — {sourceBadge}
+                        </span>
+                      )}
                     </div>
                   </div>
                   {years.length > 0 && (
                     <div className="mt-2 rounded-md border border-blue-700/40 bg-blue-950/20 p-2">
-                      <div className="text-xs text-blue-300">📊 <strong>Working Capital Change</strong></div>
-                      <div className="text-[10px] text-blue-400/80 mt-1">
-                        Enter the change in each component below for historical years. Total is the sum of components. Projection years are calculated from the Balance Sheet.
-                      </div>
-                      <div className="text-[10px] text-blue-400/60 mt-1 italic">
-                        Formula: Change in (Current Assets − Current Liabilities), excluding Cash & Short-Term Debt
+                      <div className="text-[10px] text-blue-400/80">
+                        Enter historical changes by component. Projection years are calculated automatically from Balance Sheet movements.
                       </div>
                     </div>
                   )}
@@ -938,17 +1016,17 @@ function CFSSectionComponent({
                       <span className={`text-sm font-medium ${colors.text}`}>
                         {row.label}
                       </span>
-                      {!isTopConfirmed && isCalculated && (
+                      {!isTopConfirmed && isCalculated && (row.id === "net_income" || row.id === "sbc") && (
                         <span className="text-xs text-slate-400 italic">(Calculated)</span>
                       )}
-                      {!isTopConfirmed && linkInfo && (
+                      {!isTopConfirmed && linkInfo && !sourceBadge && (
                         <span className={`text-xs ${linkInfo.isAutoPopulated ? "text-emerald-400" : "text-slate-400"}`}>
                           {linkInfo.isAutoPopulated ? "✨ " : "🔗 "}{linkInfo.text}
                         </span>
                       )}
-                      {!isTopConfirmed && autoValue !== null && autoValue !== undefined && (
-                        <span className="text-xs text-emerald-300">
-                          (Value: {storedToDisplay(autoValue, meta?.currencyUnit)} {getUnitLabel(meta?.currencyUnit)})
+                      {sourceBadge && (
+                        <span className="text-[10px] text-slate-500 ml-1" title="Resolved source for this row">
+                          — {sourceBadge}
                         </span>
                       )}
                     </div>
@@ -978,52 +1056,15 @@ function CFSSectionComponent({
                 {/* When confirmed, only show the header line; otherwise show full content */}
                 {!isTopConfirmed && (
                 <>
-                {/* Show auto-populated value or input fields */}
-                {/* For Net Income and SBC: show read-only auto-populated value */}
-                {/* For D&A and WC Change: show auto-populated value as suggestion, but allow input */}
-                {linkInfo?.isAutoPopulated && autoValue !== null && (row.id === "net_income" || row.id === "sbc") ? (
-                  <div className="mt-2 rounded-md border border-emerald-700/40 bg-emerald-950/20 p-2">
-                    <div className="text-xs text-emerald-300">
-                      ✨ Auto-populated from linked statement
-                      {years.length > 0 && (
-                        <span className="ml-1">
-                          · {years.map((y) => {
-                            const v = getAutoPopulatedValue(row, y);
-                            if (v === null) return null;
-                            return (
-                              <span key={y} className="mr-2">
-                                {y}: {storedToDisplay(v, meta?.currencyUnit)}{getUnitLabel(meta?.currencyUnit) ? ` ${getUnitLabel(meta?.currencyUnit)}` : ""}
-                              </span>
-                            );
-                          }).filter(Boolean)}
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[10px] text-emerald-400/70 mt-1">
-                      {row.id === "net_income" 
-                        ? "Values are pulled from the Income Statement (Net Income row). No manual input needed."
-                        : row.id === "sbc"
-                        ? "Values are calculated from all SBC breakdowns (SG&A and COGS). No manual input needed."
-                        : "Values are pulled from the Income Statement or SBC breakdowns. No manual input needed."}
-                    </div>
-                  </div>
-                ) : !isCalculated || row.id === "danda" || row.id === "wc_change" || row.kind === "input" ? (
+                {/* Show input grid for all operating rows; Net Income/SBC are read-only and use source label only */}
+                {!isCalculated || row.id === "danda" || row.id === "wc_change" || row.kind === "input" || row.id === "net_income" || row.id === "sbc" ? (
                   <div>
                     
-                    {/* Guidance for WC Change */}
+                    {/* Guidance for WC Change — short version */}
                     {row.id === "wc_change" && years.length > 0 && (
                       <div className="mb-2 rounded-md border border-blue-700/40 bg-blue-950/20 p-2">
-                        <div className="text-xs text-blue-300">
-                          📊 <strong>Working Capital Change:</strong>
-                        </div>
-                        <div className="text-[10px] text-blue-400/80 mt-1">
-                          {years.length === 1 
-                            ? "Input required for the first historical year (no prior year to calculate change)."
-                            : `Input required for ${years[0]}. For ${years.slice(1).join(", ")}, this will be automatically calculated from Balance Sheet changes: (Current Assets - Current Liabilities), excluding Cash and Short-Term Debt.`
-                          }
-                        </div>
-                        <div className="text-[10px] text-blue-400/60 mt-1 italic">
-                          Formula: Change in (Current Assets - Current Liabilities), excluding Cash & Short-Term Debt
+                        <div className="text-[10px] text-blue-400/80">
+                          Enter historical changes by component. Projection years are calculated automatically from Balance Sheet movements.
                         </div>
                       </div>
                     )}
@@ -1055,7 +1096,7 @@ function CFSSectionComponent({
                         } else if (isProjection) {
                           // Projection year - calculate from BS changes
                           try {
-                            const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns);
+                            const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
                             storedValue = computed;
                           } catch {
                             // Fallback to stored value if computation fails
@@ -1075,6 +1116,8 @@ function CFSSectionComponent({
                       const isWcChangeProjection = row.id === "wc_change" && year.endsWith("E");
                       const isReadOnly = (row.id === "net_income" || row.id === "sbc") || isWcChangeProjection;
                       const isDanda = row.id === "danda";
+                      // Net Income: display-only (no input boxes) so it clearly looks read-only / calculated
+                      const isNetIncomeReadOnlyDisplay = row.id === "net_income";
 
                       return (
                         <div key={year} className="flex flex-col">
@@ -1082,32 +1125,39 @@ function CFSSectionComponent({
                             {year}
                             {isWcChangeProjection && <span className="text-[10px] text-slate-500 ml-1">(calculated)</span>}
                           </label>
-                          <input
-                            type="number"
-                            step="any"
-                            value={displayValue === 0 ? "" : String(displayValue)}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              if (val === "" || val === "-") {
-                                updateRowValue("cashFlow", row.id, year, 0);
-                                return;
-                              }
-                              const displayNum = Number(val);
-                              if (!isNaN(displayNum)) {
-                                const storedNum = displayToStored(displayNum, meta?.currencyUnit);
-                                updateRowValue("cashFlow", row.id, year, storedNum);
-                              }
-                            }}
-                            onBlur={(e) => {
-                              if (e.target.value === "") {
-                                updateRowValue("cashFlow", row.id, year, 0);
-                              }
-                            }}
-                            placeholder="0"
-                            disabled={row.id === "danda" ? false : (isLocked || isReadOnly)}
-                            className={`w-full rounded border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-blue-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed ${isReadOnly && row.id !== "danda" ? "bg-slate-800/30" : ""}`}
-                          />
-                          {unitLabel && (
+                          {isNetIncomeReadOnlyDisplay ? (
+                            <div className="rounded border border-slate-700/50 bg-slate-800/40 px-2 py-1.5 text-sm text-slate-400">
+                              {displayValue === 0 ? "—" : displayValue}
+                              {unitLabel && <span className="text-slate-500 ml-1">{unitLabel}</span>}
+                            </div>
+                          ) : (
+                            <input
+                              type="number"
+                              step="any"
+                              value={displayValue === 0 ? "" : String(displayValue)}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === "" || val === "-") {
+                                  updateRowValue("cashFlow", row.id, year, 0);
+                                  return;
+                                }
+                                const displayNum = Number(val);
+                                if (!isNaN(displayNum)) {
+                                  const storedNum = displayToStored(displayNum, meta?.currencyUnit);
+                                  updateRowValue("cashFlow", row.id, year, storedNum);
+                                }
+                              }}
+                              onBlur={(e) => {
+                                if (e.target.value === "") {
+                                  updateRowValue("cashFlow", row.id, year, 0);
+                                }
+                              }}
+                              placeholder="0"
+                              disabled={row.id === "danda" ? false : (isLocked || isReadOnly)}
+                              className={`w-full rounded border border-slate-700 bg-slate-900/50 px-2 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:border-blue-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed ${isReadOnly && row.id !== "danda" ? "bg-slate-800/30" : ""}`}
+                            />
+                          )}
+                          {!isNetIncomeReadOnlyDisplay && unitLabel && (
                             <span className="text-xs text-slate-500 mt-0.5">{unitLabel}</span>
                           )}
                         </div>
@@ -1121,8 +1171,8 @@ function CFSSectionComponent({
                   </div>
                 )}
 
-                {/* Calculated value display */}
-                {isCalculated && (
+                {/* Calculated value display (skip for net_income/sbc — source label and header suffice) */}
+                {isCalculated && row.id !== "net_income" && row.id !== "sbc" && (
                   <div className="mt-2 text-xs text-slate-400 italic">
                     Value calculated automatically from linked statements
                   </div>
@@ -1290,14 +1340,23 @@ function CFSSectionComponent({
 
         {/* Total Row Display */}
         {totalRow && (
-          <div className={`rounded-lg border-2 ${colors.border} ${colors.bg} p-3 mt-4`}>
-            <div className="flex items-center justify-between">
-              <span className={`text-sm font-bold ${colors.text}`}>
-                {totalRow.label}
-              </span>
-              <span className="text-xs text-slate-400 italic">(Calculated)</span>
+          <>
+            {section.id === "operating" && (
+              <div className="pt-2 mt-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-400 border-b border-slate-700/60 pb-1.5 mb-2">
+                  Cash from Operating Activities
+                </div>
+              </div>
+            )}
+            <div className={`rounded-lg border-2 ${colors.border} ${colors.bg} p-3 ${section.id === "operating" ? "mt-0" : "mt-4"}`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-sm font-bold ${colors.text}`}>
+                  {totalRow.label}
+                </span>
+                <span className="text-xs text-slate-400 italic">(Calculated)</span>
+              </div>
             </div>
-          </div>
+          </>
         )}
 
         {/* Add Custom Item */}
@@ -1401,6 +1460,7 @@ export default function CashFlowBuilder() {
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns);
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const danaLocation = useModelStore((s) => s.danaLocation);
+  const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
   const updateRowValue = useModelStore((s) => s.updateRowValue);
   const insertRow = useModelStore((s) => s.insertRow);
   const removeRow = useModelStore((s) => s.removeRow);
@@ -1489,6 +1549,7 @@ export default function CashFlowBuilder() {
           balanceSheet={balanceSheet}
           danaBreakdowns={danaBreakdowns}
           danaLocation={danaLocation}
+          embeddedDisclosures={embeddedDisclosures}
         />
 
         {/* Investing Activities */}
@@ -1507,6 +1568,7 @@ export default function CashFlowBuilder() {
           balanceSheet={balanceSheet}
           danaBreakdowns={danaBreakdowns}
           danaLocation={danaLocation}
+          embeddedDisclosures={embeddedDisclosures}
         />
 
         {/* Financing Activities */}
@@ -1525,6 +1587,7 @@ export default function CashFlowBuilder() {
           balanceSheet={balanceSheet}
           danaBreakdowns={danaBreakdowns}
           danaLocation={danaLocation}
+          embeddedDisclosures={embeddedDisclosures}
         />
 
         {/* Net Change in Cash */}
@@ -1553,7 +1616,8 @@ export default function CashFlowBuilder() {
                       cashFlow,
                       allStatements,
                       sbcBreakdowns,
-                      danaBreakdowns
+                      danaBreakdowns,
+                      embeddedDisclosures
                     );
                   } catch {
                     computedValue = 0;

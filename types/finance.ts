@@ -40,6 +40,25 @@ export interface Row {
   classificationConfidence?: number;
   /** True for rows from statement template; they never require classification. */
   isTemplateRow?: boolean;
+  /** Historical CFO source (optional): set when resolving net_income, sbc, danda, wc_change for display/audit. */
+  cfoSource?: {
+    sourceType: "reported" | "income_statement" | "embedded_disclosure" | "derived" | "manual";
+    sourceDetail: string;
+  };
+}
+
+/**
+ * Generic embedded disclosure (e.g. SBC, amortization of intangibles).
+ * Stored per row, by year; does not modify reported IS line values.
+ */
+export type EmbeddedDisclosureType = "sbc" | "amortization_intangibles" | "depreciation_embedded" | "restructuring_charges";
+
+export interface EmbeddedDisclosureItem {
+  type: EmbeddedDisclosureType;
+  rowId: string;
+  values: Record<string, number>;
+  /** Human-readable label for preview when row is not in statement tree (e.g. after switching project). */
+  label?: string;
 }
 
 export type WizardStepId =

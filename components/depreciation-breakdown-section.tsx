@@ -8,14 +8,14 @@ import {
   getUnitLabel,
 } from "@/lib/currency-utils";
 import { getEligibleRowsForSbc } from "@/lib/is-disclosure-eligible";
-import { getSbcDisclosures, getTotalSbcByYearFromEmbedded } from "@/lib/embedded-disclosure-sbc";
+import { getDepreciationDisclosures, getTotalDepreciationByYearFromEmbedded } from "@/lib/embedded-disclosure-depreciation";
 import { computeRowValue } from "@/lib/calculations";
 
 /**
- * SBC Breakdown Section — uses generic embedded disclosure engine (type "sbc").
- * Lists eligible IS expense rows dynamically; one SBC entry per rowId; values do not modify reported IS.
+ * Depreciation Embedded in Expenses breakdown — uses embedded disclosure (type "depreciation_embedded").
+ * Same eligible IS rows as SBC/amortization; validation: depreciation ≤ reported row value per year.
  */
-export default function SbcBreakdownSection() {
+export default function DepreciationBreakdownSection() {
   const incomeStatement = useModelStore((s) => s.incomeStatement);
   const meta = useModelStore((s) => s.meta);
   const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
@@ -36,20 +36,20 @@ export default function SbcBreakdownSection() {
     [incomeStatement]
   );
 
-  const sbcDisclosures = useMemo(
-    () => getSbcDisclosures(embeddedDisclosures),
+  const depreciationDisclosures = useMemo(
+    () => getDepreciationDisclosures(embeddedDisclosures),
     [embeddedDisclosures]
   );
-  const sbcByRowId = useMemo(() => {
+  const deprByRowId = useMemo(() => {
     const map: Record<string, Record<string, number>> = {};
-    sbcDisclosures.forEach((d) => {
+    depreciationDisclosures.forEach((d) => {
       map[d.rowId] = d.values;
     });
     return map;
-  }, [sbcDisclosures]);
+  }, [depreciationDisclosures]);
 
-  const totalSbcByYear = useMemo(
-    () => getTotalSbcByYearFromEmbedded(embeddedDisclosures, years),
+  const totalDeprByYear = useMemo(
+    () => getTotalDepreciationByYearFromEmbedded(embeddedDisclosures, years),
     [embeddedDisclosures, years]
   );
 
@@ -58,16 +58,16 @@ export default function SbcBreakdownSection() {
       {eligibleRows.length > 0 && (
         <>
           {eligibleRows.map((row) => (
-            <SbcRowCard
+            <DepreciationRowCard
               key={row.id}
               row={row}
               years={years}
               meta={meta}
               incomeStatement={incomeStatement ?? []}
               allStatements={allStatements}
-              valuesByYear={sbcByRowId[row.id] ?? {}}
+              valuesByYear={deprByRowId[row.id] ?? {}}
               setValue={(year, value) =>
-                setEmbeddedDisclosureValue("sbc", row.id, year, value, row.label)
+                setEmbeddedDisclosureValue("depreciation_embedded", row.id, year, value, row.label)
               }
             />
           ))}
@@ -75,24 +75,24 @@ export default function SbcBreakdownSection() {
       )}
 
       {(() => {
-        const hasAnyData = Object.values(totalSbcByYear).some((v) => v !== 0);
+        const hasAnyData = Object.values(totalDeprByYear).some((v) => v !== 0);
         if (!hasAnyData) return null;
         return (
-          <div className="rounded-md border border-amber-700/30 bg-amber-950/30 p-3">
-            <div className="mb-2 text-xs font-medium text-amber-300/90">
-              Total SBC by year
+          <div className="rounded-md border border-violet-700/30 bg-violet-950/30 p-3">
+            <div className="mb-2 text-xs font-medium text-violet-300/90">
+              Total depreciation by year
             </div>
             <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-5">
               {years.map((y) => {
-                const total = totalSbcByYear[y] ?? 0;
+                const total = totalDeprByYear[y] ?? 0;
                 const displayValue = storedToDisplay(total, meta?.currencyUnit);
                 const unitLabel = getUnitLabel(meta?.currencyUnit);
                 return (
                   <div key={y} className="block">
-                    <div className="mb-1 text-[10px] text-amber-400/70">
+                    <div className="mb-1 text-[10px] text-violet-400/70">
                       {y} {unitLabel && `(${unitLabel})`}
                     </div>
-                    <div className="rounded-md border border-amber-700/50 bg-amber-950/40 px-2 py-1 text-xs font-medium text-amber-100">
+                    <div className="rounded-md border border-violet-700/50 bg-violet-950/40 px-2 py-1 text-xs font-medium text-violet-100">
                       {displayValue === 0
                         ? "—"
                         : displayValue.toLocaleString(undefined, {
@@ -112,7 +112,7 @@ export default function SbcBreakdownSection() {
   );
 }
 
-function SbcRowCard({
+function DepreciationRowCard({
   row,
   years,
   meta,
@@ -129,7 +129,7 @@ function SbcRowCard({
   valuesByYear: Record<string, number>;
   setValue: (year: string, value: number) => void;
 }) {
-  const getSbcValue = (year: string) => valuesByYear[year] ?? 0;
+  const getDeprValue = (year: string) => valuesByYear[year] ?? 0;
 
   const maxByYear = useMemo(() => {
     const out: Record<string, number> = {};
@@ -146,12 +146,12 @@ function SbcRowCard({
     return out;
   }, [row, years, incomeStatement, allStatements]);
 
-  const hasData = years.some((y) => getSbcValue(y) !== 0);
+  const hasData = years.some((y) => getDeprValue(y) !== 0);
 
   const initializeLocalValues = useMemo(() => {
     const values: Record<string, string> = {};
     years.forEach((y) => {
-      const storedValue = getSbcValue(y);
+      const storedValue = getDeprValue(y);
       const displayValue = storedToDisplay(storedValue, meta?.currencyUnit);
       values[y] = displayValue === 0 ? "" : String(displayValue);
     });
@@ -183,7 +183,7 @@ function SbcRowCard({
         const storedNum = displayToStored(displayNum, meta?.currencyUnit);
         const max = maxByYear[y] ?? Infinity;
         if (storedNum > max) {
-          err = `${y}: SBC cannot exceed reported line value (${storedToDisplay(max, meta?.currencyUnit)})`;
+          err = `${y}: Depreciation cannot exceed reported line value (${storedToDisplay(max, meta?.currencyUnit)})`;
         } else {
           setValue(y, storedNum);
         }
@@ -213,22 +213,22 @@ function SbcRowCard({
 
   if (!isExpanded && isConfirmed) {
     return (
-      <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3">
+      <div className="rounded-lg border border-violet-700/40 bg-violet-950/20 p-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => setIsExpanded(true)}
-              className="text-xs text-amber-400 hover:text-amber-300"
+              className="text-xs text-violet-400 hover:text-violet-300"
             >
               ▶
             </button>
-            <span className="text-sm font-medium text-amber-200">{row.label}</span>
+            <span className="text-sm font-medium text-violet-200">{row.label}</span>
             {hasData && (
-              <span className="text-xs text-amber-400/70">
+              <span className="text-xs text-violet-400/70">
                 {years
                   .map((y) => {
-                    const val = getSbcValue(y);
+                    const val = getDeprValue(y);
                     return val !== 0
                       ? `${y}: ${storedToDisplay(val, meta?.currencyUnit)}${unitLabel ? ` ${unitLabel}` : ""}`
                       : null;
@@ -251,21 +251,21 @@ function SbcRowCard({
   }
 
   return (
-    <div className="rounded-lg border border-amber-700/40 bg-amber-950/20 p-3">
+    <div className="rounded-lg border border-violet-700/40 bg-violet-950/20 p-3">
       <div className="flex items-start justify-between mb-2">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-1">
             <button
               type="button"
               onClick={() => setIsExpanded(!isExpanded)}
-              className="text-xs text-amber-400 hover:text-amber-300"
+              className="text-xs text-violet-400 hover:text-violet-300"
             >
               {isExpanded ? "▼" : "▶"}
             </button>
-            <span className="text-sm font-medium text-amber-200">{row.label}</span>
+            <span className="text-sm font-medium text-violet-200">{row.label}</span>
           </div>
-          <p className="text-xs text-amber-300/70 mt-1">
-            SBC disclosure by year. Cannot exceed the reported line value for that year.
+          <p className="text-xs text-violet-300/70 mt-1">
+            Depreciation disclosure by year. Cannot exceed the reported line value for that year.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -282,7 +282,7 @@ function SbcRowCard({
             <button
               type="button"
               onClick={handleConfirm}
-              className="rounded-md bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-600 transition"
+              className="rounded-md bg-violet-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-600 transition"
             >
               Confirm
             </button>
@@ -296,13 +296,13 @@ function SbcRowCard({
         <div className="ml-5 mt-3">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
             {years.map((year) => {
-              const displayValue = storedToDisplay(getSbcValue(year), meta?.currencyUnit);
+              const displayValue = storedToDisplay(getDeprValue(year), meta?.currencyUnit);
               const localValue =
                 localValues[year] ?? (displayValue === 0 ? "" : String(displayValue));
               const maxDisplay = maxByYear[year] != null ? storedToDisplay(maxByYear[year], meta?.currencyUnit) : "—";
               return (
                 <div key={year} className="flex flex-col">
-                  <label className="text-xs text-amber-300/70 mb-1">
+                  <label className="text-xs text-violet-300/70 mb-1">
                     {year} {unitLabel && `(${unitLabel})`} — max {maxDisplay}
                   </label>
                   <input
@@ -315,7 +315,7 @@ function SbcRowCard({
                       if (e.target.value === "") handleValueChange(year, "");
                     }}
                     placeholder="0"
-                    className="w-full rounded border border-amber-700 bg-amber-950/50 px-2 py-1.5 text-sm text-amber-100 placeholder-amber-500/50 focus:border-amber-500 focus:outline-none"
+                    className="w-full rounded border border-violet-700 bg-violet-950/50 px-2 py-1.5 text-sm text-violet-100 placeholder-violet-500/50 focus:border-violet-500 focus:outline-none"
                   />
                 </div>
               );

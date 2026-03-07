@@ -1,26 +1,21 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import SbcBreakdownSection from "@/components/sbc-breakdown-section";
-import { findRowInTree } from "@/lib/row-utils";
+import { getEligibleRowsForSbc } from "@/lib/is-disclosure-eligible";
 
 /**
- * Optional SBC Section - Shows as a simple question asking if user wants to input SBC
- * All SBC category cards are embedded within this section
+ * Optional SBC Section - Disclosure layer (does not modify reported IS values).
+ * Shows Yes/No; if Yes, shows dynamic list of eligible IS expense rows for SBC breakdown.
  */
 export default function SbcOptionalSection() {
-  const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const incomeStatement = useModelStore((s) => s.incomeStatement);
-  
-  // Check if there are breakdown categories available (SG&A, COGS, or R&D)
-  const sgaRow = incomeStatement ? findRowInTree(incomeStatement, "sga") : null;
-  const cogsRow = incomeStatement ? findRowInTree(incomeStatement, "cogs") : null;
-  const rdRow = incomeStatement ? findRowInTree(incomeStatement, "rd") : null;
-  const hasCategories =
-    (sgaRow?.children?.length ?? 0) > 0 ||
-    (cogsRow?.children?.length ?? 0) > 0 ||
-    (rdRow?.children?.length ?? 0) > 0;
+  const eligibleRows = useMemo(
+    () => getEligibleRowsForSbc(incomeStatement ?? []),
+    [incomeStatement]
+  );
+  const hasEligibleRows = eligibleRows.length > 0;
   
   // Always start with null to show the question first
   // The question should ALWAYS be visible - Yes/No controls whether breakdown is shown
@@ -41,20 +36,14 @@ export default function SbcOptionalSection() {
     }
   }, [userWantsSbc]);
   
-  // If no categories exist, show message to add categories first
-  if (!hasCategories) {
+  if (!hasEligibleRows) {
     return (
       <div className="mt-6 rounded-lg border border-amber-700/40 bg-amber-950/20 p-4">
         <div className="text-sm font-semibold text-amber-200 mb-2">
           📝 Stock-Based Compensation (SBC)
         </div>
         <p className="text-xs text-amber-300/80 mb-3">
-          Stock-Based Compensation (SBC) typically appears as a note in the Income Statement. 
-          If your company reports SBC, you can break it down into the expense and cost categories 
-          you've already set up in COGS and Operating Expenses.
-        </p>
-        <p className="text-xs text-amber-400/70 italic">
-          💡 To add SBC breakdowns, first add breakdown categories to COGS or Operating Expenses (SG&A / R&D).
+          SBC disclosure is available for COGS and Operating Expenses rows. Add COGS or Operating Expenses (e.g. SG&A, R&D) in the Income Statement to see eligible rows here.
         </p>
       </div>
     );

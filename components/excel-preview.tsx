@@ -4,7 +4,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { formatCurrencyDisplay, storedToDisplay, displayToStored, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
-import { checkBalanceSheetBalance, computeBalanceSheetTotalsWithOverrides, computeRowValue, getTotalSbcForYear } from "@/lib/calculations";
+import { checkBalanceSheetBalance, computeBalanceSheetTotalsWithOverrides, computeRowValue } from "@/lib/calculations";
+import { resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
 import {
   getWcScheduleItems,
@@ -21,6 +22,29 @@ import { findCFIItem } from "@/lib/cfi-intelligence";
 import { findCFFItem } from "@/lib/cff-intelligence";
 import { getIncomeStatementDisplayOrder, getIsSectionKey } from "@/lib/is-classification";
 import { findRowInTree } from "@/lib/row-utils";
+import { getSbcDisclosures, getTotalSbcByYearFromEmbedded } from "@/lib/embedded-disclosure-sbc";
+import { getAmortizationDisclosures, getTotalAmortizationByYearFromEmbedded } from "@/lib/embedded-disclosure-amortization";
+import { getDepreciationDisclosures, getTotalDepreciationByYearFromEmbedded } from "@/lib/embedded-disclosure-depreciation";
+import { getRestructuringDisclosures, getTotalRestructuringByYearFromEmbedded } from "@/lib/embedded-disclosure-restructuring";
+
+/** CFO Operating subgroup (display-only). Used for light section labels in CFS preview. */
+function getCFOOperatingSubgroup(rowId: string, parentId?: string): string | null {
+  if (parentId === "wc_change") return "working_capital";
+  if (rowId === "net_income") return "earnings_base";
+  if (rowId === "danda" || rowId === "sbc") return "non_cash";
+  if (rowId === "wc_change") return "working_capital";
+  if (rowId === "operating_cf") return "total";
+  if (rowId === "other_operating") return "other_operating";
+  if (parentId) return null;
+  return "other_operating";
+}
+const CFO_OPERATING_SUBGROUP_LABELS: Record<string, string> = {
+  earnings_base: "Earnings Base",
+  non_cash: "Non-Cash Adjustments",
+  working_capital: "Working Capital Adjustments",
+  other_operating: "Other Operating Activities",
+  total: "Cash from Operating Activities",
+};
 
 const CAPEX_DEFAULT_BUCKET_IDS_PREVIEW = ["cap_b1", "cap_b2", "cap_b3", "cap_b4", "cap_b5", "cap_b6", "cap_b7", "cap_b8", "cap_b9", "cap_b10"];
 const CAPEX_DEFAULT_BUCKET_LABELS_PREVIEW: Record<string, string> = {
@@ -350,6 +374,7 @@ function StatementTable({
   getYearCellClassName,
   bsBuildPreviewOverrides,
   bsBuildTotalsByYear,
+  embeddedDisclosures = [],
 }: { 
   rows: Row[]; 
   label: string; 
@@ -361,6 +386,8 @@ function StatementTable({
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
   sbcBreakdowns?: Record<string, Record<string, number>>;
   danaBreakdowns?: Record<string, number>;
+  /** CFS CFO source resolution: reported → embedded disclosure → 0 for SBC/D&A. */
+  embeddedDisclosures?: Array<{ id: string; label: string; valuesByYear: Record<string, number> }>;
   /** For Income Statement: rev and its direct children use this for projection years (sum of IS Build breakdowns). */
   projectedRevenue?: Record<string, Record<string, number>>;
   /** For Income Statement: total COGS per projection year from revenue × COGS % per line. */
@@ -434,7 +461,7 @@ function StatementTable({
     if (financingEndIndex >= 0 && rowIndex >= financingStart && rowIndex <= financingEndIndex) return "financing";
     return "financing";
   };
-  
+
   // For Balance Sheet, detect section changes (Assets, Liabilities, Equity)
   const getBSSection = (rowId: string, rows: Row[]): "assets" | "liabilities" | "equity" | null => {
     const totalAssetsIndex = rows.findIndex(r => r.id === "total_assets");
@@ -490,6 +517,9 @@ function StatementTable({
                   ? getISDisplaySection(prevRow.row, prevRow.parentId, rows)
                   : null;
         const prevCategory = isBalanceSheet && prevRow ? getBSCategory(prevRow.row.id, rows) : null;
+        const currentSubgroup = isCashFlow && currentSection === "operating" ? getCFOOperatingSubgroup(row.id, parentId) : null;
+        const prevSubgroup = isCashFlow && prevRow && currentSection === "operating" ? getCFOOperatingSubgroup(prevRow.row.id, prevRow.parentId) : null;
+        const isCFOSubgroupStart = isCashFlow && currentSection === "operating" && currentSubgroup != null && currentSubgroup !== "total" && currentSubgroup !== prevSubgroup;
         // Show section header when section changes. For IS: only show "Operating Expenses" header when the block is not already the structural parent (row.id !== "operating_expenses").
         const isSectionStart =
           (isBalanceSheet || isCashFlow) && currentSection != null && currentSection !== prevSection
@@ -590,6 +620,17 @@ function StatementTable({
                       {currentSection === "operating_expenses" && "Operating Expenses"}
                     </span>
                   </button>
+                </td>
+              </tr>
+            )}
+            
+            {/* CFO Operating subgroup label (light, display-only) */}
+            {isCFOSubgroupStart && currentSubgroup && CFO_OPERATING_SUBGROUP_LABELS[currentSubgroup] && (
+              <tr className="border-t border-slate-700/40">
+                <td colSpan={1 + years.length} className="px-3 py-1 bg-slate-900/30">
+                  <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">
+                    {CFO_OPERATING_SUBGROUP_LABELS[currentSubgroup]}
+                  </span>
                 </td>
               </tr>
             )}
@@ -743,7 +784,7 @@ function StatementTable({
                   storedValue = totalVal !== undefined ? totalVal : undefined;
                 } else {
                   try {
-                    storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                    storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
                   } catch (e) {
                     storedValue = row.values?.[y] ?? 0;
                   }
@@ -772,7 +813,7 @@ function StatementTable({
                         storedValue = row.values[y];
                       } else {
                         try {
-                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
                         } catch (e) {
                           storedValue = 0;
                         }
@@ -796,16 +837,31 @@ function StatementTable({
                             storedValue = isRow.values[y];
                           }
                         } else if (row.id === "danda") {
-                          // D&A is now a manual input in CFO - use stored value
-                          storedValue = row.values?.[y] ?? 0;
-                        } else if (row.id === "sbc" && sbcBreakdowns && allStatements) {
-                          // Total SBC without double-counting (same logic as IS Total SBC row)
-                          storedValue = getTotalSbcForYear(allStatements.incomeStatement, sbcBreakdowns, y);
+                          // D&A: use same CFO source hierarchy (reported → IS/danaBreakdowns → 0)
+                          if (allStatements && embeddedDisclosures !== undefined) {
+                            storedValue = resolveHistoricalCfoValueOnly("danda", y, {
+                              cashFlowRows: rows,
+                              incomeStatement: allStatements.incomeStatement,
+                              balanceSheet: allStatements.balanceSheet,
+                              embeddedDisclosures: embeddedDisclosures ?? [],
+                              danaBreakdowns: danaBreakdowns ?? {},
+                            });
+                          } else {
+                            storedValue = row.values?.[y] ?? 0;
+                          }
+                        } else if (row.id === "sbc" && allStatements) {
+                          // SBC: use CFO source hierarchy (reported CFS → embedded disclosure total → 0); no sbcBreakdowns in CFS path
+                          storedValue = resolveHistoricalCfoValueOnly("sbc", y, {
+                            cashFlowRows: rows,
+                            incomeStatement: allStatements.incomeStatement,
+                            balanceSheet: allStatements.balanceSheet,
+                            embeddedDisclosures: embeddedDisclosures ?? [],
+                          });
                         } else {
                           // For other calculated items, try to compute (but this might cause recursion)
                           // Only do this as last resort
                           try {
-                            storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns);
+                            storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
                           } catch (e) {
                             // If recursion error, just use 0
                             storedValue = 0;
@@ -914,6 +970,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const cashFlow = useModelStore((s) => s.cashFlow);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
+  const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
@@ -1662,6 +1719,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                 allStatements={{ incomeStatement, balanceSheet, cashFlow }}
                 sbcBreakdowns={sbcBreakdowns}
                 danaBreakdowns={danaBreakdowns}
+                embeddedDisclosures={embeddedDisclosures}
                 projectedRevenue={projectedRevenue}
                 projectedCogs={projectedCogs}
                 projectedCogsByCogsChild={projectedCogsByCogsChild}
@@ -1669,46 +1727,18 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
               />
             )}
 
-            {/* Stock-Based Compensation Disclosure */}
+            {/* Stock-Based Compensation Disclosure — single source: embeddedDisclosures (same as SBC builder). */}
             {focusStatement === "all" && (() => {
-              const sgaRow = findRowInTree(incomeStatement, "sga");
-              const cogsRow = findRowInTree(incomeStatement, "cogs");
-              const rdRow = findRowInTree(incomeStatement, "rd");
-              const sgaBreakdowns = sgaRow?.children ?? [];
-              const cogsBreakdowns = cogsRow?.children ?? [];
-              const rdBreakdowns = rdRow?.children ?? [];
-              const hasSgaBreakdowns = sgaBreakdowns.length > 0;
-              const hasCogsBreakdowns = cogsBreakdowns.length > 0;
-              const hasRdBreakdowns = rdBreakdowns.length > 0;
-              
-              // Check if there's any SBC data
-              let hasAnySbc = false;
-              years.forEach((y) => {
-                if (hasSgaBreakdowns) {
-                  sgaBreakdowns.forEach((b) => {
-                    if (sbcBreakdowns[b.id]?.[y]) hasAnySbc = true;
-                  });
-                } else {
-                  if (sbcBreakdowns["sga"]?.[y]) hasAnySbc = true;
-                }
-                if (hasCogsBreakdowns) {
-                  cogsBreakdowns.forEach((b) => {
-                    if (sbcBreakdowns[b.id]?.[y]) hasAnySbc = true;
-                  });
-                } else {
-                  if (sbcBreakdowns["cogs"]?.[y]) hasAnySbc = true;
-                }
-                if (hasRdBreakdowns) {
-                  rdBreakdowns.forEach((b) => {
-                    if (sbcBreakdowns[b.id]?.[y]) hasAnySbc = true;
-                  });
-                } else {
-                  if (sbcBreakdowns["rd"]?.[y]) hasAnySbc = true;
-                }
-              });
-              
+              const allSbcRows = getSbcDisclosures(embeddedDisclosures);
+              const computedTotals = getTotalSbcByYearFromEmbedded(embeddedDisclosures, years);
+              const hasAnySbc = allSbcRows.length > 0 && years.some((y) => (computedTotals[y] ?? 0) !== 0);
               if (!hasAnySbc) return null;
-              
+
+              const histYears = meta?.years?.historical ?? years;
+              const rowsToShow = allSbcRows.filter((d) =>
+                histYears.some((y) => (d.values[y] ?? 0) !== 0)
+              );
+
               return (
                 <>
                   {/* SBC Header */}
@@ -1720,42 +1750,17 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                       </p>
                     </td>
                   </tr>
-                  
-                  {/* COGS SBC */}
-                  {hasCogsBreakdowns ? (
-                    cogsBreakdowns.map((breakdown) => {
-                      const breakdownSbc = years.map((y) => sbcBreakdowns[breakdown.id]?.[y] ?? 0);
-                      const hasAnySbc = breakdownSbc.some(v => v !== 0);
-                      if (!hasAnySbc) return null;
-                      
-                      return (
-                        <tr key={breakdown.id} className="border-b border-amber-900/30 bg-amber-950/10">
-                          <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
-                            Cost of revenues — {breakdown.label}
-                          </td>
-                          {years.map((y) => {
-                            const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
-                            return (
-                              <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
-                                {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    }).filter(Boolean)
-                  ) : (() => {
-                    const cogsSbc = years.map((y) => sbcBreakdowns["cogs"]?.[y] ?? 0);
-                    const hasAnySbc = cogsSbc.some(v => v !== 0);
-                    if (!hasAnySbc) return null;
-                    
+                  {/* SBC disclosure rows with at least one non-zero in historical years */}
+                  {rowsToShow.map((d) => {
+                    const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                    const label = d.label ?? row?.label ?? d.rowId;
                     return (
-                      <tr className="border-b border-amber-900/30 bg-amber-950/10">
-                        <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
-                          Cost of revenues
+                      <tr key={d.rowId} className="border-b border-amber-900/30 bg-amber-950/10">
+                        <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: "24px" }}>
+                          {label}
                         </td>
                         {years.map((y) => {
-                          const value = sbcBreakdowns["cogs"]?.[y] ?? 0;
+                          const value = d.values[y] ?? 0;
                           return (
                             <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
                               {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
@@ -1764,145 +1769,198 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                         })}
                       </tr>
                     );
-                  })()}
-
-                  {/* SG&A SBC */}
-                  {hasSgaBreakdowns ? (
-                    sgaBreakdowns.map((breakdown) => {
-                      const breakdownSbc = years.map((y) => sbcBreakdowns[breakdown.id]?.[y] ?? 0);
-                      const hasAnySbc = breakdownSbc.some(v => v !== 0);
-                      if (!hasAnySbc) return null;
-                      
+                  })}
+                  {/* Total row — use computed totals only (not first row) */}
+                  <tr className="border-t-2 border-amber-700/50 bg-amber-950/30">
+                    <td className="px-3 py-2 font-semibold text-amber-200">
+                      Total stock-based compensation expense
+                    </td>
+                    {years.map((y) => {
+                      const value = computedTotals[y] ?? 0;
                       return (
-                        <tr key={breakdown.id} className="border-b border-amber-900/30 bg-amber-950/10">
-                          <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
-                            {breakdown.label}
-                          </td>
-                          {years.map((y) => {
-                            const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
-                            return (
-                              <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
-                                {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
-                              </td>
-                            );
-                          })}
-                        </tr>
+                        <td key={y} className="px-3 py-2 text-right font-semibold text-amber-100">
+                          {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
+                        </td>
                       );
-                    }).filter(Boolean)
-                  ) : (() => {
-                    const sgaSbc = years.map((y) => sbcBreakdowns["sga"]?.[y] ?? 0);
-                    const hasAnySbc = sgaSbc.some(v => v !== 0);
-                    if (!hasAnySbc) return null;
-                    
+                    })}
+                  </tr>
+                </>
+              );
+            })()}
+
+            {/* Amortization of Acquired Intangibles Disclosure — single source: embeddedDisclosures (same as amortization builder). */}
+            {focusStatement === "all" && (() => {
+              const allAmortRows = getAmortizationDisclosures(embeddedDisclosures);
+              const computedAmortTotals = getTotalAmortizationByYearFromEmbedded(embeddedDisclosures, years);
+              const hasAnyAmort = allAmortRows.length > 0 && years.some((y) => (computedAmortTotals[y] ?? 0) !== 0);
+              if (!hasAnyAmort) return null;
+
+              const histYears = meta?.years?.historical ?? years;
+              const rowsToShow = allAmortRows.filter((d) =>
+                histYears.some((y) => (d.values[y] ?? 0) !== 0)
+              );
+
+              return (
+                <>
+                  {/* Amortization Header */}
+                  <tr className="border-t-4 border-teal-700/50">
+                    <td colSpan={1 + years.length} className="px-3 py-3 bg-teal-950/30">
+                      <h3 className="text-sm font-bold text-teal-200">Amortization of Acquired Intangibles</h3>
+                      <p className="text-[10px] text-teal-300/70 italic mt-1">
+                        Amounts include amortization of intangible assets acquired through business combinations, as follows:
+                      </p>
+                    </td>
+                  </tr>
+                  {/* Amortization disclosure rows with at least one non-zero in historical years */}
+                  {rowsToShow.map((d) => {
+                    const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                    const label = d.label ?? row?.label ?? d.rowId;
                     return (
-                      <tr className="border-b border-amber-900/30 bg-amber-950/10">
-                        <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
-                          Selling, General & Administrative
+                      <tr key={d.rowId} className="border-b border-teal-900/30 bg-teal-950/10">
+                        <td className="px-3 py-1.5 text-teal-300/90" style={{ paddingLeft: "24px" }}>
+                          {label}
                         </td>
                         {years.map((y) => {
-                          const value = sbcBreakdowns["sga"]?.[y] ?? 0;
+                          const value = d.values[y] ?? 0;
                           return (
-                            <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                            <td key={y} className="px-3 py-1.5 text-right text-teal-200/90">
                               {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
                       </tr>
                     );
-                  })()}
-
-                  {/* R&D SBC */}
-                  {hasRdBreakdowns ? (
-                    rdBreakdowns.map((breakdown) => {
-                      const breakdownSbc = years.map((y) => sbcBreakdowns[breakdown.id]?.[y] ?? 0);
-                      const hasAnySbc = breakdownSbc.some(v => v !== 0);
-                      if (!hasAnySbc) return null;
-                      
+                  })}
+                  {/* Total row — use computed totals only */}
+                  <tr className="border-t-2 border-teal-700/50 bg-teal-950/30">
+                    <td className="px-3 py-2 font-semibold text-teal-200">
+                      Total amortization of acquired intangibles
+                    </td>
+                    {years.map((y) => {
+                      const value = computedAmortTotals[y] ?? 0;
                       return (
-                        <tr key={breakdown.id} className="border-b border-amber-900/30 bg-amber-950/10">
-                          <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
-                            {breakdown.label}
-                          </td>
-                          {years.map((y) => {
-                            const value = sbcBreakdowns[breakdown.id]?.[y] ?? 0;
-                            return (
-                              <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
-                                {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
-                              </td>
-                            );
-                          })}
-                        </tr>
+                        <td key={y} className="px-3 py-2 text-right font-semibold text-teal-100">
+                          {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
+                        </td>
                       );
-                    }).filter(Boolean)
-                  ) : (() => {
-                    const rdSbc = years.map((y) => sbcBreakdowns["rd"]?.[y] ?? 0);
-                    const hasAnySbc = rdSbc.some(v => v !== 0);
-                    if (!hasAnySbc) return null;
-                    
+                    })}
+                  </tr>
+                </>
+              );
+            })()}
+
+            {/* Depreciation Embedded in Expenses Disclosure — single source: embeddedDisclosures (same as depreciation builder). */}
+            {focusStatement === "all" && (() => {
+              const allDeprRows = getDepreciationDisclosures(embeddedDisclosures);
+              const computedDeprTotals = getTotalDepreciationByYearFromEmbedded(embeddedDisclosures, years);
+              const hasAnyDepr = allDeprRows.length > 0 && years.some((y) => (computedDeprTotals[y] ?? 0) !== 0);
+              if (!hasAnyDepr) return null;
+
+              const histYears = meta?.years?.historical ?? years;
+              const rowsToShow = allDeprRows.filter((d) =>
+                histYears.some((y) => (d.values[y] ?? 0) !== 0)
+              );
+
+              return (
+                <>
+                  <tr className="border-t-4 border-violet-700/50">
+                    <td colSpan={1 + years.length} className="px-3 py-3 bg-violet-950/30">
+                      <h3 className="text-sm font-bold text-violet-200">Depreciation Embedded in Expenses</h3>
+                      <p className="text-[10px] text-violet-300/70 italic mt-1">
+                        Amounts include depreciation embedded in cost of revenue or operating expenses, as follows:
+                      </p>
+                    </td>
+                  </tr>
+                  {rowsToShow.map((d) => {
+                    const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                    const label = d.label ?? row?.label ?? d.rowId;
                     return (
-                      <tr className="border-b border-amber-900/30 bg-amber-950/10">
-                        <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: '24px' }}>
-                          Research and development
+                      <tr key={d.rowId} className="border-b border-violet-900/30 bg-violet-950/10">
+                        <td className="px-3 py-1.5 text-violet-300/90" style={{ paddingLeft: "24px" }}>
+                          {label}
                         </td>
                         {years.map((y) => {
-                          const value = sbcBreakdowns["rd"]?.[y] ?? 0;
+                          const value = d.values[y] ?? 0;
                           return (
-                            <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                            <td key={y} className="px-3 py-1.5 text-right text-violet-200/90">
                               {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
                       </tr>
                     );
-                  })()}
-
-                  {/* Total SBC Row */}
-                  {(() => {
-                    const totalSbcByYear = years.map((y) => {
-                      let total = 0;
-                      if (hasSgaBreakdowns) {
-                        sgaBreakdowns.forEach((b) => {
-                          total += sbcBreakdowns[b.id]?.[y] ?? 0;
-                        });
-                      } else {
-                        total += sbcBreakdowns["sga"]?.[y] ?? 0;
-                      }
-                      if (hasCogsBreakdowns) {
-                        cogsBreakdowns.forEach((b) => {
-                          total += sbcBreakdowns[b.id]?.[y] ?? 0;
-                        });
-                      } else {
-                        total += sbcBreakdowns["cogs"]?.[y] ?? 0;
-                      }
-                      if (hasRdBreakdowns) {
-                        rdBreakdowns.forEach((b) => {
-                          total += sbcBreakdowns[b.id]?.[y] ?? 0;
-                        });
-                      } else {
-                        total += sbcBreakdowns["rd"]?.[y] ?? 0;
-                      }
-                      return total;
-                    });
-                    
-                    const hasAnySbc = totalSbcByYear.some(v => v !== 0);
-                    if (!hasAnySbc) return null;
-                    
-                    return (
-                      <tr className="border-t-2 border-amber-700/50 bg-amber-950/30">
-                        <td className="px-3 py-2 font-semibold text-amber-200">
-                          Total stock-based compensation expense
+                  })}
+                  <tr className="border-t-2 border-violet-700/50 bg-violet-950/30">
+                    <td className="px-3 py-2 font-semibold text-violet-200">
+                      Total depreciation embedded in expenses
+                    </td>
+                    {years.map((y) => {
+                      const value = computedDeprTotals[y] ?? 0;
+                      return (
+                        <td key={y} className="px-3 py-2 text-right font-semibold text-violet-100">
+                          {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                         </td>
-                        {years.map((y, idx) => {
-                          const value = totalSbcByYear[idx];
+                      );
+                    })}
+                  </tr>
+                </>
+              );
+            })()}
+
+            {/* Restructuring Charges Disclosure — single source: embeddedDisclosures (same as restructuring builder). */}
+            {focusStatement === "all" && (() => {
+              const allRestructRows = getRestructuringDisclosures(embeddedDisclosures);
+              const computedRestructTotals = getTotalRestructuringByYearFromEmbedded(embeddedDisclosures, years);
+              const hasAnyRestruct = allRestructRows.length > 0 && years.some((y) => (computedRestructTotals[y] ?? 0) !== 0);
+              if (!hasAnyRestruct) return null;
+
+              const histYears = meta?.years?.historical ?? years;
+              const rowsToShow = allRestructRows.filter((d) =>
+                histYears.some((y) => (d.values[y] ?? 0) !== 0)
+              );
+
+              return (
+                <>
+                  <tr className="border-t-4 border-rose-700/50">
+                    <td colSpan={1 + years.length} className="px-3 py-3 bg-rose-950/30">
+                      <h3 className="text-sm font-bold text-rose-200">Restructuring Charges</h3>
+                      <p className="text-[10px] text-rose-300/70 italic mt-1">
+                        Amounts include restructuring charges embedded in cost of revenue or operating expenses, as follows:
+                      </p>
+                    </td>
+                  </tr>
+                  {rowsToShow.map((d) => {
+                    const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                    const label = d.label ?? row?.label ?? d.rowId;
+                    return (
+                      <tr key={d.rowId} className="border-b border-rose-900/30 bg-rose-950/10">
+                        <td className="px-3 py-1.5 text-rose-300/90" style={{ paddingLeft: "24px" }}>
+                          {label}
+                        </td>
+                        {years.map((y) => {
+                          const value = d.values[y] ?? 0;
                           return (
-                            <td key={y} className="px-3 py-2 text-right font-semibold text-amber-100">
+                            <td key={y} className="px-3 py-1.5 text-right text-rose-200/90">
                               {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
                             </td>
                           );
                         })}
                       </tr>
                     );
-                  })()}
+                  })}
+                  <tr className="border-t-2 border-rose-700/50 bg-rose-950/30">
+                    <td className="px-3 py-2 font-semibold text-rose-200">
+                      Total restructuring charges
+                    </td>
+                    {years.map((y) => {
+                      const value = computedRestructTotals[y] ?? 0;
+                      return (
+                        <td key={y} className="px-3 py-2 text-right font-semibold text-rose-100">
+                          {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
+                        </td>
+                      );
+                    })}
+                  </tr>
                 </>
               );
             })()}
@@ -2314,6 +2372,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                   allStatements={{ incomeStatement, balanceSheet, cashFlow }}
                   sbcBreakdowns={sbcBreakdowns}
                   danaBreakdowns={danaBreakdowns}
+                  embeddedDisclosures={embeddedDisclosures}
                   getYearCellClassName={
                     focusStatement === "balance"
                       ? (y) =>
@@ -2435,6 +2494,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                 allStatements={{ incomeStatement, balanceSheet, cashFlow }}
                 sbcBreakdowns={sbcBreakdowns}
                 danaBreakdowns={danaBreakdowns}
+                embeddedDisclosures={embeddedDisclosures}
               />
             )}
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import {
@@ -11,6 +11,10 @@ import {
 import { computeRowValue } from "@/lib/calculations";
 import { findRowInTree } from "@/lib/row-utils";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
+import { getSbcDisclosures, getTotalSbcByYearFromEmbedded } from "@/lib/embedded-disclosure-sbc";
+import { getAmortizationDisclosures, getTotalAmortizationByYearFromEmbedded } from "@/lib/embedded-disclosure-amortization";
+import { getDepreciationDisclosures, getTotalDepreciationByYearFromEmbedded } from "@/lib/embedded-disclosure-depreciation";
+import { getRestructuringDisclosures, getTotalRestructuringByYearFromEmbedded } from "@/lib/embedded-disclosure-restructuring";
 
 function formatAccounting(
   value: number,
@@ -41,6 +45,7 @@ export default function ISBuildPreview() {
   const cashFlow = useModelStore((s) => s.cashFlow);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
+  const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
 
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
@@ -512,6 +517,81 @@ export default function ISBuildPreview() {
     lines.push({ id: "cogs-total", label: "Total COGS as % of Revenue", depth: 0, pctByYear: totalPctByYear });
     return lines;
   }, [leafRevenueLinesForCogs, years, getCogsPctForLineYear, revenueTotalByYear, projectedCogsByYear]);
+
+  // SBC disclosure block: single source of truth — same as builder (embeddedDisclosures only, no sbcBreakdowns).
+  // Derive directly from store so we never render from stale memos; map over full array and use computed totals only.
+  const sbcDisclosures = useMemo(
+    () => getSbcDisclosures(embeddedDisclosures),
+    [embeddedDisclosures]
+  );
+  const totalSbcByYear = useMemo(
+    () => getTotalSbcByYearFromEmbedded(embeddedDisclosures, years),
+    [embeddedDisclosures, years]
+  );
+  const hasSbcDisclosureData = useMemo(
+    () =>
+      sbcDisclosures.length > 0 &&
+      (sbcDisclosures.some((d) =>
+        years.some((y) => (d.values[y] ?? 0) !== 0)
+      ) ||
+        years.some((y) => (totalSbcByYear[y] ?? 0) !== 0)),
+    [sbcDisclosures, years, totalSbcByYear]
+  );
+
+  // Amortization of acquired intangibles disclosure block (same pattern as SBC).
+  const amortizationDisclosures = useMemo(
+    () => getAmortizationDisclosures(embeddedDisclosures),
+    [embeddedDisclosures]
+  );
+  const totalAmortizationByYear = useMemo(
+    () => getTotalAmortizationByYearFromEmbedded(embeddedDisclosures, years),
+    [embeddedDisclosures, years]
+  );
+  const hasAmortizationDisclosureData = useMemo(
+    () =>
+      amortizationDisclosures.length > 0 &&
+      (amortizationDisclosures.some((d) =>
+        years.some((y) => (d.values[y] ?? 0) !== 0)
+      ) ||
+        years.some((y) => (totalAmortizationByYear[y] ?? 0) !== 0)),
+    [amortizationDisclosures, years, totalAmortizationByYear]
+  );
+
+  const depreciationDisclosures = useMemo(
+    () => getDepreciationDisclosures(embeddedDisclosures),
+    [embeddedDisclosures]
+  );
+  const totalDepreciationByYear = useMemo(
+    () => getTotalDepreciationByYearFromEmbedded(embeddedDisclosures, years),
+    [embeddedDisclosures, years]
+  );
+  const hasDepreciationDisclosureData = useMemo(
+    () =>
+      depreciationDisclosures.length > 0 &&
+      (depreciationDisclosures.some((d) =>
+        years.some((y) => (d.values[y] ?? 0) !== 0)
+      ) ||
+        years.some((y) => (totalDepreciationByYear[y] ?? 0) !== 0)),
+    [depreciationDisclosures, years, totalDepreciationByYear]
+  );
+
+  const restructuringDisclosures = useMemo(
+    () => getRestructuringDisclosures(embeddedDisclosures),
+    [embeddedDisclosures]
+  );
+  const totalRestructuringByYear = useMemo(
+    () => getTotalRestructuringByYearFromEmbedded(embeddedDisclosures, years),
+    [embeddedDisclosures, years]
+  );
+  const hasRestructuringDisclosureData = useMemo(
+    () =>
+      restructuringDisclosures.length > 0 &&
+      (restructuringDisclosures.some((d) =>
+        years.some((y) => (d.values[y] ?? 0) !== 0)
+      ) ||
+        years.some((y) => (totalRestructuringByYear[y] ?? 0) !== 0)),
+    [restructuringDisclosures, years, totalRestructuringByYear]
+  );
 
   return (
     <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
@@ -1237,6 +1317,349 @@ export default function ISBuildPreview() {
             )}
           </tbody>
         </table>
+
+        {hasSbcDisclosureData && (() => {
+          const allSbcRows = getSbcDisclosures(embeddedDisclosures);
+          const computedTotals = getTotalSbcByYearFromEmbedded(embeddedDisclosures, years);
+          const histYears = historicalYears.length > 0 ? historicalYears : years;
+          const rowsToShow = allSbcRows.filter((d) =>
+            histYears.some((y) => (d.values[y] ?? 0) !== 0)
+          );
+          return (
+            <div className="mt-8 rounded-lg border border-amber-800/50 bg-amber-950/30 p-4">
+              <h3 className="mb-3 text-sm font-semibold text-amber-200">
+                Stock-Based Compensation (disclosure)
+              </h3>
+              <p className="mb-3 text-xs text-amber-300/80">
+                SBC by line and by year. These amounts are disclosed only; they do not change reported Income Statement line values.
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[320px] border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-amber-700/50">
+                      <th className="px-3 py-2 text-left font-medium text-amber-300/90">
+                        Line
+                      </th>
+                      {years.map((y) => (
+                        <th
+                          key={y}
+                          className="px-3 py-2 text-right font-medium text-amber-300/90"
+                        >
+                          {y}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsToShow.map((d) => {
+                      const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                      const label = row?.label ?? d.rowId;
+                      return (
+                        <tr
+                          key={d.rowId}
+                          className="border-b border-amber-800/30"
+                        >
+                          <td className="px-3 py-2 text-amber-200/90">{label}</td>
+                          {years.map((y) => {
+                            const val = d.values[y] ?? 0;
+                            const display =
+                              val === 0
+                                ? "—"
+                                : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                            return (
+                              <td
+                                key={y}
+                                className="px-3 py-2 text-right text-amber-100/90 tabular-nums"
+                              >
+                                {display}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    <tr className="border-t-2 border-amber-700/50 font-medium">
+                      <td className="px-3 py-2 text-amber-200">Total stock-based compensation expense</td>
+                      {years.map((y) => {
+                        const val = computedTotals[y] ?? 0;
+                        const display =
+                          val === 0
+                            ? "—"
+                            : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                        return (
+                          <td
+                            key={y}
+                            className="px-3 py-2 text-right text-amber-100 tabular-nums"
+                          >
+                            {display}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Amortization of Acquired Intangibles disclosure block — same source as builder. */}
+        {hasAmortizationDisclosureData && (() => {
+          const allAmortRows = getAmortizationDisclosures(embeddedDisclosures);
+          const computedAmortTotals = getTotalAmortizationByYearFromEmbedded(embeddedDisclosures, years);
+          const histYears = historicalYears.length > 0 ? historicalYears : years;
+          const rowsToShow = allAmortRows.filter((d) =>
+            histYears.some((y) => (d.values[y] ?? 0) !== 0)
+          );
+          return (
+            <div className="mt-8 rounded-lg border border-teal-800/50 bg-teal-950/30 p-4">
+              <h3 className="mb-3 text-sm font-semibold text-teal-200">
+                Amortization of Acquired Intangibles
+              </h3>
+              <p className="mb-3 text-xs text-teal-300/80">
+                Amounts include amortization of intangible assets acquired through business combinations, as follows:
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[320px] border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-teal-700/50">
+                      <th className="px-3 py-2 text-left font-medium text-teal-300/90">
+                        Line
+                      </th>
+                      {years.map((y) => (
+                        <th
+                          key={y}
+                          className="px-3 py-2 text-right font-medium text-teal-300/90"
+                        >
+                          {y}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsToShow.map((d) => {
+                      const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                      const label = row?.label ?? d.rowId;
+                      return (
+                        <tr
+                          key={d.rowId}
+                          className="border-b border-teal-800/30"
+                        >
+                          <td className="px-3 py-2 text-teal-200/90">{label}</td>
+                          {years.map((y) => {
+                            const val = d.values[y] ?? 0;
+                            const display =
+                              val === 0
+                                ? "—"
+                                : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                            return (
+                              <td
+                                key={y}
+                                className="px-3 py-2 text-right text-teal-100/90 tabular-nums"
+                              >
+                                {display}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    <tr className="border-t-2 border-teal-700/50 font-medium">
+                      <td className="px-3 py-2 text-teal-200">Total amortization of acquired intangibles</td>
+                      {years.map((y) => {
+                        const val = computedAmortTotals[y] ?? 0;
+                        const display =
+                          val === 0
+                            ? "—"
+                            : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                        return (
+                          <td
+                            key={y}
+                            className="px-3 py-2 text-right text-teal-100 tabular-nums"
+                          >
+                            {display}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Depreciation Embedded in Expenses disclosure block — same source as builder. */}
+        {hasDepreciationDisclosureData && (() => {
+          const allDeprRows = getDepreciationDisclosures(embeddedDisclosures);
+          const computedDeprTotals = getTotalDepreciationByYearFromEmbedded(embeddedDisclosures, years);
+          const histYears = historicalYears.length > 0 ? historicalYears : years;
+          const rowsToShow = allDeprRows.filter((d) =>
+            histYears.some((y) => (d.values[y] ?? 0) !== 0)
+          );
+          return (
+            <div className="mt-8 rounded-lg border border-violet-800/50 bg-violet-950/30 p-4">
+              <h3 className="mb-3 text-sm font-semibold text-violet-200">
+                Depreciation Embedded in Expenses
+              </h3>
+              <p className="mb-3 text-xs text-violet-300/80">
+                Amounts include depreciation embedded in cost of revenue or operating expenses, as follows:
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[320px] border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-violet-700/50">
+                      <th className="px-3 py-2 text-left font-medium text-violet-300/90">
+                        Line
+                      </th>
+                      {years.map((y) => (
+                        <th
+                          key={y}
+                          className="px-3 py-2 text-right font-medium text-violet-300/90"
+                        >
+                          {y}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsToShow.map((d) => {
+                      const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                      const label = row?.label ?? d.rowId;
+                      return (
+                        <tr
+                          key={d.rowId}
+                          className="border-b border-violet-800/30"
+                        >
+                          <td className="px-3 py-2 text-violet-200/90">{label}</td>
+                          {years.map((y) => {
+                            const val = d.values[y] ?? 0;
+                            const display =
+                              val === 0
+                                ? "—"
+                                : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                            return (
+                              <td
+                                key={y}
+                                className="px-3 py-2 text-right text-violet-100/90 tabular-nums"
+                              >
+                                {display}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    <tr className="border-t-2 border-violet-700/50 font-medium">
+                      <td className="px-3 py-2 text-violet-200">Total depreciation embedded in expenses</td>
+                      {years.map((y) => {
+                        const val = computedDeprTotals[y] ?? 0;
+                        const display =
+                          val === 0
+                            ? "—"
+                            : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                        return (
+                          <td
+                            key={y}
+                            className="px-3 py-2 text-right text-violet-100 tabular-nums"
+                          >
+                            {display}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Restructuring Charges disclosure block — same source as builder. */}
+        {hasRestructuringDisclosureData && (() => {
+          const allRestructRows = getRestructuringDisclosures(embeddedDisclosures);
+          const computedRestructTotals = getTotalRestructuringByYearFromEmbedded(embeddedDisclosures, years);
+          const histYears = historicalYears.length > 0 ? historicalYears : years;
+          const rowsToShow = allRestructRows.filter((d) =>
+            histYears.some((y) => (d.values[y] ?? 0) !== 0)
+          );
+          return (
+            <div className="mt-8 rounded-lg border border-rose-800/50 bg-rose-950/30 p-4">
+              <h3 className="mb-3 text-sm font-semibold text-rose-200">
+                Restructuring Charges
+              </h3>
+              <p className="mb-3 text-xs text-rose-300/80">
+                Amounts include restructuring charges embedded in cost of revenue or operating expenses, as follows:
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[320px] border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-rose-700/50">
+                      <th className="px-3 py-2 text-left font-medium text-rose-300/90">
+                        Line
+                      </th>
+                      {years.map((y) => (
+                        <th
+                          key={y}
+                          className="px-3 py-2 text-right font-medium text-rose-300/90"
+                        >
+                          {y}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsToShow.map((d) => {
+                      const row = findRowInTree(incomeStatement ?? [], d.rowId);
+                      const label = row?.label ?? d.rowId;
+                      return (
+                        <tr
+                          key={d.rowId}
+                          className="border-b border-rose-800/30"
+                        >
+                          <td className="px-3 py-2 text-rose-200/90">{label}</td>
+                          {years.map((y) => {
+                            const val = d.values[y] ?? 0;
+                            const display =
+                              val === 0
+                                ? "—"
+                                : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                            return (
+                              <td
+                                key={y}
+                                className="px-3 py-2 text-right text-rose-100/90 tabular-nums"
+                              >
+                                {display}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    <tr className="border-t-2 border-rose-700/50 font-medium">
+                      <td className="px-3 py-2 text-rose-200">Total restructuring charges</td>
+                      {years.map((y) => {
+                        const val = computedRestructTotals[y] ?? 0;
+                        const display =
+                          val === 0
+                            ? "—"
+                            : formatAccounting(val, meta?.currencyUnit as CurrencyUnit, false);
+                        return (
+                          <td
+                            key={y}
+                            className="px-3 py-2 text-right text-rose-100 tabular-nums"
+                          >
+                            {display}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </section>
   );

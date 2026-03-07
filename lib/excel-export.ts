@@ -329,6 +329,7 @@ export type ExportStatementContext = {
   allStatements?: { incomeStatement: Row[]; balanceSheet: Row[]; cashFlow: Row[] };
   sbcBreakdowns?: Record<string, Record<string, number>>;
   danaBreakdowns?: Record<string, number>;
+  embeddedDisclosures?: Array<{ id: string; label: string; valuesByYear: Record<string, number> }>;
   isBuildRefs?: ISBuildRefMap;
 };
 
@@ -714,9 +715,10 @@ export function exportStatementToExcel(
       const allStatements = context?.allStatements;
       const sbcBreakdowns = context?.sbcBreakdowns ?? {};
       const danaBreakdowns = context?.danaBreakdowns;
+      const embeddedDisclosures = context?.embeddedDisclosures;
       const value =
         allStatements != null
-          ? computeRowValue(row, year, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns)
+          ? computeRowValue(row, year, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures)
           : (row.values?.[year] ?? 0);
       const isLink = row.excelFormula?.includes("!") || false; // Links reference other sheets
       // hasChildren is already defined above for this row

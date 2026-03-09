@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect, Fragment } from "react";
+import { useMemo, useState, useEffect, useRef, Fragment } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row, EmbeddedDisclosureItem } from "@/types/finance";
 import {
@@ -15,6 +15,12 @@ import { getSuggestedCFIItems, validateCFIItem, findCFIItem, type CFIItem } from
 import { getSuggestedCFFItems, validateCFFItem, findCFFItem, type CFFItem } from "@/lib/cff-intelligence";
 import { computeRowValue } from "@/lib/calculations";
 import { resolveHistoricalCfoValue, resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
+import {
+  getFinalOperatingSubgroup,
+  OPERATING_SUBGROUP_ORDER,
+  OPERATING_SUBGROUP_LABELS,
+  type OperatingSubgroupId,
+} from "@/lib/cfs-operating-subgroups";
 // UUID helper
 function uuid() {
   return `id_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -78,41 +84,46 @@ function inferFinancingSignFromLabel(label: string): "positive" | "negative" {
   return "positive";
 }
 
-type CFSSection = "operating" | "investing" | "financing";
+type CFSSection = "operating" | "investing" | "financing" | "cash_bridge";
 
 interface CFSSectionConfig {
   id: CFSSection;
   label: string;
   description: string;
-  colorClass: "blue" | "green" | "orange";
+  colorClass: "blue" | "green" | "orange" | "purple";
   sectionId: string;
-  totalRowId: string;
+  totalRowId: string; // For cash_bridge: net_change_cash (section ends before this row)
   standardItems: string[]; // IDs of standard items in this section
 }
 
-/** Display-only subgroup labels for Operating Activities (IB-grade structure). Not stored in model. */
-const CFO_OPERATING_SUBGROUPS: { id: "earnings_base" | "non_cash" | "working_capital" | "other_operating" | "total"; label: string }[] = [
-  { id: "earnings_base", label: "Earnings Base" },
-  { id: "non_cash", label: "Non-Cash Adjustments" },
-  { id: "working_capital", label: "Working Capital Adjustments" },
-  { id: "other_operating", label: "Other Operating Activities" },
-  { id: "total", label: "Cash from Operating Activities" },
+/** Display-only subgroup blocks for Operating (from shared single source of truth). */
+const CFO_OPERATING_SUBGROUPS = [
+  ...OPERATING_SUBGROUP_ORDER.map((id) => ({ id, label: OPERATING_SUBGROUP_LABELS[id] })),
+  { id: "total" as const, label: OPERATING_SUBGROUP_LABELS.total },
 ];
 
-function getOperatingSubgroup(rowId: string): "earnings_base" | "non_cash" | "working_capital" | "other_operating" | "total" {
-  if (rowId === "net_income") return "earnings_base";
-  if (rowId === "danda" || rowId === "sbc") return "non_cash";
-  if (rowId === "wc_change") return "working_capital";
-  if (rowId === "operating_cf") return "total";
-  if (rowId === "other_operating") return "other_operating";
-  return "other_operating"; // custom operating rows
+/** Default historicalCfsNature when adding a custom operating row from a given subgroup. */
+function getDefaultNatureForOperatingSubgroup(subgroup: "non_cash" | "working_capital" | "other_operating"): "reported_non_cash_adjustment" | "reported_working_capital_movement" | "reported_operating_other" {
+  if (subgroup === "non_cash") return "reported_non_cash_adjustment";
+  if (subgroup === "working_capital") return "reported_working_capital_movement";
+  return "reported_operating_other";
+}
+
+/** True if AI-suggested nature would move the row out of the subgroup the user added from. */
+function wouldMoveOutOfOperatingSubgroup(
+  subgroup: "non_cash" | "working_capital" | "other_operating",
+  aiNature: string
+): boolean {
+  if (subgroup === "working_capital") return aiNature === "reported_operating_other" || aiNature === "reported_non_cash_adjustment";
+  if (subgroup === "non_cash") return aiNature === "reported_operating_other" || aiNature === "reported_working_capital_movement";
+  return aiNature === "reported_working_capital_movement" || aiNature === "reported_non_cash_adjustment";
 }
 
 const CFS_SECTIONS: CFSSectionConfig[] = [
   {
     id: "operating",
     label: "Operating Activities",
-    description: "Cash flows from operating activities. ✨ Net Income, D&A, and SBC auto-populate from Income Statement. 📊 Working Capital changes: input first year, then auto-calculated from Balance Sheet.",
+    description: "Cash flows from operating activities. ✨ Net Income, D&A, and SBC auto-populate from Income Statement. 📊 Working Capital: historical years are entered by component; the total is calculated from those components. Projection years are calculated from Balance Sheet movements.",
     colorClass: "blue",
     sectionId: "cfs_operating",
     totalRowId: "operating_cf",
@@ -125,7 +136,7 @@ const CFS_SECTIONS: CFSSectionConfig[] = [
     colorClass: "green",
     sectionId: "cfs_investing",
     totalRowId: "investing_cf",
-    standardItems: ["capex"],
+    standardItems: ["capex", "acquisitions", "asset_sales", "investments", "other_investing"],
   },
   {
     id: "financing",
@@ -134,7 +145,16 @@ const CFS_SECTIONS: CFSSectionConfig[] = [
     colorClass: "orange",
     sectionId: "cfs_financing",
     totalRowId: "financing_cf",
-    standardItems: [],
+    standardItems: ["debt_issued", "debt_repaid", "equity_issued", "share_repurchases", "dividends", "other_financing"],
+  },
+  {
+    id: "cash_bridge",
+    label: "Cash Bridge Items",
+    description: "Items that affect net change in cash but are not CFO, CFI, or CFF (e.g. effect of exchange rate changes, restricted cash reconciliation).",
+    colorClass: "purple",
+    sectionId: "cfs_cash_bridge",
+    totalRowId: "net_change_cash", // Section ends before this row
+    standardItems: ["fx_effect_on_cash"],
   },
 ];
 
@@ -179,11 +199,13 @@ function CFSSectionComponent({
   const currentCashFlow = useModelStore((s) => s.cashFlow);
   const ensureWcChildrenFromBS = useModelStore((s) => s.ensureWcChildrenFromBS);
   const reorderCashFlowTopLevel = useModelStore((s) => s.reorderCashFlowTopLevel);
+  const addWcChild = useModelStore((s) => s.addWcChild);
   const reorderWcChildren = useModelStore((s) => s.reorderWcChildren);
   const moveCashFlowRowIntoWc = useModelStore((s) => s.moveCashFlowRowIntoWc);
   const moveCashFlowRowOutOfWc = useModelStore((s) => s.moveCashFlowRowOutOfWc);
   const confirmedRowIds = useModelStore((s) => s.confirmedRowIds);
   const toggleConfirmedRow = useModelStore((s) => s.toggleConfirmedRow);
+  const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
   // Always use currentCashFlow from store as the source of truth
   const currentRows = currentCashFlow;
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -194,6 +216,7 @@ function CFSSectionComponent({
   const [suggestedCFIExpanded, setSuggestedCFIExpanded] = useState(false);
   const [suggestedCFFExpanded, setSuggestedCFFExpanded] = useState(false);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [addingWithAI, setAddingWithAI] = useState(false);
 
   const toggleConfirmed = (rowId: string) => {
     toggleConfirmedRow(rowId);
@@ -202,7 +225,7 @@ function CFSSectionComponent({
   const sectionStartIndex = currentRows.findIndex((r) => {
     if (section.id === "operating") return r.id === "net_income";
     if (section.id === "investing") return r.id === "capex";
-    if (section.id === "financing") return r.id === "debt_issuance";
+    if (section.id === "financing") return ["debt_issued", "debt_issuance", "debt_repaid", "equity_issued", "equity_issuance", "share_repurchases", "dividends", "other_financing"].includes(r.id);
     return false;
   });
   const sectionEndIndex = currentRows.findIndex((r, idx) => {
@@ -335,7 +358,8 @@ function CFSSectionComponent({
     const sectionStartIndex = currentRows.findIndex(r => {
       if (section.id === "operating") return r.id === "net_income";
       if (section.id === "investing") return r.id === "capex";
-      if (section.id === "financing") return r.id === "debt_issuance";
+      if (section.id === "financing") return ["debt_issued", "debt_issuance", "debt_repaid", "equity_issued", "equity_issuance", "share_repurchases", "dividends", "other_financing"].includes(r.id);
+      if (section.id === "cash_bridge") return r.id === "fx_effect_on_cash";
       return false;
     });
 
@@ -344,6 +368,7 @@ function CFSSectionComponent({
       if (section.id === "operating") return r.id === "operating_cf";
       if (section.id === "investing") return r.id === "investing_cf";
       if (section.id === "financing") return r.id === "financing_cf";
+      if (section.id === "cash_bridge") return r.id === "net_change_cash"; // Section ends before net_change_cash (we exclude it)
       return false;
     });
 
@@ -353,15 +378,15 @@ function CFSSectionComponent({
     
     if (sectionStartIndex !== -1) {
       // Standard case: start marker exists, get items from start to end
-      result = sectionEndIndex === -1 
-        ? currentRows.slice(sectionStartIndex) 
-        : currentRows.slice(sectionStartIndex, sectionEndIndex + 1);
+      // cash_bridge: end before net_change_cash (exclude it); other sections include total row
+      const endExclusive = section.id === "cash_bridge" && sectionEndIndex >= 0 ? sectionEndIndex : sectionEndIndex + 1;
+      result = sectionEndIndex === -1
+        ? currentRows.slice(sectionStartIndex)
+        : currentRows.slice(sectionStartIndex, endExclusive);
     }
-    
+
     // For all sections, also include any items with matching cfsLink.section
-    // This handles cases where start marker doesn't exist or items are inserted outside normal range
-    // Keep items in store order (don't reorder) so preview matches builder
-    if (section.id === "operating" || section.id === "investing" || section.id === "financing") {
+    if (section.id === "operating" || section.id === "investing" || section.id === "financing" || section.id === "cash_bridge") {
       const itemsWithCfsLink = currentRows.filter(r => r.cfsLink?.section === section.id);
       
       const additionalItems = itemsWithCfsLink.filter(r => 
@@ -395,16 +420,16 @@ function CFSSectionComponent({
         const itemsByLink = currentRows.filter(r => r.cfsLink?.section === section.id);
         if (itemsByLink.length > 0) {
           result = itemsByLink;
-          // Also include the total row if it exists
-          const totalRow = currentRows.find(r => r.id === section.totalRowId);
-          if (totalRow) {
-            result.push(totalRow);
+          // Include total row only for operating/investing/financing (not for cash_bridge)
+          if (section.id !== "cash_bridge") {
+            const totalRow = currentRows.find(r => r.id === section.totalRowId);
+            if (totalRow) result.push(totalRow);
           }
         }
       }
       
-      // CRITICAL: For operating section, also include any custom items that might be positioned
-      // between operating_cf and capex (they should have cfsLink.section === "operating" but double-check)
+      // CRITICAL: For operating section, include custom items that might be between operating_cf and capex,
+      // or anywhere in currentRows with cfsLink.section === "operating", so they always render in the builder.
       if (section.id === "operating") {
         const operatingCfIndex = currentRows.findIndex(r => r.id === "operating_cf");
         const capexIndex = currentRows.findIndex(r => r.id === "capex");
@@ -413,7 +438,7 @@ function CFSSectionComponent({
           const missingCustomItems = itemsBetween.filter(r => 
             !result.some(existing => existing.id === r.id) &&
             r.id !== section.totalRowId &&
-            (r.cfsLink?.section === "operating" || !r.cfsLink) // Include items with operating cfsLink or no cfsLink (custom items)
+            (r.cfsLink?.section === "operating" || !r.cfsLink)
           );
           if (missingCustomItems.length > 0) {
             const totalIndexInResult = result.findIndex(r => r.id === section.totalRowId);
@@ -426,6 +451,51 @@ function CFSSectionComponent({
             } else {
               result = [...result, ...missingCustomItems];
             }
+          }
+        }
+        // Fallback: ensure any row with cfsLink.section === "operating" not yet in result is included (e.g. custom rows)
+        const operatingByLink = currentRows.filter(r => r.cfsLink?.section === "operating" && !result.some(existing => existing.id === r.id) && r.id !== section.totalRowId);
+        if (operatingByLink.length > 0) {
+          const totalIndexInResult = result.findIndex(r => r.id === section.totalRowId);
+          const sorted = [...operatingByLink].sort((a, b) => currentRows.findIndex(r => r.id === a.id) - currentRows.findIndex(r => r.id === b.id));
+          if (totalIndexInResult >= 0) {
+            result = [...result.slice(0, totalIndexInResult), ...sorted, ...result.slice(totalIndexInResult)];
+          } else {
+            result = [...result, ...sorted];
+          }
+        }
+      }
+      
+      // Investing: include any row between capex and investing_cf not yet in result (e.g. custom rows)
+      if (section.id === "investing") {
+        const capexIndex = currentRows.findIndex(r => r.id === "capex");
+        const investingCfIndex = currentRows.findIndex(r => r.id === "investing_cf");
+        if (capexIndex >= 0 && investingCfIndex > capexIndex) {
+          const between = currentRows.slice(capexIndex, investingCfIndex + 1).filter(r =>
+            !result.some(existing => existing.id === r.id) && r.id !== section.totalRowId
+          );
+          if (between.length > 0) {
+            const totalIndexInResult = result.findIndex(r => r.id === section.totalRowId);
+            const sorted = [...between].sort((a, b) => currentRows.findIndex(r => r.id === a.id) - currentRows.findIndex(r => r.id === b.id));
+            if (totalIndexInResult >= 0) {
+              result = [...result.slice(0, totalIndexInResult), ...sorted, ...result.slice(totalIndexInResult)];
+            } else {
+              result = [...result, ...sorted];
+            }
+          }
+        }
+      }
+      
+      // Cash bridge: include any row between fx_effect_on_cash and net_change_cash not yet in result
+      if (section.id === "cash_bridge") {
+        const fxIndex = currentRows.findIndex(r => r.id === "fx_effect_on_cash");
+        const netChangeIndex = currentRows.findIndex(r => r.id === "net_change_cash");
+        if (fxIndex >= 0 && netChangeIndex > fxIndex) {
+          const between = currentRows.slice(fxIndex, netChangeIndex).filter(r =>
+            !result.some(existing => existing.id === r.id) && r.id !== section.totalRowId
+          );
+          if (between.length > 0) {
+            result = [...result, ...between].sort((a, b) => currentRows.findIndex(r => r.id === a.id) - currentRows.findIndex(r => r.id === b.id));
           }
         }
       }
@@ -444,7 +514,6 @@ function CFSSectionComponent({
           );
           
           if (missingItems.length > 0) {
-            // Add missing items that are positioned in financing section
             const totalIndexInResult = result.findIndex(r => r.id === section.totalRowId);
             if (totalIndexInResult >= 0) {
               result = [
@@ -457,7 +526,6 @@ function CFSSectionComponent({
             }
           }
           
-          // Ensure the total row (financing_cf) is always included
           const totalRow = currentRows.find(r => r.id === section.totalRowId);
           if (totalRow && !result.some(r => r.id === section.totalRowId)) {
             result.push(totalRow);
@@ -465,7 +533,12 @@ function CFSSectionComponent({
         }
       }
     }
-    
+
+    // Operating: WC-classified rows are structural children of wc_change; do not show as top-level
+    if (section.id === "operating") {
+      result = result.filter((r) => r.historicalCfsNature !== "reported_working_capital_movement");
+    }
+
     return result;
   }, [currentRows, section.id]);
 
@@ -473,21 +546,36 @@ function CFSSectionComponent({
   const totalRow = sectionItems.find(r => r.id === section.totalRowId);
   const isLocked = useModelStore((s) => s.sectionLocks[section.sectionId] ?? false);
 
-  /** For Operating only: display blocks (subgroup headers + rows) in IB-grade order. */
+  /** For Operating only: display blocks. WC subgroup uses canonical structure (wc_change + wc_change.children only). */
   const operatingDisplayBlocks = useMemo(() => {
     if (section.id !== "operating") return [];
     const nonTotal = sectionItems.filter((r) => r.id !== section.totalRowId);
-    const blocks: ({ type: "header"; label: string } | { type: "row"; row: Row })[] = [];
+    const wcChangeRow = currentRows.find((r) => r.id === "wc_change");
+    const blocks: ({ type: "header"; label: string; subgroupId?: OperatingSubgroupId } | { type: "row"; row: Row })[] = [];
     for (const sg of CFO_OPERATING_SUBGROUPS) {
       if (sg.id === "total") continue;
-      const rowsInGroup = nonTotal.filter((r) => getOperatingSubgroup(r.id) === sg.id);
-      if (rowsInGroup.length > 0) {
-        blocks.push({ type: "header", label: sg.label });
+      // Working Capital: only wc_change row (components come from wc_change.children in render)
+      const rowsInGroup =
+        sg.id === "working_capital"
+          ? wcChangeRow
+            ? [wcChangeRow]
+            : []
+          : sg.id === "other_operating"
+            ? nonTotal.filter((r) => getFinalOperatingSubgroup(r) === sg.id && r.id !== "other_operating")
+            : nonTotal.filter((r) => getFinalOperatingSubgroup(r) === sg.id);
+      const showBlock = rowsInGroup.length > 0 || sg.id === "other_operating";
+      if (showBlock) {
+        blocks.push({ type: "header", label: sg.label, subgroupId: sg.id });
         rowsInGroup.forEach((row) => blocks.push({ type: "row", row }));
       }
     }
     return blocks;
-  }, [section.id, section.totalRowId, sectionItems]);
+  }, [section.id, section.totalRowId, sectionItems, currentRows]);
+
+  /** When adding a custom operating row from a subgroup, this is set so we default historicalCfsNature and apply conservative AI override. */
+  const [addingFromOperatingSubgroup, setAddingFromOperatingSubgroup] = useState<OperatingSubgroupId | null>(null);
+  /** Ref captures add-intent when opening from subgroup "+ Add item" so we always insert into correct target (e.g. wc_change.children) even if state updates async. */
+  const addIntentSubgroupRef = useRef<OperatingSubgroupId | null>(null);
 
   /** Resolve source badge label for key CFO rows (display only). Uses first year if available. */
   const getSourceBadgeLabel = (rowId: string): string | null => {
@@ -501,6 +589,7 @@ function CFSSectionComponent({
         incomeStatement: allStatements.incomeStatement,
         balanceSheet: allStatements.balanceSheet,
         embeddedDisclosures: embeddedDisclosures ?? [],
+        sbcDisclosureEnabled,
         danaBreakdowns: danaBreakdowns ?? {},
       });
       if (result.sourceType === "income_statement") return "Source: Income Statement";
@@ -561,11 +650,11 @@ function CFSSectionComponent({
         }
       }
     } else if (section.id === "financing") {
-      // Standard CFF items
-      if (row.id === "debt_issuance" || row.id === "equity_issuance") {
+      // Standard CFF items (anchor rows)
+      if (row.id === "debt_issued" || row.id === "debt_issuance" || row.id === "equity_issued" || row.id === "equity_issuance") {
         return "+"; // Issuances are cash inflows
       }
-      if (row.id === "debt_repayment" || row.id === "dividends") {
+      if (row.id === "debt_repaid" || row.id === "debt_repayment" || row.id === "share_repurchases" || row.id === "dividends") {
         return "-"; // Repayments and dividends are cash outflows
       }
       
@@ -622,7 +711,7 @@ function CFSSectionComponent({
       }
       // Try computing it if not stored
       try {
-        const computed = computeRowValue(isRow || row, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
+        const computed = computeRowValue(isRow || row, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
         return computed !== 0 ? computed : null;
       } catch {
         return null;
@@ -635,6 +724,7 @@ function CFSSectionComponent({
         incomeStatement: allStatements.incomeStatement,
         balanceSheet: allStatements.balanceSheet,
         embeddedDisclosures: embeddedDisclosures ?? [],
+        sbcDisclosureEnabled,
       });
       return value !== 0 ? value : null;
     }
@@ -651,7 +741,7 @@ function CFSSectionComponent({
       } else if (isProjection) {
         // Projection year - calculate from BS changes
         try {
-          const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
+          const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
           return computed;
         } catch {
           return null;
@@ -664,16 +754,13 @@ function CFSSectionComponent({
     return null;
   };
 
-  const handleAddCustomItem = () => {
+  const handleAddCustomItem = async () => {
     if (!newItemLabel.trim()) return;
-    
-    // For investing/financing, allow add even when unrecognized (we'll infer sign from label)
-    // Only block if there's a validation error that explicitly says not to add
-    if (section.id !== "operating" && validationError && validationError.includes("may not be appropriate") && !termKnowledge) {
+
+    if (section.id !== "operating" && section.id !== "cash_bridge" && validationError && validationError.includes("may not be appropriate") && !termKnowledge) {
       return;
     }
 
-    // Find insertion point (before the total row)
     const totalIndex = currentRows.findIndex(r => r.id === section.totalRowId);
     const insertIndex = totalIndex >= 0 ? totalIndex : currentRows.length;
 
@@ -685,8 +772,8 @@ function CFSSectionComponent({
       values: {},
       children: [],
     };
-    
-    // Operating: set cfsLink from term knowledge or infer sign from label when unrecognized
+
+    // Base cfsLink from term knowledge or inferred sign
     if (section.id === "operating") {
       if (termKnowledge?.cfsTreatment) {
         newRow.cfsLink = {
@@ -705,10 +792,7 @@ function CFSSectionComponent({
         };
       }
     }
-    
-    // If term is recognized (investing/financing or other), store its knowledge
     if (termKnowledge) {
-      // CFI item (for investing section)
       if (termKnowledge.cfiItem) {
         const cfiItem = termKnowledge.cfiItem as CFIItem;
         newRow.cfsLink = {
@@ -717,9 +801,7 @@ function CFSSectionComponent({
           impact: cfiItem.impact,
           description: cfiItem.description,
         };
-      }
-      // CFF item (for financing section)
-      else if ((termKnowledge as any).cffItem) {
+      } else if ((termKnowledge as any).cffItem) {
         const cffItem = (termKnowledge as any).cffItem as CFFItem;
         newRow.cfsLink = {
           section: "financing",
@@ -727,9 +809,7 @@ function CFSSectionComponent({
           impact: cffItem.impact,
           description: cffItem.description,
         };
-      }
-      // Financial terms knowledge (for other sections)
-      else if (termKnowledge.cfsTreatment) {
+      } else if (termKnowledge.cfsTreatment) {
         newRow.cfsLink = {
           section: termKnowledge.cfsTreatment.section,
           cfsItemId: termKnowledge.cfsTreatment.cfsItemId,
@@ -738,8 +818,14 @@ function CFSSectionComponent({
         };
       }
     }
-    
-    // Financing: if no cfsLink set yet, infer sign from label (like operating)
+    if (section.id === "investing" && !newRow.cfsLink) {
+      newRow.cfsLink = {
+        section: "investing",
+        cfsItemId: newRow.id,
+        impact: "negative",
+        description: "Custom investing item",
+      };
+    }
     if (section.id === "financing" && !newRow.cfsLink) {
       const impact = inferFinancingSignFromLabel(newItemLabel.trim());
       newRow.cfsLink = {
@@ -748,19 +834,109 @@ function CFSSectionComponent({
         impact,
         description: "Custom financing item (sign inferred from label)",
       };
-      if (termKnowledge.isLink) {
+      if (termKnowledge?.isLink) {
         newRow.isLink = {
           isItemId: termKnowledge.isLink.isItemId,
           description: termKnowledge.isLink.description,
         };
       }
     }
+    if (section.id === "cash_bridge" && !newRow.cfsLink) {
+      newRow.cfsLink = {
+        section: "cash_bridge",
+        cfsItemId: newRow.id,
+        impact: "neutral",
+        description: "Cash bridge item (affects net change in cash, not CFO/CFI/CFF)",
+      };
+      newRow.historicalCfsNature = "reported_meta";
+      newRow.cfsForecastDriver = "manual_other";
+    }
 
-    insertRow("cashFlow", insertIndex, newRow);
+    // Operating: deterministic default from subgroup so rows land in the right place even before AI
+    if (section.id === "operating" && addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base") {
+      newRow.historicalCfsNature = getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup);
+    }
+
+    const OVERRIDE_SUBGROUP_THRESHOLD = 0.9; // Do not let AI move row out of subgroup unless confidence >= this
+
+    // AI classification for custom CFS row (forecast driver, section, sign, reason, confidence)
+    setAddingWithAI(true);
+    try {
+      const res = await fetch("/api/ai/cfs-classify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: newItemLabel.trim(),
+          sectionContext: section.id,
+          ...(section.id === "operating" && addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base"
+            ? { operatingSubgroup: addingFromOperatingSubgroup }
+            : {}),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const suggestion = data?.suggestion;
+      if (suggestion && typeof suggestion.section === "string" && typeof suggestion.forecastDriver === "string") {
+        const confidence = typeof suggestion.confidence === "number" ? Math.max(0, Math.min(1, suggestion.confidence)) : 0.5;
+        const sectionConflict = suggestion.section !== section.id;
+        const useAiSection = !sectionConflict || confidence >= 0.9;
+        const effectiveSection = useAiSection ? suggestion.section : section.id;
+
+        newRow.cfsForecastDriver = suggestion.forecastDriver;
+        let effectiveNature = suggestion.historicalCfsNature ?? (section.id === "cash_bridge" ? "reported_meta" : section.id === "operating" ? "reported_operating_other" : section.id === "investing" ? "reported_investing" : "reported_financing");
+        // Conservative override: do not let AI move operating row out of the subgroup it was added from unless confidence is very high
+        if (section.id === "operating" && addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base") {
+          const subgroupDefault = getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup);
+          if (wouldMoveOutOfOperatingSubgroup(addingFromOperatingSubgroup, effectiveNature) && confidence < OVERRIDE_SUBGROUP_THRESHOLD) {
+            effectiveNature = subgroupDefault;
+          }
+        }
+        newRow.historicalCfsNature = effectiveNature;
+        newRow.classificationSource = "ai";
+        newRow.classificationReason = suggestion.reason ?? "";
+        newRow.classificationConfidence = confidence;
+        newRow.cfsLink = {
+          section: effectiveSection,
+          cfsItemId: newRow.id,
+          impact: suggestion.sign === "positive" ? "positive" : "negative",
+          description: suggestion.reason || newRow.cfsLink?.description || "Custom CFS item",
+          forecastDriver: suggestion.forecastDriver,
+        };
+        if (confidence >= 0.75 && (useAiSection || !sectionConflict)) {
+          newRow.forecastMetadataStatus = "trusted";
+        } else {
+          newRow.forecastMetadataStatus = "needs_review";
+        }
+      } else {
+        newRow.classificationSource = "fallback";
+        newRow.forecastMetadataStatus = "needs_review";
+        newRow.historicalCfsNature = section.id === "cash_bridge" ? "reported_meta" : section.id === "operating"
+          ? (addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base" ? getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup) : "reported_operating_other")
+          : section.id === "investing" ? "reported_investing" : "reported_financing";
+      }
+    } catch {
+      newRow.classificationSource = "fallback";
+      newRow.forecastMetadataStatus = "needs_review";
+      newRow.historicalCfsNature = section.id === "cash_bridge" ? "reported_meta" : section.id === "operating"
+        ? (addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base" ? getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup) : "reported_operating_other")
+        : section.id === "investing" ? "reported_investing" : "reported_financing";
+    } finally {
+      setAddingWithAI(false);
+    }
+
+    // WC-classified rows must be structural children of wc_change; use ref so intent is reliable (e.g. opened from "+ Add item" next to Working Capital)
+    const wcIntent = addIntentSubgroupRef.current === "working_capital" || addingFromOperatingSubgroup === "working_capital";
+    if (section.id === "operating" && wcIntent) {
+      newRow.historicalCfsNature = "reported_working_capital_movement";
+      addWcChild(newRow);
+    } else {
+      insertRow("cashFlow", insertIndex, newRow);
+    }
+    addIntentSubgroupRef.current = null;
     setNewItemLabel("");
     setShowAddDialog(false);
     setValidationError(null);
     setTermKnowledge(null);
+    setAddingFromOperatingSubgroup(null);
   };
 
   const handleRemoveItem = (rowId: string) => {
@@ -801,6 +977,12 @@ function CFSSectionComponent({
       text: "text-orange-200",
       textLight: "text-orange-300/80",
     },
+    purple: {
+      border: "border-purple-800/40",
+      bg: "bg-purple-950/20",
+      text: "text-purple-200",
+      textLight: "text-purple-300/80",
+    },
   }[section.colorClass];
 
   return (
@@ -816,10 +998,25 @@ function CFSSectionComponent({
         {sectionItems.length > 0 ? (
           (section.id === "operating" ? operatingDisplayBlocks : sectionItems.filter((r) => r.id !== section.totalRowId).map((row) => ({ type: "row" as const, row }))).map((block) => {
             if (block.type === "header") {
+              const subgroupId = "subgroupId" in block ? block.subgroupId : undefined;
+              const showAddInSubgroup = section.id === "operating" && subgroupId && subgroupId !== "earnings_base" && !isLocked;
               return (
                 <div key={`cfo-h-${block.label}`} className="pt-2 first:pt-0">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-400 border-b border-slate-700/60 pb-1.5 mb-2">
-                    {block.label}
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-700/60 pb-1.5 mb-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{block.label}</span>
+                    {showAddInSubgroup && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          addIntentSubgroupRef.current = subgroupId;
+                          setAddingFromOperatingSubgroup(subgroupId);
+                          setShowAddDialog(true);
+                        }}
+                        className="text-[10px] font-medium text-blue-400 hover:text-blue-300 transition-colors"
+                      >
+                        + Add item
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -840,11 +1037,11 @@ function CFSSectionComponent({
               sectionStartIndex !== -1 ||
               ((section.id === "investing" || section.id === "financing") && displayableCount >= 2)
             );
-            const protectedRows = ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_income"];
+            const protectedRows = ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_income", "fx_effect_on_cash"];
             const isProtected = protectedRows.includes(row.id) || row.id === section.totalRowId;
             const isTopConfirmed = confirmedRowIds[row.id] === true;
 
-            return row.id === "wc_change" && row.children && row.children.length > 0 ? (
+            return row.id === "wc_change" ? (
               <div
                 key={row.id}
                 className={`rounded-lg border-2 ${colors.border} ${colors.bg} overflow-hidden ${dragOverId === "wc-container" ? "ring-2 ring-emerald-500" : ""}`}
@@ -895,9 +1092,32 @@ function CFSSectionComponent({
                     </div>
                   </div>
                   {years.length > 0 && (
-                    <div className="mt-2 rounded-md border border-blue-700/40 bg-blue-950/20 p-2">
+                    <div className="mt-2 rounded-md border border-blue-700/40 bg-blue-950/20 p-2 space-y-2">
                       <div className="text-[10px] text-blue-400/80">
-                        Enter historical changes by component. Projection years are calculated automatically from Balance Sheet movements.
+                        Historical years are entered by component below; the total Change in Working Capital is calculated from those components. Projection years are calculated automatically from Balance Sheet movements.
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        {years.map((year) => {
+                          let subtotal = 0;
+                          if (allStatements) {
+                            try {
+                              subtotal = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
+                            } catch {
+                              subtotal = 0;
+                            }
+                          }
+                          const displayVal = storedToDisplay(subtotal, meta?.currencyUnit);
+                          const unitLabel = getUnitLabel(meta?.currencyUnit);
+                          return (
+                            <div key={year} className="flex flex-col">
+                              <span className="text-[10px] text-slate-500">{year}</span>
+                              <div className="rounded border border-slate-700/50 bg-slate-800/40 px-2 py-1 text-sm text-slate-300">
+                                {displayVal === 0 ? "—" : displayVal}
+                                {unitLabel && <span className="text-slate-500 ml-1">{unitLabel}</span>}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -906,6 +1126,9 @@ function CFSSectionComponent({
                 {wcSectionExpanded && (
                   <div className="border-t border-slate-700/60 bg-slate-900/30 pl-4 pr-3 py-3 border-l-4 border-blue-600/60 rounded-br-lg">
                     <div className="text-[10px] font-medium text-slate-400 uppercase tracking-wide mb-2">Components</div>
+                    {(!row.children || row.children.length === 0) ? (
+                      <p className="text-xs text-slate-500 italic">No components yet. Use &quot;+ Add item&quot; above under Working Capital Adjustments to add e.g. Accounts receivable, Accounts payable.</p>
+                    ) : (
                     <div className="space-y-2">
                       {row.children.map((child, wcChildIndex) => {
                         const isConfirmed = confirmedRowIds[child.id] === true;
@@ -930,7 +1153,12 @@ function CFSSectionComponent({
                                     <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16"><path d="M3 4h2v2H3V4zm4 0h2v2H7V4zm4 0h2v2h-2V4zM3 8h2v2H3V8zm4 0h2v2H7V8zm4 0h2v2h-2V8zM3 12h2v2H3v-2zm4 0h2v2H7v-2zm4 0h2v2h-2v-2z"/></svg>
                                   </span>
                                 )}
-                                <span className={`text-sm font-medium ${colors.text} truncate`}>{child.label}</span>
+                                <div className="min-w-0">
+                                  <span className={`text-sm font-medium ${colors.text} truncate`}>{child.label}</span>
+                                  {child.id === "other_wc_reclass" && (
+                                    <div className="text-[10px] text-slate-500 italic mt-0.5">Optional manual reclass. Leave blank unless the company reports a specific working-capital reclassification item.</div>
+                                  )}
+                                </div>
                               </div>
                               <div className="flex items-center gap-2 shrink-0">
                                 <button
@@ -983,6 +1211,7 @@ function CFSSectionComponent({
                         );
                       })}
                     </div>
+                  )}
                   </div>
                 )}
               </div>
@@ -1029,6 +1258,12 @@ function CFSSectionComponent({
                           — {sourceBadge}
                         </span>
                       )}
+                      {/* Lightweight review cue: driven by trust state so projection logic can consistently ignore/warn on needs_review */}
+                      {!isStandard && !isTotalRow && row.forecastMetadataStatus === "needs_review" && (
+                        <span className="text-[10px] text-amber-400/90 ml-1" title={row.classificationReason || "Forecast metadata may need review"}>
+                          — Review
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -1060,11 +1295,11 @@ function CFSSectionComponent({
                 {!isCalculated || row.id === "danda" || row.id === "wc_change" || row.kind === "input" || row.id === "net_income" || row.id === "sbc" ? (
                   <div>
                     
-                    {/* Guidance for WC Change — short version */}
+                    {/* Guidance for WC Change when no components (single-line mode) */}
                     {row.id === "wc_change" && years.length > 0 && (
                       <div className="mb-2 rounded-md border border-blue-700/40 bg-blue-950/20 p-2">
                         <div className="text-[10px] text-blue-400/80">
-                          Enter historical changes by component. Projection years are calculated automatically from Balance Sheet movements.
+                          Enter historical total here, or add Working Capital components above so the total is calculated from them. Projection years are calculated from Balance Sheet movements.
                         </div>
                       </div>
                     )}
@@ -1075,12 +1310,15 @@ function CFSSectionComponent({
                       // Get stored value - simple for all fields
                       let storedValue = row.values?.[year] ?? 0;
                       
-                      // For Net Income and SBC: use auto-populated value (read-only)
-                      if (row.id === "net_income" || row.id === "sbc") {
+                      // For Net Income: use auto-populated value (read-only)
+                      if (row.id === "net_income") {
                         const autoValue = getAutoPopulatedValue(row, year);
-                        if (autoValue !== null) {
-                          storedValue = autoValue;
-                        }
+                        if (autoValue !== null) storedValue = autoValue;
+                      }
+                      // For SBC: always use resolved value so that when sbcDisclosureEnabled is false we never show stale disclosure-driven values from row.values
+                      if (row.id === "sbc") {
+                        const resolved = getAutoPopulatedValue(row, year);
+                        storedValue = resolved !== null ? resolved : 0;
                       }
                       
                       // D&A is now a simple manual input - no auto-population
@@ -1096,7 +1334,7 @@ function CFSSectionComponent({
                         } else if (isProjection) {
                           // Projection year - calculate from BS changes
                           try {
-                            const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
+                            const computed = computeRowValue(row, year, allStatements.cashFlow, allStatements.cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
                             storedValue = computed;
                           } catch {
                             // Fallback to stored value if computation fails
@@ -1365,10 +1603,14 @@ function CFSSectionComponent({
             {!showAddDialog ? (
               <button
                 type="button"
-                onClick={() => setShowAddDialog(true)}
+                onClick={() => {
+                  addIntentSubgroupRef.current = null;
+                  setAddingFromOperatingSubgroup(null);
+                  setShowAddDialog(true);
+                }}
                 className={`rounded-md border ${colors.border} ${colors.bg} px-4 py-2 text-xs font-semibold ${colors.text} hover:opacity-80 transition`}
               >
-                + Add Custom {section.label} Item
+                + Add Custom {section.id === "cash_bridge" ? "Cash Bridge" : section.label} Item
               </button>
             ) : (
               <div className={`rounded-lg border ${colors.border} ${colors.bg} p-3`}>
@@ -1379,11 +1621,13 @@ function CFSSectionComponent({
                   placeholder="Enter item label..."
                   className="w-full rounded border border-slate-700 bg-slate-900/50 px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:border-blue-500 focus:outline-none mb-2"
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      handleAddCustomItem();
+                    if (e.key === "Enter" && !addingWithAI) {
+                      void handleAddCustomItem();
                     } else if (e.key === "Escape") {
+                      addIntentSubgroupRef.current = null;
                       setShowAddDialog(false);
                       setNewItemLabel("");
+                      setAddingFromOperatingSubgroup(null);
                     }
                   }}
                   autoFocus
@@ -1423,17 +1667,19 @@ function CFSSectionComponent({
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    onClick={handleAddCustomItem}
-                    disabled={!newItemLabel.trim() || (section.id !== "operating" && !!validationError && !termKnowledge)}
+                    onClick={() => void handleAddCustomItem()}
+                    disabled={!newItemLabel.trim() || addingWithAI || (section.id !== "operating" && !!validationError && !termKnowledge)}
                     className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Add
+                    {addingWithAI ? "Adding…" : "Add"}
                   </button>
                   <button
                     type="button"
                     onClick={() => {
+                      addIntentSubgroupRef.current = null;
                       setShowAddDialog(false);
                       setNewItemLabel("");
+                      setAddingFromOperatingSubgroup(null);
                     }}
                     className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-700"
                   >
@@ -1461,10 +1707,17 @@ export default function CashFlowBuilder() {
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const danaLocation = useModelStore((s) => s.danaLocation);
   const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
+  const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
   const updateRowValue = useModelStore((s) => s.updateRowValue);
   const insertRow = useModelStore((s) => s.insertRow);
   const removeRow = useModelStore((s) => s.removeRow);
-  
+  const ensureCFSAnchorRows = useModelStore((s) => s.ensureCFSAnchorRows);
+
+  // Ensure CFI/CFF fixed anchor rows exist when builder is shown (e.g. after rehydration)
+  useEffect(() => {
+    ensureCFSAnchorRows();
+  }, [ensureCFSAnchorRows]);
+
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
     return hist;
@@ -1590,53 +1843,175 @@ export default function CashFlowBuilder() {
           embeddedDisclosures={embeddedDisclosures}
         />
 
-        {/* Net Change in Cash */}
+        {/* Cash Bridge Items (FX effect, etc.) */}
+        <CFSSectionComponent
+          section={CFS_SECTIONS[3]}
+          rows={cashFlow}
+          years={years}
+          meta={meta}
+          updateRowValue={updateRowValue}
+          insertRow={insertRow}
+          removeRow={removeRow}
+          incomeStatement={incomeStatement}
+          sbcBreakdowns={sbcBreakdowns}
+          allStatements={allStatements}
+          cfoIntelligence={[]}
+          balanceSheet={balanceSheet}
+          danaBreakdowns={danaBreakdowns}
+          danaLocation={danaLocation}
+          embeddedDisclosures={embeddedDisclosures}
+        />
+
+        {/* Net Change in Cash — same computed value as preview (operating + investing + financing + bridge) */}
         {(() => {
           const netChangeCashRow = cashFlow.find(r => r.id === "net_change_cash");
+          const operatingCfRow = cashFlow.find(r => r.id === "operating_cf");
+          const investingCfRow = cashFlow.find(r => r.id === "investing_cf");
+          const financingCfRow = cashFlow.find(r => r.id === "financing_cf");
           if (!netChangeCashRow) return null;
-          
+
+          const getNetChangeForYear = (year: string): number | null => {
+            if (!allStatements) return null;
+            try {
+              const operatingCf = operatingCfRow
+                ? computeRowValue(operatingCfRow, year, cashFlow, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled)
+                : 0;
+              const investingCf = investingCfRow
+                ? computeRowValue(investingCfRow, year, cashFlow, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled)
+                : 0;
+              const financingCf = financingCfRow
+                ? computeRowValue(financingCfRow, year, cashFlow, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled)
+                : 0;
+              let bridge = 0;
+              for (const r of cashFlow) {
+                if (r.id === "net_change_cash") continue;
+                if (r.id === "fx_effect_on_cash" || r.cfsLink?.section === "cash_bridge") {
+                  bridge += computeRowValue(r, year, cashFlow, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
+                }
+              }
+              return operatingCf + investingCf + financingCf + bridge;
+            } catch {
+              return null;
+            }
+          };
+
           return (
             <div className="rounded-lg border-2 border-purple-800/40 bg-purple-950/20 p-4 mt-6">
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-sm font-bold text-purple-200">
                   Net Change in Cash
                 </span>
-                <span className="text-xs text-slate-400 italic">(Calculated: Operating + Investing + Financing)</span>
+                <span className="text-xs text-slate-400 italic">(Calculated: Operating + Investing + Financing + Cash Bridge)</span>
               </div>
               
-              {/* Display calculated values for each year */}
               <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                 {years.map((year) => {
-                  let computedValue: number;
-                  try {
-                    computedValue = computeRowValue(
-                      netChangeCashRow,
-                      year,
-                      cashFlow,
-                      cashFlow,
-                      allStatements,
-                      sbcBreakdowns,
-                      danaBreakdowns,
-                      embeddedDisclosures
-                    );
-                  } catch {
-                    computedValue = 0;
-                  }
-                  
-                  const displayValue = storedToDisplay(computedValue, meta?.currencyUnit);
+                  const computedValue = getNetChangeForYear(year);
                   const unitLabel = getUnitLabel(meta?.currencyUnit);
-                  
+                  const isUnavailable = computedValue === null || Number.isNaN(computedValue);
+                  const displayValue = !isUnavailable ? storedToDisplay(computedValue as number, meta?.currencyUnit) : "";
+                  const cellText = isUnavailable ? "—" : `${displayValue}${unitLabel ? ` ${unitLabel}` : ""}`;
+
                   return (
                     <div key={year} className="flex flex-col">
                       <label className="text-xs text-purple-300/80 mb-1">
                         {year}
                       </label>
                       <div className="rounded-md border border-purple-700/40 bg-purple-950/40 px-2 py-1.5 text-sm font-semibold text-purple-200">
-                        {computedValue !== 0 ? `${displayValue}${unitLabel ? ` ${unitLabel}` : ""}` : "—"}
+                        {cellText}
                       </div>
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Cash Reconciliation (historical, display-only) */}
+        {(() => {
+          const cashRow = balanceSheet?.find((r) => r.id === "cash");
+          const netChangeCashRow = cashFlow.find((r) => r.id === "net_change_cash");
+          if (!cashRow && !netChangeCashRow) return null;
+
+          const unitLabel = getUnitLabel(meta?.currencyUnit);
+          const tolerance = 0.5; // stored-unit tolerance for small rounding differences
+
+          const formatValue = (v: number | undefined): string => {
+            if (v === undefined) return "—";
+            const display = storedToDisplay(v, meta?.currencyUnit ?? "units");
+            return unitLabel ? `${display} ${unitLabel}` : String(display);
+          };
+
+          return (
+            <div className="rounded-lg border-2 border-slate-700/60 bg-slate-950/40 p-4 mt-6">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-sm font-bold text-slate-100">
+                  Cash Reconciliation (historical)
+                </span>
+                <span className="text-[11px] text-slate-400 italic">
+                  Beginning Cash + Net Change in Cash vs. Balance Sheet Cash
+                </span>
+              </div>
+              <div className="overflow-x-auto mt-2">
+                <table className="min-w-full text-xs text-slate-200">
+                  <thead>
+                    <tr className="border-b border-slate-700/60">
+                      <th className="px-2 py-1 text-left text-slate-400">Year</th>
+                      <th className="px-2 py-1 text-right text-slate-400">Beginning Cash</th>
+                      <th className="px-2 py-1 text-right text-slate-400">Net Change in Cash</th>
+                      <th className="px-2 py-1 text-right text-slate-400">Implied Ending Cash</th>
+                      <th className="px-2 py-1 text-right text-slate-400">Balance Sheet Cash</th>
+                      <th className="px-2 py-1 text-left text-slate-400">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {years.map((year, index) => {
+                      const prevYear = index > 0 ? years[index - 1] : null;
+                      const beginning =
+                        prevYear && cashRow?.values ? cashRow.values[prevYear] : undefined;
+                      let netChange: number | undefined;
+                      if (netChangeCashRow && allStatements) {
+                        try {
+                          netChange = computeRowValue(netChangeCashRow, year, cashFlow, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
+                        } catch {
+                          netChange = undefined;
+                        }
+                      }
+                      const implied =
+                        beginning !== undefined && netChange !== undefined
+                          ? beginning + netChange
+                          : undefined;
+                      const bsEnding = cashRow?.values?.[year];
+
+                      let status = "Insufficient data";
+                      let statusClass = "text-slate-400";
+                      if (implied !== undefined && bsEnding !== undefined) {
+                        const diff = Math.abs(implied - bsEnding);
+                        if (diff <= tolerance) {
+                          status = "Pass";
+                          statusClass = "text-emerald-400";
+                        } else {
+                          status = "Mismatch";
+                          statusClass = "text-amber-400";
+                        }
+                      }
+
+                      return (
+                        <tr key={year} className="border-b border-slate-800/40">
+                          <td className="px-2 py-1 text-slate-300">{year}</td>
+                          <td className="px-2 py-1 text-right">{formatValue(beginning)}</td>
+                          <td className="px-2 py-1 text-right">{formatValue(netChange)}</td>
+                          <td className="px-2 py-1 text-right">{formatValue(implied)}</td>
+                          <td className="px-2 py-1 text-right">{formatValue(bsEnding)}</td>
+                          <td className="px-2 py-1">
+                            <span className={statusClass}>{status}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
           );

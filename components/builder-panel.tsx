@@ -21,7 +21,10 @@ export default function BuilderPanel() {
   const saveCurrentStep = useModelStore((s) => s.saveCurrentStep);
   const saveCurrentProject = useModelStore((s) => s.saveCurrentProject);
   const continueToNextStep = useModelStore((s) => s.continueToNextStep);
-  const resetFinancialInputs = useModelStore((s) => s.resetFinancialInputs);
+  const resetAllFinancialInputs = useModelStore((s) => s.resetAllFinancialInputs);
+  const resetIncomeStatementInputs = useModelStore((s) => s.resetIncomeStatementInputs);
+  const resetBalanceSheetInputs = useModelStore((s) => s.resetBalanceSheetInputs);
+  const resetCashFlowInputs = useModelStore((s) => s.resetCashFlowInputs);
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const currencyUnit = meta?.currencyUnit ?? "millions";
@@ -65,6 +68,9 @@ export default function BuilderPanel() {
   // Save button feedback state
   const [saveFeedback, setSaveFeedback] = useState<"idle" | "saving" | "saved">("idle");
   const [showResetModal, setShowResetModal] = useState(false);
+  type ResetScope = "all" | "income_statement" | "balance_sheet" | "cash_flow" | null;
+  const [resetScope, setResetScope] = useState<ResetScope>(null);
+  const [resetConfirmStep, setResetConfirmStep] = useState(false);
 
   // Handle save with feedback (step completion + project state so no progress is lost)
   const handleSave = () => {
@@ -182,35 +188,96 @@ export default function BuilderPanel() {
           </div>
         </div>
 
-        {/* Reset Inputs confirmation modal */}
+        {/* Reset Inputs: scope choice then confirmation */}
         {showResetModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" role="dialog" aria-modal="true" aria-labelledby="reset-modal-title">
             <div className="rounded-lg border border-slate-700 bg-slate-900 shadow-xl max-w-md w-full p-5">
               <h2 id="reset-modal-title" className="text-sm font-semibold text-slate-100 mb-3">
-                Reset all entered financial data?
+                {!resetConfirmStep ? "What do you want to reset?" : "Confirm reset"}
               </h2>
-              <p className="text-xs text-slate-300 mb-5">
-                This will remove historical financial values, disclosure inputs, custom rows, and schedule values. Your financial statement structure and configuration will remain unchanged.
-              </p>
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  className="rounded-md px-4 py-2 text-xs font-semibold border border-slate-600 text-slate-200 hover:bg-slate-700 transition-colors"
-                  onClick={() => setShowResetModal(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="rounded-md px-4 py-2 text-xs font-semibold bg-slate-100 text-slate-900 hover:bg-white transition-colors"
-                  onClick={() => {
-                    setShowResetModal(false);
-                    resetFinancialInputs();
-                  }}
-                >
-                  Confirm Reset
-                </button>
-              </div>
+              {!resetConfirmStep ? (
+                <>
+                  <p className="text-xs text-slate-300 mb-4">
+                    Choose which inputs to clear. Structure, years, and other statements will be preserved.
+                  </p>
+                  <div className="space-y-2 mb-5">
+                    <button
+                      type="button"
+                      className="w-full rounded-md px-4 py-2.5 text-left text-xs font-medium border border-slate-600 text-slate-200 hover:bg-slate-800 transition-colors"
+                      onClick={() => { setResetScope("all"); setResetConfirmStep(true); }}
+                    >
+                      Reset all inputs
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full rounded-md px-4 py-2.5 text-left text-xs font-medium border border-slate-600 text-slate-200 hover:bg-slate-800 transition-colors"
+                      onClick={() => { setResetScope("income_statement"); setResetConfirmStep(true); }}
+                    >
+                      Reset Income Statement only
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full rounded-md px-4 py-2.5 text-left text-xs font-medium border border-slate-600 text-slate-200 hover:bg-slate-800 transition-colors"
+                      onClick={() => { setResetScope("balance_sheet"); setResetConfirmStep(true); }}
+                    >
+                      Reset Balance Sheet only
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full rounded-md px-4 py-2.5 text-left text-xs font-medium border border-slate-600 text-slate-200 hover:bg-slate-800 transition-colors"
+                      onClick={() => { setResetScope("cash_flow"); setResetConfirmStep(true); }}
+                    >
+                      Reset Cash Flow Statement only
+                    </button>
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      className="rounded-md px-4 py-2 text-xs font-semibold border border-slate-600 text-slate-200 hover:bg-slate-700 transition-colors"
+                      onClick={() => { setShowResetModal(false); setResetScope(null); setResetConfirmStep(false); }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-300 mb-5">
+                    {resetScope === "all" &&
+                      "This will clear historical values, disclosure inputs, custom rows, and schedule values. Statement structure and years will remain unchanged."}
+                    {resetScope === "income_statement" &&
+                      "This will clear Income Statement historical values and custom rows. Balance Sheet and Cash Flow will not be changed."}
+                    {resetScope === "balance_sheet" &&
+                      "This will clear Balance Sheet historical values, custom rows, and related schedule inputs. Income Statement and Cash Flow will not be changed."}
+                    {resetScope === "cash_flow" &&
+                      "This will clear all Cash Flow inputs and custom CFS rows. Fixed CFS structure (anchors and sections) will remain. You can re-enter CFS data from a clean state."}
+                  </p>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md px-4 py-2 text-xs font-semibold border border-slate-600 text-slate-200 hover:bg-slate-700 transition-colors"
+                      onClick={() => { setResetScope(null); setResetConfirmStep(false); }}
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md px-4 py-2 text-xs font-semibold bg-slate-100 text-slate-900 hover:bg-white transition-colors"
+                      onClick={() => {
+                        if (resetScope === "all") resetAllFinancialInputs();
+                        else if (resetScope === "income_statement") resetIncomeStatementInputs();
+                        else if (resetScope === "balance_sheet") resetBalanceSheetInputs();
+                        else if (resetScope === "cash_flow") resetCashFlowInputs();
+                        setShowResetModal(false);
+                        setResetScope(null);
+                        setResetConfirmStep(false);
+                      }}
+                    >
+                      Confirm Reset
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

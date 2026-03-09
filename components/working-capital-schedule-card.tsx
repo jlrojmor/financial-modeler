@@ -570,7 +570,7 @@ export default function WorkingCapitalScheduleCard() {
                 </tbody>
               </table>
               <p className="text-[10px] text-slate-500 mt-2">
-                Historical CFO WC is used for reconciliation only. Forecast WC is driven by projected BS balances. Other WC / Reclass = ΔWC (CFO) − ΔWC (BS).
+                Historical CFO WC is used for reconciliation only. Forecast WC is driven by projected BS balances. Difference shown = ΔWC (CFO) − ΔWC (BS). Other WC / Reclass is not auto-plugged; enter a value in CFS only if you have a reported reclass.
               </p>
             </div>
           )}

@@ -26,25 +26,7 @@ import { getSbcDisclosures, getTotalSbcByYearFromEmbedded } from "@/lib/embedded
 import { getAmortizationDisclosures, getTotalAmortizationByYearFromEmbedded } from "@/lib/embedded-disclosure-amortization";
 import { getDepreciationDisclosures, getTotalDepreciationByYearFromEmbedded } from "@/lib/embedded-disclosure-depreciation";
 import { getRestructuringDisclosures, getTotalRestructuringByYearFromEmbedded } from "@/lib/embedded-disclosure-restructuring";
-
-/** CFO Operating subgroup (display-only). Used for light section labels in CFS preview. */
-function getCFOOperatingSubgroup(rowId: string, parentId?: string): string | null {
-  if (parentId === "wc_change") return "working_capital";
-  if (rowId === "net_income") return "earnings_base";
-  if (rowId === "danda" || rowId === "sbc") return "non_cash";
-  if (rowId === "wc_change") return "working_capital";
-  if (rowId === "operating_cf") return "total";
-  if (rowId === "other_operating") return "other_operating";
-  if (parentId) return null;
-  return "other_operating";
-}
-const CFO_OPERATING_SUBGROUP_LABELS: Record<string, string> = {
-  earnings_base: "Earnings Base",
-  non_cash: "Non-Cash Adjustments",
-  working_capital: "Working Capital Adjustments",
-  other_operating: "Other Operating Activities",
-  total: "Cash from Operating Activities",
-};
+import { getFinalOperatingSubgroup, OPERATING_SUBGROUP_ORDER, OPERATING_SUBGROUP_LABELS } from "@/lib/cfs-operating-subgroups";
 
 const CAPEX_DEFAULT_BUCKET_IDS_PREVIEW = ["cap_b1", "cap_b2", "cap_b3", "cap_b4", "cap_b5", "cap_b6", "cap_b7", "cap_b8", "cap_b9", "cap_b10"];
 const CAPEX_DEFAULT_BUCKET_LABELS_PREVIEW: Record<string, string> = {
@@ -94,7 +76,7 @@ function formatAccountingNumber(
 function getCFOSign(
   rowId: string,
   row?: Row,
-  section?: "operating" | "investing" | "financing",
+  section?: "operating" | "investing" | "financing" | "cash_bridge" | "meta",
   parentId?: string
 ): string | null {
   // Subtotals/totals: no sign (user request)
@@ -106,6 +88,14 @@ function getCFOSign(
   ) {
     return null;
   }
+
+  // Cash bridge items: use cfsLink.impact or neutral
+  if (section === "cash_bridge") {
+    if (row?.cfsLink?.impact === "positive") return "+";
+    if (row?.cfsLink?.impact === "negative") return "-";
+    return null; // neutral or unknown
+  }
+  if (section === "meta") return null;
 
   // CFO items (operating section)
   if (section === "operating") {
@@ -191,11 +181,11 @@ function getCFOSign(
   
   // CFF items (financing section)
   if (section === "financing") {
-    // Standard CFF items
-    if (rowId === "debt_issuance" || rowId === "equity_issuance") {
+    // Standard CFF items (anchor rows)
+    if (rowId === "debt_issued" || rowId === "debt_issuance" || rowId === "equity_issued" || rowId === "equity_issuance") {
       return "+"; // Issuances are cash inflows
     }
-    if (rowId === "debt_repayment" || rowId === "dividends") {
+    if (rowId === "debt_repaid" || rowId === "debt_repayment" || rowId === "share_repurchases" || rowId === "dividends") {
       return "-"; // Repayments and dividends are cash outflows
     }
     
@@ -375,6 +365,7 @@ function StatementTable({
   bsBuildPreviewOverrides,
   bsBuildTotalsByYear,
   embeddedDisclosures = [],
+  sbcDisclosureEnabled = true,
 }: { 
   rows: Row[]; 
   label: string; 
@@ -388,6 +379,8 @@ function StatementTable({
   danaBreakdowns?: Record<string, number>;
   /** CFS CFO source resolution: reported → embedded disclosure → 0 for SBC/D&A. */
   embeddedDisclosures?: EmbeddedDisclosureItem[];
+  /** When false, SBC disclosure is not used as fallback for CFS SBC and disclosure block is hidden. */
+  sbcDisclosureEnabled?: boolean;
   /** For Income Statement: rev and its direct children use this for projection years (sum of IS Build breakdowns). */
   projectedRevenue?: Record<string, Record<string, number>>;
   /** For Income Statement: total COGS per projection year from revenue × COGS % per line. */
@@ -429,37 +422,44 @@ function StatementTable({
     }));
   };
 
-  // For Cash Flow Statement, detect section (use parent's section for child rows to avoid duplicate headers)
-  // Section = by position only (and cfsLink), so preview exactly mirrors builder: CFI = capex..investing_cf only
+  // CFS section: metadata-first (cfsLink.section, then anchor map), then position. cash_bridge = below CFI/CFF, above net change; meta = net_change_cash only.
+  type CFSPreviewSection = "operating" | "investing" | "financing" | "cash_bridge" | "meta";
+  const CFS_SECTION_BY_ROW_ID: Record<string, CFSPreviewSection> = {
+    net_income: "operating", danda: "operating", sbc: "operating", wc_change: "operating", other_operating: "operating", operating_cf: "operating",
+    capex: "investing", acquisitions: "investing", asset_sales: "investing", investments: "investing", other_investing: "investing", investing_cf: "investing",
+    debt_issued: "financing", debt_issuance: "financing", debt_repaid: "financing", equity_issued: "financing", equity_issuance: "financing",
+    share_repurchases: "financing", dividends: "financing", other_financing: "financing", financing_cf: "financing",
+    fx_effect_on_cash: "cash_bridge",
+    net_change_cash: "meta",
+  };
   const getCFSSection = (
     rowId: string,
     rows: Row[],
     parentId?: string
-  ): "operating" | "investing" | "financing" | null => {
+  ): CFSPreviewSection | null => {
     if (parentId) return getCFSSection(parentId, rows);
     const row = rows.find((r) => r.id === rowId);
     if (row?.cfsLink?.section) {
-      return row.cfsLink.section as "operating" | "investing" | "financing";
+      const s = row.cfsLink.section;
+      return (s === "cash_bridge" ? "cash_bridge" : s) as CFSPreviewSection;
     }
-    // Only assign section by ID for the section total rows; everything else by position
-    if (rowId === "operating_cf") return "operating";
-    if (rowId === "investing_cf") return "investing";
-    if (rowId === "financing_cf" || rowId === "net_change_cash") return "financing";
+    if (CFS_SECTION_BY_ROW_ID[rowId]) return CFS_SECTION_BY_ROW_ID[rowId];
     const operatingEndIndex = rows.findIndex((r) => r.id === "operating_cf");
     const investingStartIndex = rows.findIndex((r) => r.id === "capex");
     const investingEndIndex = rows.findIndex((r) => r.id === "investing_cf");
-    const financingStartIndex = rows.findIndex((r) => r.id === "debt_issuance");
     const financingEndIndex = rows.findIndex((r) => r.id === "financing_cf");
+    const netChangeIndex = rows.findIndex((r) => r.id === "net_change_cash");
     const rowIndex = rows.findIndex((r) => r.id === rowId);
     if (rowIndex === -1) return null;
+    if (rowId === "net_change_cash") return "meta";
+    if (netChangeIndex >= 0 && financingEndIndex >= 0 && rowIndex > financingEndIndex && rowIndex < netChangeIndex) return "cash_bridge";
     if (operatingEndIndex >= 0 && rowIndex <= operatingEndIndex) return "operating";
-    // Rows between operating_cf and capex → operating
     if (operatingEndIndex >= 0 && investingStartIndex >= 0 && rowIndex > operatingEndIndex && rowIndex < investingStartIndex) return "operating";
     const investingStart = investingStartIndex >= 0 ? investingStartIndex : operatingEndIndex + 1;
     if (investingEndIndex >= 0 && rowIndex >= investingStart && rowIndex <= investingEndIndex) return "investing";
-    const financingStart = financingStartIndex >= 0 ? financingStartIndex : investingEndIndex + 1;
+    const financingStart = financingEndIndex >= 0 ? financingEndIndex : investingEndIndex + 1;
     if (financingEndIndex >= 0 && rowIndex >= financingStart && rowIndex <= financingEndIndex) return "financing";
-    return "financing";
+    return "meta";
   };
 
   // For Balance Sheet, detect section changes (Assets, Liabilities, Equity)
@@ -488,6 +488,53 @@ function StatementTable({
     equity: "Shareholders' equity",
   };
 
+  // CFS Operating: true subgroup buckets (single source of truth). Used to render operating as four fixed blocks.
+  type OperatingEntry = { row: Row; depth: number; parentId?: string };
+  const operatingBuckets = useMemo((): Record<string, OperatingEntry[]> => {
+    if (!isCashFlow || !rows?.length || !flat.length) {
+      return { earnings_base: [], non_cash: [], working_capital: [], other_operating: [] };
+    }
+    const buckets: Record<string, OperatingEntry[]> = {
+      earnings_base: [],
+      non_cash: [],
+      working_capital: [],
+      other_operating: [],
+    };
+    for (const entry of flat) {
+      const section = getCFSSection(entry.row.id, rows, entry.parentId);
+      if (section !== "operating") continue;
+      if (entry.row.id === "other_operating") continue; // placeholder row: do not add to any bucket so header is not shown when empty
+      const sg = getFinalOperatingSubgroup(entry.row, entry.parentId);
+      if (!sg || sg === "total" || !buckets[sg]) continue;
+      buckets[sg].push(entry);
+    }
+    return buckets;
+  }, [isCashFlow, flat, rows]);
+
+  // CFS only: replace operating segment with bucketed order so each subgroup header appears once.
+  const flatForRender = useMemo(() => {
+    if (!isCashFlow || !flat.length || !rows?.length) return flat;
+    let operatingStart = -1;
+    let operatingEnd = -1;
+    for (let i = 0; i < flat.length; i++) {
+      const section = getCFSSection(flat[i].row.id, rows, flat[i].parentId);
+      if (section === "operating") {
+        if (operatingStart === -1) operatingStart = i;
+        operatingEnd = i;
+      }
+    }
+    if (operatingStart === -1) return flat;
+    const operatingOrdered: OperatingEntry[] = [];
+    for (const sg of OPERATING_SUBGROUP_ORDER) {
+      operatingOrdered.push(...operatingBuckets[sg]);
+    }
+    return [
+      ...flat.slice(0, operatingStart),
+      ...operatingOrdered,
+      ...flat.slice(operatingEnd + 1),
+    ];
+  }, [isCashFlow, flat, rows, operatingBuckets]);
+
   return (
     <>
       {/* Statement Header */}
@@ -497,15 +544,16 @@ function StatementTable({
         </td>
       </tr>
       
-      {/* Statement Rows */}
-      {flat.map(({ row, depth, parentId }, flatIndex) => {
+      {/* Statement Rows — CFS uses flatForRender so Operating is true bucketed blocks (each subgroup header once) */}
+      {(isCashFlow ? flatForRender : flat).map(({ row, depth, parentId }, flatIndex) => {
         const currentSection = isBalanceSheet ? getBSSection(row.id, rows) : isCashFlow ? getCFSSection(row.id, rows, parentId) : isIncomeStatement ? getISDisplaySection(row, parentId, rows) : null;
         const currentCategory = isBalanceSheet ? getBSCategory(row.id, rows) : null;
         const isSectionCollapsed =
           isBalanceSheet && currentSection ? collapsedSections[currentSection] === true : false;
         const isCategoryCollapsed =
           isBalanceSheet && currentCategory ? collapsedCategories[currentCategory] === true : false;
-        const prevRow = flatIndex > 0 ? flat[flatIndex - 1] : null;
+        const renderList = isCashFlow ? flatForRender : flat;
+        const prevRow = flatIndex > 0 ? renderList[flatIndex - 1] : null;
         const prevSection =
           prevRow == null
             ? null
@@ -517,12 +565,13 @@ function StatementTable({
                   ? getISDisplaySection(prevRow.row, prevRow.parentId, rows)
                   : null;
         const prevCategory = isBalanceSheet && prevRow ? getBSCategory(prevRow.row.id, rows) : null;
-        const currentSubgroup = isCashFlow && currentSection === "operating" ? getCFOOperatingSubgroup(row.id, parentId) : null;
-        const prevSubgroup = isCashFlow && prevRow && currentSection === "operating" ? getCFOOperatingSubgroup(prevRow.row.id, prevRow.parentId) : null;
-        const isCFOSubgroupStart = isCashFlow && currentSection === "operating" && currentSubgroup != null && currentSubgroup !== "total" && currentSubgroup !== prevSubgroup;
-        // Show section header when section changes. For IS: only show "Operating Expenses" header when the block is not already the structural parent (row.id !== "operating_expenses").
+        let currentSubgroup = isCashFlow && currentSection === "operating" ? getFinalOperatingSubgroup(row, parentId) : null;
+        const prevSubgroup = isCashFlow && prevRow && currentSection === "operating" ? getFinalOperatingSubgroup(prevRow.row, prevRow.parentId) : null;
+        // Show subgroup header whenever subgroup changes from previous row so metadata-driven subgroup is respected (e.g. child of other_operating with non_cash nature appears under Non-Cash)
+        const isCFOSubgroupStart = isCashFlow && currentSection === "operating" && currentSubgroup != null && currentSubgroup !== "total" && (prevRow == null || prevSection !== "operating" || prevSubgroup !== currentSubgroup);
+        // Show section header when section changes. For CFS meta (net_change_cash) we do not show a section header.
         const isSectionStart =
-          (isBalanceSheet || isCashFlow) && currentSection != null && currentSection !== prevSection
+          (isBalanceSheet || isCashFlow) && currentSection != null && currentSection !== prevSection && (isCashFlow ? currentSection !== "meta" : true)
             ? true
             : isIncomeStatement && currentSection === "operating_expenses" && prevSection !== "operating_expenses" && row.id !== "operating_expenses";
         // Show category subtitle if: (1) category changed, or (2) it's the first category in a new section
@@ -557,7 +606,8 @@ function StatementTable({
         const shouldHideForSectionCollapse = isBalanceSheet && isSectionCollapsed && !keepWhenSectionCollapsed;
         const shouldHideForCategoryCollapse =
           isBalanceSheet && isCategoryCollapsed && !isBalanceSheetSubtotal;
-        const shouldHideRow = shouldHideForSectionCollapse || shouldHideForCategoryCollapse;
+        const shouldHideFixedOtherOperating = isCashFlow && row.id === "other_operating";
+        const shouldHideRow = shouldHideForSectionCollapse || shouldHideForCategoryCollapse || shouldHideFixedOtherOperating;
         
         // Section colors for Balance Sheet (Assets = green, Liabilities = orange, Equity = purple)
         // Section colors for Cash Flow (Operating = blue, Investing = green, Financing = orange)
@@ -568,6 +618,7 @@ function StatementTable({
           operating: { bg: "bg-blue-950/20", text: "text-blue-300", border: "border-blue-700/30" },
           investing: { bg: "bg-green-950/20", text: "text-green-300", border: "border-green-700/30" },
           financing: { bg: "bg-orange-950/20", text: "text-orange-300", border: "border-orange-700/30" },
+          cash_bridge: { bg: "bg-purple-950/20", text: "text-purple-300", border: "border-purple-700/30" },
           operating_expenses: { bg: "bg-purple-950/20", text: "text-purple-300", border: "border-purple-700/30" },
         };
         
@@ -617,6 +668,7 @@ function StatementTable({
                       {currentSection === "operating" && "Operating Activities"}
                       {currentSection === "investing" && "Investing Activities"}
                       {currentSection === "financing" && "Financing Activities"}
+                      {currentSection === "cash_bridge" && "Cash Bridge Items"}
                       {currentSection === "operating_expenses" && "Operating Expenses"}
                     </span>
                   </button>
@@ -625,11 +677,11 @@ function StatementTable({
             )}
             
             {/* CFO Operating subgroup label (light, display-only) */}
-            {isCFOSubgroupStart && currentSubgroup && CFO_OPERATING_SUBGROUP_LABELS[currentSubgroup] && (
+            {isCFOSubgroupStart && currentSubgroup && OPERATING_SUBGROUP_LABELS[currentSubgroup] && (
               <tr className="border-t border-slate-700/40">
                 <td colSpan={1 + years.length} className="px-3 py-1 bg-slate-900/30">
                   <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500">
-                    {CFO_OPERATING_SUBGROUP_LABELS[currentSubgroup]}
+                    {OPERATING_SUBGROUP_LABELS[currentSubgroup]}
                   </span>
                 </td>
               </tr>
@@ -685,7 +737,7 @@ function StatementTable({
                 {isCashFlow && (() => {
                   const cfsSection = getCFSSection(row.id, rows, parentId);
                   const sign = getCFOSign(row.id, row, cfsSection || undefined, parentId);
-                  if (sign && (cfsSection === "operating" || cfsSection === "investing" || cfsSection === "financing")) {
+                  if (sign && (cfsSection === "operating" || cfsSection === "investing" || cfsSection === "financing" || cfsSection === "cash_bridge")) {
                     return (
                       <span className={`text-sm font-semibold ${sign === "+" ? "text-green-400" : "text-red-400"}`}>
                         ({sign})
@@ -784,7 +836,7 @@ function StatementTable({
                   storedValue = totalVal !== undefined ? totalVal : undefined;
                 } else {
                   try {
-                    storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
+                    storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
                   } catch (e) {
                     storedValue = row.values?.[y] ?? 0;
                   }
@@ -798,14 +850,22 @@ function StatementTable({
                   row.id.startsWith("cfo_");
                 
                 if (isCalculatedCFSItem) {
-                  // For WC Change, historical years are input, projection years are calculated
+                  // For WC Change: when component rows exist, parent is calculated subtotal; otherwise use stored value
                   if (row.id === "wc_change") {
                     const isHistorical = y.endsWith("A");
                     const isProjection = y.endsWith("E");
                     
                     if (isHistorical) {
-                      // Historical year - use stored input value
-                      storedValue = row.values?.[y] ?? 0;
+                      // Historical: if component rows exist, show subtotal; else use stored input
+                      if (row.children && row.children.length > 0) {
+                        try {
+                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
+                        } catch {
+                          storedValue = 0;
+                        }
+                      } else {
+                        storedValue = row.values?.[y] ?? 0;
+                      }
                     } else if (isProjection) {
                       // Projection year - calculate from BS changes
                       // First try stored value (from recomputeCalculations), then compute if needed
@@ -813,7 +873,7 @@ function StatementTable({
                         storedValue = row.values[y];
                       } else {
                         try {
-                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
+                          storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
                         } catch (e) {
                           storedValue = 0;
                         }
@@ -823,48 +883,46 @@ function StatementTable({
                       storedValue = row.values?.[y] ?? 0;
                     }
                     } else {
-                      // Use stored value first (should be there after recomputeCalculations)
-                      // But also compute if value is 0 or undefined to ensure we show calculated values
-                      if (row.values?.[y] !== undefined && row.values[y] !== 0) {
-                        storedValue = row.values[y];
+                      // SBC: always resolve on-the-fly so that when sbcDisclosureEnabled is false we never show stale disclosure-driven values from row.values
+                      if (row.id === "sbc" && allStatements) {
+                        storedValue = resolveHistoricalCfoValueOnly("sbc", y, {
+                          cashFlowRows: rows,
+                          incomeStatement: allStatements.incomeStatement,
+                          balanceSheet: allStatements.balanceSheet,
+                          embeddedDisclosures: embeddedDisclosures ?? [],
+                          sbcDisclosureEnabled,
+                        });
                       } else {
-                        // Only compute if no stored value exists, but be very careful to avoid recursion
-                        // For net_income, danda, sbc - these pull from IS/SBC/D&A breakdowns
-                        if (row.id === "net_income") {
-                          // Get from IS directly
-                          const isRow = allStatements.incomeStatement.find(r => r.id === row.id);
-                          if (isRow && isRow.values?.[y] !== undefined) {
-                            storedValue = isRow.values[y];
-                          }
-                        } else if (row.id === "danda") {
-                          // D&A: use same CFO source hierarchy (reported → IS/danaBreakdowns → 0)
-                          if (allStatements && embeddedDisclosures !== undefined) {
-                            storedValue = resolveHistoricalCfoValueOnly("danda", y, {
-                              cashFlowRows: rows,
-                              incomeStatement: allStatements.incomeStatement,
-                              balanceSheet: allStatements.balanceSheet,
-                              embeddedDisclosures: embeddedDisclosures ?? [],
-                              danaBreakdowns: danaBreakdowns ?? {},
-                            });
-                          } else {
-                            storedValue = row.values?.[y] ?? 0;
-                          }
-                        } else if (row.id === "sbc" && allStatements) {
-                          // SBC: use CFO source hierarchy (reported CFS → embedded disclosure total → 0); no sbcBreakdowns in CFS path
-                          storedValue = resolveHistoricalCfoValueOnly("sbc", y, {
-                            cashFlowRows: rows,
-                            incomeStatement: allStatements.incomeStatement,
-                            balanceSheet: allStatements.balanceSheet,
-                            embeddedDisclosures: embeddedDisclosures ?? [],
-                          });
+                        // Use stored value first (should be there after recomputeCalculations)
+                        // But also compute if value is 0 or undefined to ensure we show calculated values
+                        if (row.values?.[y] !== undefined && row.values[y] !== 0) {
+                          storedValue = row.values[y];
                         } else {
-                          // For other calculated items, try to compute (but this might cause recursion)
-                          // Only do this as last resort
-                          try {
-                            storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures);
-                          } catch (e) {
-                            // If recursion error, just use 0
-                            storedValue = 0;
+                          // Only compute if no stored value exists, but be very careful to avoid recursion
+                          // For net_income, danda - these pull from IS/D&A breakdowns
+                          if (row.id === "net_income") {
+                            const isRow = allStatements.incomeStatement.find(r => r.id === row.id);
+                            if (isRow && isRow.values?.[y] !== undefined) {
+                              storedValue = isRow.values[y];
+                            }
+                          } else if (row.id === "danda") {
+                            if (allStatements && embeddedDisclosures !== undefined) {
+                              storedValue = resolveHistoricalCfoValueOnly("danda", y, {
+                                cashFlowRows: rows,
+                                incomeStatement: allStatements.incomeStatement,
+                                balanceSheet: allStatements.balanceSheet,
+                                embeddedDisclosures: embeddedDisclosures ?? [],
+                                danaBreakdowns: danaBreakdowns ?? {},
+                              });
+                            } else {
+                              storedValue = row.values?.[y] ?? 0;
+                            }
+                          } else {
+                            try {
+                              storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
+                            } catch (e) {
+                              storedValue = 0;
+                            }
                           }
                         }
                       }
@@ -971,6 +1029,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const cashFlow = useModelStore((s) => s.cashFlow);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
+  const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
@@ -1727,8 +1786,8 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
               />
             )}
 
-            {/* Stock-Based Compensation Disclosure — single source: embeddedDisclosures (same as SBC builder). */}
-            {focusStatement === "all" && (() => {
+            {/* Stock-Based Compensation Disclosure — only when SBC disclosure section is ON. */}
+            {focusStatement === "all" && sbcDisclosureEnabled && (() => {
               const allSbcRows = getSbcDisclosures(embeddedDisclosures);
               const computedTotals = getTotalSbcByYearFromEmbedded(embeddedDisclosures, years);
               const hasAnySbc = allSbcRows.length > 0 && years.some((y) => (computedTotals[y] ?? 0) !== 0);
@@ -2495,6 +2554,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                 sbcBreakdowns={sbcBreakdowns}
                 danaBreakdowns={danaBreakdowns}
                 embeddedDisclosures={embeddedDisclosures}
+                sbcDisclosureEnabled={sbcDisclosureEnabled}
               />
             )}
 

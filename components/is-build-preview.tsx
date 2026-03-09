@@ -46,6 +46,7 @@ export default function ISBuildPreview() {
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns || {});
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
+  const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
 
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
@@ -1318,7 +1319,7 @@ export default function ISBuildPreview() {
           </tbody>
         </table>
 
-        {hasSbcDisclosureData && (() => {
+        {hasSbcDisclosureData && sbcDisclosureEnabled && (() => {
           const allSbcRows = getSbcDisclosures(embeddedDisclosures);
           const computedTotals = getTotalSbcByYearFromEmbedded(embeddedDisclosures, years);
           const histYears = historicalYears.length > 0 ? historicalYears : years;

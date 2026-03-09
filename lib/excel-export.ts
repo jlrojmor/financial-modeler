@@ -84,29 +84,28 @@ function getCFSSection(
   rowId: string,
   rows: Row[],
   parentId?: string
-): "operating" | "investing" | "financing" | null {
+): "operating" | "investing" | "financing" | "cash_bridge" | null {
   if (parentId) return getCFSSection(parentId, rows);
   const row = rows.find((r) => r.id === rowId);
-  if (row?.cfsLink?.section) {
-    return row.cfsLink.section as "operating" | "investing" | "financing";
-  }
-  // Only assign section by ID for the section total rows; everything else by position
+  if (row?.cfsLink?.section) return row.cfsLink.section as "operating" | "investing" | "financing" | "cash_bridge";
   if (rowId === "operating_cf") return "operating";
   if (rowId === "investing_cf") return "investing";
-  if (rowId === "financing_cf" || rowId === "net_change_cash") return "financing";
+  if (rowId === "financing_cf") return "financing";
+  if (rowId === "fx_effect_on_cash") return "cash_bridge";
+  if (rowId === "net_change_cash") return "financing"; // styled with financing in export; row order is preserved
   const operatingEndIndex = rows.findIndex((r) => r.id === "operating_cf");
   const investingStartIndex = rows.findIndex((r) => r.id === "capex");
   const investingEndIndex = rows.findIndex((r) => r.id === "investing_cf");
-  const financingStartIndex = rows.findIndex((r) => r.id === "debt_issuance");
   const financingEndIndex = rows.findIndex((r) => r.id === "financing_cf");
+  const netChangeIndex = rows.findIndex((r) => r.id === "net_change_cash");
   const rowIndex = rows.findIndex((r) => r.id === rowId);
   if (rowIndex === -1) return null;
+  if (netChangeIndex >= 0 && financingEndIndex >= 0 && rowIndex > financingEndIndex && rowIndex < netChangeIndex) return "cash_bridge";
   if (operatingEndIndex >= 0 && rowIndex <= operatingEndIndex) return "operating";
-  // Rows between operating_cf and capex → operating
   if (operatingEndIndex >= 0 && investingStartIndex >= 0 && rowIndex > operatingEndIndex && rowIndex < investingStartIndex) return "operating";
   const investingStart = investingStartIndex >= 0 ? investingStartIndex : operatingEndIndex + 1;
   if (investingEndIndex >= 0 && rowIndex >= investingStart && rowIndex <= investingEndIndex) return "investing";
-  const financingStart = financingStartIndex >= 0 ? financingStartIndex : investingEndIndex + 1;
+  const financingStart = financingEndIndex >= 0 ? financingEndIndex : investingEndIndex + 1;
   if (financingEndIndex >= 0 && rowIndex >= financingStart && rowIndex <= financingEndIndex) return "financing";
   return "financing";
 }
@@ -262,10 +261,10 @@ function getCFOSign(
   
   // CFF items (financing section)
   if (section === "financing") {
-    if (rowId === "debt_issuance" || rowId === "equity_issuance") {
+    if (rowId === "debt_issued" || rowId === "debt_issuance" || rowId === "equity_issued" || rowId === "equity_issuance") {
       return "+";
     }
-    if (rowId === "debt_repayment" || rowId === "dividends") {
+    if (rowId === "debt_repaid" || rowId === "debt_repayment" || rowId === "share_repurchases" || rowId === "dividends") {
       return "-";
     }
     

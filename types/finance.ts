@@ -11,13 +11,26 @@ export interface Row {
   values?: Record<string, number>;
   excelFormula?: string;
   children?: Row[];
+  /** Controlled vocabulary for how this CFS row is forecast (used in projections). */
+  cfsForecastDriver?:
+    | "income_statement"
+    | "danda_schedule"
+    | "disclosure_or_assumption"
+    | "working_capital_schedule"
+    | "capex_schedule"
+    | "debt_schedule"
+    | "financing_assumption"
+    | "manual_mna"
+    | "manual_other";
   // Cash Flow Statement link metadata (auto-determined by system)
   // This stores the correct treatment per international accounting standards
   cfsLink?: {
-    section: "operating" | "investing" | "financing";
+    section: "operating" | "investing" | "financing" | "cash_bridge";
     cfsItemId?: string; // ID of the CFS line item this links to (optional)
     impact: "positive" | "negative" | "neutral" | "calculated";
     description: string; // Description of the CFS treatment (stored for memory)
+    /** How this row is forecast (for custom rows set by AI/user). */
+    forecastDriver?: Row["cfsForecastDriver"];
   };
   // Income Statement link metadata (auto-determined by system)
   isLink?: {
@@ -38,6 +51,8 @@ export interface Row {
   classificationReason?: string;
   /** AI confidence 0–1 when classificationSource === "ai". */
   classificationConfidence?: number;
+  /** Custom CFS rows: whether forecast metadata is trusted or needs user review. Enables projection logic to ignore/warn on unreviewed rows. */
+  forecastMetadataStatus?: "trusted" | "needs_review";
   /** True for rows from statement template; they never require classification. */
   isTemplateRow?: boolean;
   /** Historical CFO source (optional): set when resolving net_income, sbc, danda, wc_change for display/audit. */
@@ -45,6 +60,16 @@ export interface Row {
     sourceType: "reported" | "income_statement" | "embedded_disclosure" | "derived" | "manual";
     sourceDetail: string;
   };
+  /** CFS only: years for which the user has explicitly entered a value (so reported override is meaningful; default/blank does not block fallback). */
+  cfsUserSetYears?: string[];
+  /** CFS: historical nature of the row for robust classification (reported non-cash, WC movement, etc.). */
+  historicalCfsNature?:
+    | "reported_non_cash_adjustment"
+    | "reported_working_capital_movement"
+    | "reported_operating_other"
+    | "reported_investing"
+    | "reported_financing"
+    | "reported_meta";
 }
 
 /**

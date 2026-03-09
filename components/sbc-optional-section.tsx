@@ -7,34 +7,36 @@ import { getEligibleRowsForSbc } from "@/lib/is-disclosure-eligible";
 
 /**
  * Optional SBC Section - Disclosure layer (does not modify reported IS values).
- * Shows Yes/No; if Yes, shows dynamic list of eligible IS expense rows for SBC breakdown.
+ * Yes/No is stored in the model (sbcDisclosureEnabled). When OFF: SBC disclosure is not used as CFS fallback and block is hidden in preview.
  */
 export default function SbcOptionalSection() {
   const incomeStatement = useModelStore((s) => s.incomeStatement);
+  const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
+  const setSbcDisclosureEnabled = useModelStore((s) => s.setSbcDisclosureEnabled);
   const eligibleRows = useMemo(
     () => getEligibleRowsForSbc(incomeStatement ?? []),
     [incomeStatement]
   );
   const hasEligibleRows = eligibleRows.length > 0;
-  
-  // Always start with null to show the question first
-  // The question should ALWAYS be visible - Yes/No controls whether breakdown is shown
+  // Local UI state: null = show question; true/false sync from store (with localStorage fallback for first load)
   const [userWantsSbc, setUserWantsSbc] = useState<boolean | null>(() => {
-    // Check if user has previously chosen "Yes" - if so, show breakdown but keep question visible
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('sbc_user_choice');
-      if (saved === 'true') return true; // User said Yes before, show breakdown
-      if (saved === 'false') return false; // User said No before, don't show breakdown
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("sbc_user_choice");
+      if (saved === "true") return true;
+      if (saved === "false") return false;
     }
-    return null; // First time - show question
+    return null;
   });
 
-  // Save choice to localStorage when user makes a decision
+  // Sync store -> local so store is source of truth after load; sync local -> store and localStorage on user click
   useEffect(() => {
-    if (userWantsSbc !== null && typeof window !== 'undefined') {
-      localStorage.setItem('sbc_user_choice', String(userWantsSbc));
-    }
-  }, [userWantsSbc]);
+    if (userWantsSbc === null) return;
+    setSbcDisclosureEnabled(userWantsSbc);
+    if (typeof window !== "undefined") localStorage.setItem("sbc_user_choice", String(userWantsSbc));
+  }, [userWantsSbc, setSbcDisclosureEnabled]);
+  useEffect(() => {
+    if (userWantsSbc === null && hasEligibleRows) setUserWantsSbc(sbcDisclosureEnabled);
+  }, [sbcDisclosureEnabled, hasEligibleRows, userWantsSbc]);
   
   if (!hasEligibleRows) {
     return (
@@ -49,8 +51,7 @@ export default function SbcOptionalSection() {
     );
   }
   
-  // State for expand/collapse of the entire SBC section
-  const [isExpanded, setIsExpanded] = useState(userWantsSbc === true);
+  const [isExpanded, setIsExpanded] = useState(sbcDisclosureEnabled);
 
   // Always show the question section, and conditionally show breakdown below
   return (
@@ -79,6 +80,7 @@ export default function SbcOptionalSection() {
             type="button"
             onClick={() => {
               setUserWantsSbc(true);
+              setSbcDisclosureEnabled(true);
               setIsExpanded(true);
             }}
             className={`rounded-md px-4 py-2 text-xs font-semibold transition whitespace-nowrap ${
@@ -93,6 +95,7 @@ export default function SbcOptionalSection() {
             type="button"
             onClick={() => {
               setUserWantsSbc(false);
+              setSbcDisclosureEnabled(false);
               setIsExpanded(false);
             }}
             className={`rounded-md px-4 py-2 text-xs font-semibold transition whitespace-nowrap ${

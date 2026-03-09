@@ -463,7 +463,7 @@ export function createBalanceSheetTemplate(): Row[] {
  */
 export function createCashFlowTemplate(): Row[] {
   return [
-    // Operating Activities
+    // Operating Activities (fixed anchors with forecast driver metadata)
     {
       id: "net_income",
       label: "Net Income",
@@ -471,30 +471,34 @@ export function createCashFlowTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cfsForecastDriver: "income_statement",
     },
     {
       id: "danda",
       label: "Depreciation & Amortization",
-      kind: "input", // Manual input in CFO
+      kind: "input",
       valueType: "currency",
       values: {},
       children: [],
+      cfsForecastDriver: "danda_schedule",
     },
     {
       id: "sbc",
       label: "Stock-Based Compensation",
-      kind: "calc", // Calculated from SBC breakdowns
+      kind: "calc",
       valueType: "currency",
       values: {},
       children: [],
+      cfsForecastDriver: "disclosure_or_assumption",
     },
     {
       id: "wc_change",
       label: "Change in Working Capital",
-      kind: "input", // Input for first historical year, calculated for subsequent years
+      kind: "input",
       valueType: "currency",
       values: {},
       children: [],
+      cfsForecastDriver: "working_capital_schedule",
     },
     {
       id: "other_operating",
@@ -503,6 +507,7 @@ export function createCashFlowTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+      cfsForecastDriver: "manual_other",
     },
     {
       id: "operating_cf",
@@ -512,14 +517,56 @@ export function createCashFlowTemplate(): Row[] {
       values: {},
       children: [],
     },
-    // Investing Activities
+    // Investing Activities (fixed anchors + total)
     {
       id: "capex",
-      label: "Capital Expenditures (CapEx)",
+      label: "Capital Expenditures",
       kind: "input",
       valueType: "currency",
       values: {},
       children: [],
+      cfsForecastDriver: "capex_schedule",
+      cfsLink: { section: "investing", cfsItemId: "capex", impact: "negative", description: "CapEx" },
+    },
+    {
+      id: "acquisitions",
+      label: "Acquisitions",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "manual_mna",
+      cfsLink: { section: "investing", cfsItemId: "acquisitions", impact: "negative", description: "Acquisitions" },
+    },
+    {
+      id: "asset_sales",
+      label: "Asset Sales",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "manual_other",
+      cfsLink: { section: "investing", cfsItemId: "asset_sales", impact: "positive", description: "Asset Sales" },
+    },
+    {
+      id: "investments",
+      label: "Investments",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "manual_other",
+      cfsLink: { section: "investing", cfsItemId: "investments", impact: "negative", description: "Investments" },
+    },
+    {
+      id: "other_investing",
+      label: "Other Investing Activities",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "manual_other",
+      cfsLink: { section: "investing", cfsItemId: "other_investing", impact: "negative", description: "Other Investing" },
     },
     {
       id: "investing_cf",
@@ -529,8 +576,67 @@ export function createCashFlowTemplate(): Row[] {
       values: {},
       children: [],
     },
-    // Financing Activities
-    // No default items - user chooses from suggestions or adds manually
+    // Financing Activities (fixed anchors + total)
+    {
+      id: "debt_issued",
+      label: "Debt Issued",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "debt_schedule",
+      cfsLink: { section: "financing", cfsItemId: "debt_issued", impact: "positive", description: "Debt Issued" },
+    },
+    {
+      id: "debt_repaid",
+      label: "Debt Repaid",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "debt_schedule",
+      cfsLink: { section: "financing", cfsItemId: "debt_repaid", impact: "negative", description: "Debt Repaid" },
+    },
+    {
+      id: "equity_issued",
+      label: "Equity Issued",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "financing_assumption",
+      cfsLink: { section: "financing", cfsItemId: "equity_issued", impact: "positive", description: "Equity Issued" },
+    },
+    {
+      id: "share_repurchases",
+      label: "Share Repurchases",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "financing_assumption",
+      cfsLink: { section: "financing", cfsItemId: "share_repurchases", impact: "negative", description: "Share Repurchases" },
+    },
+    {
+      id: "dividends",
+      label: "Dividends",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "financing_assumption",
+      cfsLink: { section: "financing", cfsItemId: "dividends", impact: "negative", description: "Dividends" },
+    },
+    {
+      id: "other_financing",
+      label: "Other Financing Activities",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "manual_other",
+      cfsLink: { section: "financing", cfsItemId: "other_financing", impact: "negative", description: "Other Financing" },
+    },
     {
       id: "financing_cf",
       label: "Cash from Financing Activities",
@@ -538,6 +644,18 @@ export function createCashFlowTemplate(): Row[] {
       valueType: "currency",
       values: {},
       children: [],
+    },
+    // Cash bridge: items that affect net change in cash but are not CFO/CFI/CFF (e.g. FX effect)
+    {
+      id: "fx_effect_on_cash",
+      label: "Effect of Exchange Rate Changes",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "manual_other",
+      historicalCfsNature: "reported_meta",
+      cfsLink: { section: "cash_bridge", cfsItemId: "fx_effect_on_cash", impact: "neutral", description: "FX effect on cash" },
     },
     {
       id: "net_change_cash",

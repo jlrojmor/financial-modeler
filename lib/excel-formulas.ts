@@ -471,11 +471,12 @@ export function generateExcelFormula(
       }
       if (parts.length > 0) return `=${parts.join("+")}`;
     }
-    const capexRow = findExcelRowNumber(flattenedRows, "capex", startRow, rowOffsets);
-    const otherRow = findExcelRowNumber(flattenedRows, "other_investing", startRow, rowOffsets);
+    const fallbackIds = ["capex", "acquisitions", "asset_sales", "investments", "other_investing"];
     const parts: string[] = [];
-    if (capexRow) parts.push(cellRef(capexRow, "capex", yearCol, yearColLetter, useNameRefs, statementPrefix || ""));
-    if (otherRow) parts.push(cellRef(otherRow, "other_investing", yearCol, yearColLetter, useNameRefs, statementPrefix || ""));
+    for (const id of fallbackIds) {
+      const rowNum = findExcelRowNumber(flattenedRows, id, startRow, rowOffsets);
+      if (rowNum) parts.push(cellRef(rowNum, id, yearCol, yearColLetter, useNameRefs, statementPrefix || ""));
+    }
     if (parts.length > 0) return `=${parts.join("+")}`;
     return null;
   }
@@ -495,7 +496,7 @@ export function generateExcelFormula(
       if (parts.length > 0) return `=${parts.join("+")}`;
     }
     const fallbackParts: string[] = [];
-    for (const id of ["debt_issuance", "debt_repayment", "equity_issuance", "dividends"]) {
+    for (const id of ["debt_issued", "debt_issuance", "debt_repaid", "debt_repayment", "equity_issued", "equity_issuance", "share_repurchases", "dividends", "other_financing"]) {
       const r = findExcelRowNumber(flattenedRows, id, startRow, rowOffsets);
       if (r) fallbackParts.push(cellRef(r, id, yearCol, yearColLetter, useNameRefs, statementPrefix || ""));
     }

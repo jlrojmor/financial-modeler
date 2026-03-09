@@ -29,6 +29,7 @@ import {
 } from "@/lib/capex-da-engine";
 import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
 import { displayToStored } from "@/lib/currency-utils";
+import { applyAnchorForecastDriver, applyAnchorHistoricalNature } from "@/lib/cfs-forecast-drivers";
 
 /**
  * Helpers
@@ -128,6 +129,21 @@ function updateRowValueDeep(
     }
     if (r.children?.length) {
       return { ...r, children: updateRowValueDeep(r.children, rowId, year, value) };
+    }
+    return r;
+  });
+}
+
+/** When user sets a CFS cell, mark that year as user-set so source resolution treats it as meaningful override. */
+function addCfsUserSetYearDeep(rows: Row[], rowId: string, year: string): Row[] {
+  return rows.map((r) => {
+    if (r.id === rowId) {
+      const existing = r.cfsUserSetYears ?? [];
+      if (existing.includes(year)) return r;
+      return { ...r, cfsUserSetYears: [...existing, year].sort() };
+    }
+    if (r.children?.length) {
+      return { ...r, children: addCfsUserSetYearDeep(r.children, rowId, year) };
     }
     return r;
   });
@@ -239,81 +255,125 @@ function updateIsRowMetadataDeep(
   });
 }
 
+/** Patch CFS row metadata (forecast driver, historical nature, classification, cfsLink, trust state). */
+function updateCashFlowRowMetadataDeep(
+  rows: Row[],
+  rowId: string,
+  patch: {
+    cfsForecastDriver?: Row["cfsForecastDriver"];
+    historicalCfsNature?: Row["historicalCfsNature"];
+    classificationSource?: "user" | "ai" | "fallback";
+    classificationReason?: string;
+    classificationConfidence?: number;
+    forecastMetadataStatus?: "trusted" | "needs_review";
+    cfsLink?: Partial<NonNullable<Row["cfsLink"]>>;
+  }
+): Row[] {
+  return rows.map((r) => {
+    if (r.id === rowId) {
+      const next: Row = { ...r };
+      if (patch.cfsForecastDriver !== undefined) next.cfsForecastDriver = patch.cfsForecastDriver;
+      if (patch.historicalCfsNature !== undefined) next.historicalCfsNature = patch.historicalCfsNature;
+      if (patch.classificationSource !== undefined) next.classificationSource = patch.classificationSource;
+      if (patch.classificationReason !== undefined) next.classificationReason = patch.classificationReason;
+      if (patch.classificationConfidence !== undefined) next.classificationConfidence = patch.classificationConfidence;
+      if (patch.forecastMetadataStatus !== undefined) next.forecastMetadataStatus = patch.forecastMetadataStatus;
+      if (patch.cfsLink !== undefined) {
+        next.cfsLink = next.cfsLink ? { ...next.cfsLink, ...patch.cfsLink } : patch.cfsLink as Row["cfsLink"];
+      }
+      if (patch.classificationSource === "user" && next.forecastMetadataStatus !== "trusted") {
+        next.forecastMetadataStatus = "trusted";
+      }
+      return next;
+    }
+    if (r.children?.length) {
+      return { ...r, children: updateCashFlowRowMetadataDeep(r.children, rowId, patch) };
+    }
+    return r;
+  });
+}
+
 function uuid() {
   // Simple, reliable unique id without crypto
   return `id_${Math.random().toString(16).slice(2)}_${Date.now()}`;
 }
 
 /**
- * Ensure wc_change has one child per BS row that is (1) in CA/CL, (2) tagged working_capital, (3) not cash/st_debt.
- * Only rows with cashFlowBehavior === "working_capital" are included; investing/financing/non_cash are never in WC schedule.
+ * Normalize CFS so that rows classified as Working Capital are structural children of wc_change.
+ * Moves any top-level operating row with historicalCfsNature === "reported_working_capital_movement"
+ * into wc_change.children, preserving values and metadata. Idempotent.
+ */
+function normalizeWcStructure(cashFlow: Row[]): Row[] {
+  const topLevelWc = cashFlow.filter((r) => r.historicalCfsNature === "reported_working_capital_movement");
+  if (topLevelWc.length === 0) return cashFlow;
+
+  const rest = cashFlow.filter((r) => r.historicalCfsNature !== "reported_working_capital_movement");
+  const wcChange = rest.find((r) => r.id === "wc_change");
+  if (!wcChange) return cashFlow;
+
+  const existingChildren = wcChange.children ?? [];
+  const moved = topLevelWc.map((r) => ({ ...r, children: undefined as Row[] | undefined }));
+  const newChildren = [...existingChildren, ...moved];
+
+  return rest.map((r) =>
+    r.id === "wc_change" ? { ...r, children: newChildren } : r
+  );
+}
+
+/**
+ * Working capital children in CFS are strictly component-driven: only rows the user has
+ * explicitly added or accepted as historical WC components. We do NOT auto-populate
+ * wc_change.children from Balance Sheet rows (BS-derived rows remain suggestions only).
+ * This preserves existing active WC children and recurses for other rows; it does not
+ * add BS-derived or placeholder rows.
  */
 function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[], wcExcludedIds: Set<string> = new Set()): Row[] {
-  if (balanceSheet.length === 0) return cashFlow;
-
-  const currentAssets = getRowsForCategory(balanceSheet, "current_assets");
-  const currentLiabilities = getRowsForCategory(balanceSheet, "current_liabilities");
-  const excludeIds = new Set([
-    "cash",
-    "st_debt",
-    "total_current_assets",
-    "total_current_liabilities",
-  ]);
-  const isWcRow = (r: Row) =>
-    !excludeIds.has(r.id) &&
-    !r.id.startsWith("total") &&
-    r.cashFlowBehavior === "working_capital";
-  const desired = [
-    ...currentAssets.filter(isWcRow),
-    ...currentLiabilities.filter(isWcRow),
-  ];
-  const desiredById = new Map(desired.map((r) => [r.id, r]));
-  const desiredList = Array.from(desiredById.values()).filter((bs) => !wcExcludedIds.has(bs.id));
-
   return cashFlow.map((r) => {
     if (r.id !== "wc_change") {
       return r.children?.length
         ? { ...r, children: ensureWcChildrenInCashFlow(r.children, balanceSheet, wcExcludedIds) }
         : r;
     }
+    // Preserve only existing active historical WC components; do not add BS-derived rows
     const existingChildren = r.children ?? [];
-    const existingById = new Map(existingChildren.map((c) => [c.id, c]));
-    const newChildren: Row[] = [];
-    const seen = new Set<string>();
-
-    for (const bs of desiredList) {
-      if (seen.has(bs.id)) continue;
-      seen.add(bs.id);
-      const existing = existingById.get(bs.id);
-      if (existing) {
-        newChildren.push(existing);
-      } else {
-        newChildren.push({
-          id: bs.id,
-          label: bs.label,
-          kind: "input" as const,
-          valueType: "currency" as const,
-          values: {} as Record<string, number>,
-        });
-      }
-    }
-
-    // Other WC / Reclass: historical reconciliation bucket (ΔWC_CFO − ΔWC_BS); forecast = 0
-    const otherReclassId = "other_wc_reclass";
-    if (!existingById.has(otherReclassId)) {
-      newChildren.push({
-        id: otherReclassId,
-        label: "Other WC / Reclass",
-        kind: "input" as const,
-        valueType: "currency" as const,
-        values: {} as Record<string, number>,
-      });
-    } else {
-      newChildren.push(existingById.get(otherReclassId)!);
-    }
-
-    return { ...r, children: newChildren };
+    return { ...r, children: existingChildren };
   });
+}
+
+/** CFS anchor row ids in display order; each is inserted after the previous if missing. */
+const CFS_ANCHOR_ORDER: { id: string; afterId: string }[] = [
+  { id: "capex", afterId: "operating_cf" },
+  { id: "acquisitions", afterId: "capex" },
+  { id: "asset_sales", afterId: "acquisitions" },
+  { id: "investments", afterId: "asset_sales" },
+  { id: "other_investing", afterId: "investments" },
+  { id: "investing_cf", afterId: "other_investing" },
+  { id: "debt_issued", afterId: "investing_cf" },
+  { id: "debt_repaid", afterId: "debt_issued" },
+  { id: "equity_issued", afterId: "debt_repaid" },
+  { id: "share_repurchases", afterId: "equity_issued" },
+  { id: "dividends", afterId: "share_repurchases" },
+  { id: "other_financing", afterId: "dividends" },
+  { id: "financing_cf", afterId: "other_financing" },
+  { id: "fx_effect_on_cash", afterId: "financing_cf" },
+];
+
+/**
+ * Mutates cashFlow to ensure all CFI/CFF anchor rows exist in order. Used by initializeModel and ensureCFSAnchorRows.
+ */
+function ensureCFSAnchorRowsInPlace(cashFlow: Row[]): void {
+  const template = createCashFlowTemplate();
+  const getDefault = (id: string): Row | null => {
+    const row = template.find((r) => r.id === id);
+    return row ? { ...row, values: {} } : null;
+  };
+  for (const { id, afterId } of CFS_ANCHOR_ORDER) {
+    if (cashFlow.some((r) => r.id === id)) continue;
+    const afterIdx = cashFlow.findIndex((r) => r.id === afterId);
+    const insertIdx = afterIdx >= 0 ? afterIdx + 1 : cashFlow.length;
+    const row = getDefault(id);
+    if (row) cashFlow.splice(insertIdx, 0, row);
+  }
 }
 
 /**
@@ -346,6 +406,8 @@ export type ProjectSnapshot = {
   schedules: { workingCapital: Row[]; debt: Row[]; capex: Row[] };
   sbcBreakdowns: Record<string, Record<string, number>>;
   embeddedDisclosures: EmbeddedDisclosureItem[];
+  /** When true, SBC disclosure block is used as fallback for CFS SBC and shown in preview. When false, CFS SBC uses only reported/manual value. */
+  sbcDisclosureEnabled: boolean;
   danaLocation: "cogs" | "sga" | "both" | null;
   danaBreakdowns: Record<string, number>;
   currentStepId: WizardStepId;
@@ -459,6 +521,8 @@ export type ModelState = {
   sbcBreakdowns: Record<string, Record<string, number>>; // { [categoryId]: { [year]: value } }
   /** Generic embedded disclosures (SBC, future: amortization). Does not modify reported IS values. */
   embeddedDisclosures: EmbeddedDisclosureItem[];
+  /** SBC disclosure section enabled: when true, disclosure is fallback for CFS SBC and shown in preview; when false, CFS SBC is reported/manual only. */
+  sbcDisclosureEnabled: boolean;
 
   // D&A location tracking (where D&A is embedded: "cogs", "sga", or "both")
   danaLocation: "cogs" | "sga" | "both" | null;
@@ -570,9 +634,21 @@ export type ModelActions = {
     classificationReason?: string;
     classificationConfidence?: number;
   }) => void;
+  /** Cash Flow: set forecast driver and classification metadata on a row (AI suggestion or user override). Passing classificationSource: "user" also sets forecastMetadataStatus to "trusted". */
+  updateCashFlowRowMetadata: (rowId: string, patch: {
+    cfsForecastDriver?: Row["cfsForecastDriver"];
+    historicalCfsNature?: Row["historicalCfsNature"];
+    classificationSource?: "user" | "ai" | "fallback";
+    classificationReason?: string;
+    classificationConfidence?: number;
+    forecastMetadataStatus?: "trusted" | "needs_review";
+    cfsLink?: Partial<NonNullable<Row["cfsLink"]>>;
+  }) => void;
 
   /** Sync Working Capital change children from Balance Sheet (CA except cash, CL except short-term debt). */
   ensureWcChildrenFromBS: () => void;
+  /** Ensure CFI/CFF fixed anchor rows exist in cashFlow (for builder display). Call when CFS builder is shown. */
+  ensureCFSAnchorRows: () => void;
 
   /** BS Build: persist WC, PP&E, and Intangibles schedule projections into global balanceSheet (projection years only); then recompute CFS. */
   applyBsBuildProjectionsToModel: () => void;
@@ -583,8 +659,12 @@ export type ModelActions = {
   reorderWcChildren: (fromIndex: number, toIndex: number) => void;
   /** Cash Flow builder: move a row into Working Capital (becomes child of wc_change, included in WC subtotal). */
   moveCashFlowRowIntoWc: (rowId: string, insertAtIndex?: number) => void;
+  /** Cash Flow builder: add a new row as a child of wc_change (for WC-classified rows). */
+  addWcChild: (row: Row, insertAtIndex?: number) => void;
   /** Cash Flow builder: move a row out of Working Capital (becomes top-level operating item, no longer in WC subtotal). */
   moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number) => void;
+  /** Cash Flow builder: ensure CFI/CFF fixed anchor rows exist (runs on builder mount so anchors show after rehydration). */
+  ensureCFSAnchorRows: () => void;
   /** Balance Sheet builder: reorder items within a category (e.g., current_assets, fixed_assets). */
   reorderBalanceSheetCategory: (category: "current_assets" | "fixed_assets" | "current_liabilities" | "non_current_liabilities" | "equity", fromIndex: number, toIndex: number) => void;
   /** Balance Sheet builder: set cash flow behavior for a row (WC/CFI/CFF/non-cash). */
@@ -598,6 +678,8 @@ export type ModelActions = {
   updateSbcValue: (categoryId: string, year: string, value: number) => void;
   /** Set one year value for an embedded disclosure (e.g. SBC). One entry per (type, rowId). Optional label stored for preview when row is not in statement tree. */
   setEmbeddedDisclosureValue: (type: EmbeddedDisclosureItem["type"], rowId: string, year: string, value: number, label?: string) => void;
+  /** Turn SBC disclosure section on/off. When off, CFS SBC does not use disclosure fallback and disclosure block is hidden in preview. */
+  setSbcDisclosureEnabled: (enabled: boolean) => void;
 
   // Section lock and expand management
   lockSection: (sectionId: string) => void;
@@ -619,6 +701,11 @@ export type ModelActions = {
   deleteProject: (projectId: string) => void;
   /** Clear all entered financial data (historical values, disclosures, schedule inputs); keeps statement structure and config. */
   resetFinancialInputs: () => void;
+  /** Scoped resets: clear only the selected statement(s) and related inputs. */
+  resetAllFinancialInputs: () => void;
+  resetIncomeStatementInputs: () => void;
+  resetBalanceSheetInputs: () => void;
+  resetCashFlowInputs: () => void;
 
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => void;
@@ -783,6 +870,7 @@ const defaultState: ModelState = {
 
   sbcBreakdowns: {},
   embeddedDisclosures: [],
+  sbcDisclosureEnabled: true,
 
   danaLocation: null,
   danaBreakdowns: {},
@@ -857,6 +945,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     schedules: state.schedules,
     sbcBreakdowns: state.sbcBreakdowns,
     embeddedDisclosures: state.embeddedDisclosures ?? [],
+    sbcDisclosureEnabled: state.sbcDisclosureEnabled ?? true,
     danaLocation: state.danaLocation,
     danaBreakdowns: state.danaBreakdowns,
     currentStepId: state.currentStepId,
@@ -920,23 +1009,33 @@ function applyProjectSnapshot(
   snapshot: ProjectSnapshot
 ) {
   const normalizedIS = normalizeIncomeStatementOperatingExpenses(snapshot.incomeStatement ?? []);
+  const safeMeta = snapshot.meta && typeof snapshot.meta === "object" && snapshot.meta.years
+    ? snapshot.meta
+    : { companyName: "", companyType: "public" as const, currency: "USD", currencyUnit: "millions" as const, modelType: "dcf" as const, years: { historical: [] as string[], projection: [] as string[] } };
   set(() => ({
-    meta: snapshot.meta,
+    meta: safeMeta,
     isInitialized: true, // Always true when loading a snapshot (if snapshot exists, project is initialized)
     incomeStatement: normalizedIS,
-    balanceSheet: snapshot.balanceSheet,
-    cashFlow: snapshot.cashFlow,
-    schedules: snapshot.schedules,
+    balanceSheet: Array.isArray(snapshot.balanceSheet) ? snapshot.balanceSheet : [],
+    cashFlow: Array.isArray(snapshot.cashFlow) ? normalizeWcStructure(snapshot.cashFlow) : [],
+    schedules: snapshot.schedules && typeof snapshot.schedules === "object"
+      ? {
+          workingCapital: Array.isArray(snapshot.schedules.workingCapital) ? snapshot.schedules.workingCapital : [],
+          debt: Array.isArray(snapshot.schedules.debt) ? snapshot.schedules.debt : [],
+          capex: Array.isArray(snapshot.schedules.capex) ? snapshot.schedules.capex : [],
+        }
+      : { workingCapital: [], debt: [], capex: [] },
     sbcBreakdowns: snapshot.sbcBreakdowns,
     embeddedDisclosures: snapshot.embeddedDisclosures ?? [],
+    sbcDisclosureEnabled: snapshot.sbcDisclosureEnabled ?? true,
     danaLocation: snapshot.danaLocation,
     danaBreakdowns: snapshot.danaBreakdowns,
     currentStepId: snapshot.currentStepId,
     completedStepIds: snapshot.completedStepIds,
     isModelComplete: snapshot.isModelComplete,
-    sectionLocks: snapshot.sectionLocks,
-    sectionExpanded: snapshot.sectionExpanded,
-    confirmedRowIds: snapshot.confirmedRowIds,
+    sectionLocks: snapshot.sectionLocks ?? {},
+    sectionExpanded: snapshot.sectionExpanded ?? {},
+    confirmedRowIds: snapshot.confirmedRowIds ?? {},
     wcExcludedIds: snapshot.wcExcludedIds ?? [],
     revenueProjectionConfig: snapshot.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
     cogsPctByRevenueLine: snapshot.cogsPctByRevenueLine ?? {},
@@ -990,6 +1089,11 @@ function applyProjectSnapshot(
     intangiblesHistoricalAmortizationByYear: snapshot.intangiblesHistoricalAmortizationByYear ?? {},
   }));
 }
+
+/** Safe storage for persist: no-op on server (localStorage undefined), use localStorage on client */
+const persistStorage = typeof window === "undefined"
+  ? { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+  : undefined;
 
 /**
  * Store with persistence
@@ -1404,33 +1508,55 @@ export const useModelStore = create<ModelState & ModelActions>()(
         });
       }
 
-      // Migration: Ensure Investing section items exist (capex, other_investing, investing_cf)
+      // Migration: Ensure Investing section items exist (capex, acquisitions, asset_sales, investments, other_investing, investing_cf)
+      const cfsTemplate = createCashFlowTemplate();
+      const getDefaultCfsRow = (id: string): Row | null => {
+        const row = cfsTemplate.find((r) => r.id === id);
+        if (!row) return null;
+        return { ...row, values: {} };
+      };
+
       const hasCapex = cashFlow.some((r) => r.id === "capex");
       if (!hasCapex) {
         const operatingCfIndex = cashFlow.findIndex((r) => r.id === "operating_cf");
         const insertIndex = operatingCfIndex >= 0 ? operatingCfIndex + 1 : cashFlow.length;
-        cashFlow.splice(insertIndex, 0, {
+        const defaultRow = getDefaultCfsRow("capex") ?? {
           id: "capex",
-          label: "Capital Expenditures (CapEx)",
+          label: "Capital Expenditures",
           kind: "input",
           valueType: "currency",
           values: {},
           children: [],
-        });
+        };
+        cashFlow.splice(insertIndex, 0, defaultRow);
+      }
+
+      // CFI anchors in display order (after capex, before other_investing / investing_cf)
+      const cfiAnchorIds = ["acquisitions", "asset_sales", "investments"];
+      for (const id of cfiAnchorIds) {
+        if (cashFlow.some((r) => r.id === id)) continue;
+        const prevId = cfiAnchorIds[cfiAnchorIds.indexOf(id) - 1] ?? "capex";
+        const afterIndex = cashFlow.findIndex((r) => r.id === prevId);
+        const insertIndex = afterIndex >= 0 ? afterIndex + 1 : cashFlow.findIndex((r) => r.id === "investing_cf");
+        const defaultRow = getDefaultCfsRow(id);
+        if (defaultRow) cashFlow.splice(insertIndex >= 0 ? insertIndex : cashFlow.length, 0, defaultRow);
       }
 
       const hasOtherInvesting = cashFlow.some((r) => r.id === "other_investing");
       if (!hasOtherInvesting) {
+        const investmentsIndex = cashFlow.findIndex((r) => r.id === "investments");
         const capexIndex = cashFlow.findIndex((r) => r.id === "capex");
-        const insertIndex = capexIndex >= 0 ? capexIndex + 1 : cashFlow.length;
-        cashFlow.splice(insertIndex, 0, {
+        const insertAfter = investmentsIndex >= 0 ? investmentsIndex : capexIndex;
+        const insertIndex = insertAfter >= 0 ? insertAfter + 1 : cashFlow.length;
+        const defaultRow = getDefaultCfsRow("other_investing") ?? {
           id: "other_investing",
           label: "Other Investing Activities",
           kind: "input",
           valueType: "currency",
           values: {},
           children: [],
-        });
+        };
+        cashFlow.splice(insertIndex, 0, defaultRow);
       }
 
       const hasInvestingCf = cashFlow.some((r) => r.id === "investing_cf");
@@ -1447,6 +1573,30 @@ export const useModelStore = create<ModelState & ModelActions>()(
         });
       }
 
+      // Migration: Ensure financing_cf total exists, then ensure Financing section anchor rows exist before it
+      const hasFinancingCf = cashFlow.some((r) => r.id === "financing_cf");
+      if (!hasFinancingCf) {
+        const netChangeIdx = cashFlow.findIndex((r) => r.id === "net_change_cash");
+        const insertIdx = netChangeIdx >= 0 ? netChangeIdx : cashFlow.length;
+        cashFlow.splice(insertIdx, 0, {
+          id: "financing_cf",
+          label: "Cash from Financing Activities",
+          kind: "calc",
+          valueType: "currency",
+          values: {},
+          children: [],
+        });
+      }
+
+      const cffAnchorIds = ["debt_issued", "debt_repaid", "equity_issued", "share_repurchases", "dividends", "other_financing"];
+      for (const id of cffAnchorIds) {
+        if (cashFlow.some((r) => r.id === id)) continue;
+        const financingCfIdx = cashFlow.findIndex((r) => r.id === "financing_cf");
+        const insertIndex = financingCfIdx >= 0 ? financingCfIdx : cashFlow.length;
+        const defaultRow = getDefaultCfsRow(id);
+        if (defaultRow) cashFlow.splice(insertIndex, 0, defaultRow);
+      }
+
       // Recalculate all years for all statements. Preserve values for rows with IS Build breakdowns (e.g. R&D with sub-items).
       const allYears = [...(meta.years.historical || []), ...(meta.years.projection || [])];
       const sgaChildrenForInit = findRowDeep(incomeStatement, "sga")?.children ?? [];
@@ -1457,11 +1607,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
         const sbcBreakdowns = get().sbcBreakdowns;
         const danaBreakdowns = get().danaBreakdowns;
         let allStatements = { incomeStatement, balanceSheet, cashFlow };
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsInit, state.embeddedDisclosures ?? []);
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsInit, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       allStatements = { incomeStatement, balanceSheet, cashFlow };
-        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       allStatements = { incomeStatement, balanceSheet, cashFlow };
-        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
 
       // Temporary: verify top-level IS order and operating_expenses structure after normalization
@@ -1760,11 +1910,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
       boundaries.financingEnd++;
     }
 
-    // Migration: Ensure net_change_cash exists
+    // Migration: Ensure net_change_cash exists (after fx_effect_on_cash if present, else after financing_cf)
     const hasNetChangeCash = cashFlow.some((r) => r.id === "net_change_cash");
     if (!hasNetChangeCash) {
-      // Insert at the very end (after financing_cf)
-      cashFlow.push({
+      const fxIdx = cashFlow.findIndex((r) => r.id === "fx_effect_on_cash");
+      const finCfIdx = cashFlow.findIndex((r) => r.id === "financing_cf");
+      const insertIdx = fxIdx >= 0 ? fxIdx + 1 : finCfIdx >= 0 ? finCfIdx + 1 : cashFlow.length;
+      cashFlow.splice(insertIdx, 0, {
         id: "net_change_cash",
         label: "Net Change in Cash",
         kind: "calc",
@@ -2151,11 +2303,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const sbcBreakdowns = get().sbcBreakdowns;
       const danaBreakdowns = get().danaBreakdowns;
       let allStatements = { incomeStatement, balanceSheet, cashFlow };
-      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsRecalc, state.embeddedDisclosures ?? []);
+      incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdownsRecalc, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       allStatements = { incomeStatement, balanceSheet, cashFlow };
-      balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+      balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       allStatements = { incomeStatement, balanceSheet, cashFlow };
-      cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+      cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     });
 
     set({
@@ -2356,7 +2508,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
           sbcBreakdowns,
           danaBreakdowns,
           parentIdsWithProjectionBreakdowns,
-          state.embeddedDisclosures ?? []
+          state.embeddedDisclosures ?? [],
+          state.sbcDisclosureEnabled ?? true
         );
       });
       
@@ -2385,25 +2538,29 @@ export const useModelStore = create<ModelState & ModelActions>()(
     set((state) => {
       const currentRows = [...(state[statement] ?? [])];
       currentRows.splice(index, 0, row);
-      
-      // Recalculate all years after inserting
+      // Enforce canonical WC structure: any operating row with WC nature must live in wc_change.children (generic add + AI classification path)
+      let rowsToUse: Row[] = currentRows;
+      if (statement === "cashFlow" && row.historicalCfsNature === "reported_working_capital_movement") {
+        rowsToUse = normalizeWcStructure(currentRows);
+      }
+
       const allYears = [
         ...(state.meta.years.historical || []),
         ...(state.meta.years.projection || []),
       ];
-      
-      let recalculatedRows = currentRows;
+
+      let recalculatedRows = rowsToUse;
       allYears.forEach((year) => {
         const allStatements = {
           incomeStatement: state.incomeStatement,
           balanceSheet: state.balanceSheet,
-          cashFlow: state.cashFlow,
+          cashFlow: statement === "cashFlow" ? recalculatedRows : state.cashFlow,
         };
         const sbcBreakdowns = state.sbcBreakdowns;
         const danaBreakdowns = state.danaBreakdowns;
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
-      
+
       return { [statement]: recalculatedRows };
     });
   },
@@ -2451,7 +2608,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         };
         const sbcBreakdowns = state.sbcBreakdowns;
         const danaBreakdowns = state.danaBreakdowns;
-        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
       
       return { [statement]: recalculatedRows };
@@ -2478,6 +2635,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     const coreCFSItems = [
       "net_income", "danda", "sbc", "wc_change", "other_operating", "operating_cf",
       "capex", "investing_cf",
+      "fx_effect_on_cash",
       "financing_cf",
       "net_change_cash"
     ];
@@ -2560,7 +2718,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
             sbcBreakdowns,
             danaBreakdowns,
             undefined,
-            state.embeddedDisclosures ?? []
+            state.embeddedDisclosures ?? [],
+            state.sbcDisclosureEnabled ?? true
           );
         });
         
@@ -2582,15 +2741,15 @@ export const useModelStore = create<ModelState & ModelActions>()(
   updateRowValue: (statement, rowId, year, value) => {
     set((state) => {
       const currentRows = state[statement];
-      // Update the input value
-      const updated = updateRowValueDeep(currentRows, rowId, year, value);
+      let updated = updateRowValueDeep(currentRows, rowId, year, value);
+      if (statement === "cashFlow") {
+        updated = addCfsUserSetYearDeep(updated, rowId, year);
+      }
       
-      // Recompute all calculated rows for this year
-      // Rows that have IS Build breakdowns (keys of revenueProjectionConfig.breakdowns) are not overwritten with sum-of-children so Historicals stays editable
       const allStatements = {
         incomeStatement: state.incomeStatement,
         balanceSheet: state.balanceSheet,
-        cashFlow: state.cashFlow,
+        cashFlow: statement === "cashFlow" ? updated : state.cashFlow,
       };
       const sbcBreakdowns = state.sbcBreakdowns;
       const danaBreakdowns = state.danaBreakdowns;
@@ -2603,7 +2762,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
               ),
             ])
           : undefined;
-      const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? []);
+      const recomputed = recomputeCalculations(updated, year, updated, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       
       // If Balance Sheet was updated, also recalculate Cash Flow (WC Change depends on BS)
       let updatedCashFlow = state.cashFlow;
@@ -2613,7 +2772,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
           balanceSheet: recomputed,
           cashFlow: state.cashFlow,
         };
-        updatedCashFlow = recomputeCalculations(state.cashFlow, year, state.cashFlow, updatedAllStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        updatedCashFlow = recomputeCalculations(state.cashFlow, year, state.cashFlow, updatedAllStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       }
       
       return { 
@@ -2639,16 +2798,29 @@ export const useModelStore = create<ModelState & ModelActions>()(
     });
   },
 
+  updateCashFlowRowMetadata: (rowId, patch) => {
+    set((state) => {
+      let updated = updateCashFlowRowMetadataDeep(state.cashFlow, rowId, patch);
+      if (updated === state.cashFlow) return state;
+      // When classifying as WC, move row into wc_change.children if it is top-level
+      if (patch.historicalCfsNature === "reported_working_capital_movement") {
+        updated = normalizeWcStructure(updated);
+      }
+      return { ...state, cashFlow: updated };
+    });
+  },
+
   ensureWcChildrenFromBS: () => {
     set((state) => {
       const excluded = new Set(state.wcExcludedIds ?? []);
+      // Preserve existing active WC children only; do not auto-add BS-derived rows
       const cashFlow = ensureWcChildrenInCashFlow(
         state.cashFlow,
         state.balanceSheet,
         excluded
       );
       if (cashFlow === state.cashFlow) return state;
-      // Step 3B: tag BS rows that are WC children with scheduleOwner=wc, cashFlowBehavior=working_capital
+      // Tag BS rows that are already active WC children with scheduleOwner=wc (for projection/suggestions)
       // Do not overwrite when row explicitly has scheduleOwner "none" (custom items)
       const wcRow = cashFlow.find((r) => r.id === "wc_change");
       const wcChildIds = new Set((wcRow?.children ?? []).map((c) => c.id));
@@ -2662,6 +2834,18 @@ export const useModelStore = create<ModelState & ModelActions>()(
         };
       });
       return { cashFlow, balanceSheet };
+    });
+  },
+
+  ensureCFSAnchorRows: () => {
+    set((state) => {
+      const next = [...state.cashFlow];
+      ensureCFSAnchorRowsInPlace(next);
+      const idsChanged =
+        next.length !== state.cashFlow.length ||
+        next.some((r, i) => r.id !== state.cashFlow[i]?.id);
+      if (!idsChanged) return state;
+      return { ...state, cashFlow: next };
     });
   },
 
@@ -2838,13 +3022,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // Recompute balanceSheet totals for each projection year
     for (const year of projectionYears) {
       const st = { ...allStatements, balanceSheet: newBS };
-      newBS = recomputeCalculations(newBS, year, newBS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+      newBS = recomputeCalculations(newBS, year, newBS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
     // Recompute cashFlow for each projection year (wc_change and operating_cf use new BS)
     let newCF = cashFlow;
     for (const year of projectionYears) {
       const st = { incomeStatement, balanceSheet: newBS, cashFlow: newCF };
-      newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+      newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
 
     set({ balanceSheet: newBS, cashFlow: newCF });
@@ -2868,7 +3052,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = rows;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow: rows };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
       return { cashFlow: recalculated };
     });
@@ -2887,7 +3071,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = cashFlow;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
       return { cashFlow: recalculated };
     });
@@ -2908,7 +3092,24 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = cashFlow;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+      });
+      return { cashFlow: recalculated };
+    });
+  },
+
+  addWcChild: (row, insertAtIndex) => {
+    set((state) => {
+      const wcRow = state.cashFlow.find((r) => r.id === "wc_change");
+      if (!wcRow) return state;
+      const child = { ...row, children: undefined as Row[] | undefined };
+      const atIndex = insertAtIndex ?? (wcRow.children?.length ?? 0);
+      const cashFlow = addExistingChildToParent(state.cashFlow, "wc_change", child, atIndex);
+      const allYears = [...(state.meta.years.historical || []), ...(state.meta.years.projection || [])];
+      let recalculated = cashFlow;
+      const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
+      allYears.forEach((year) => {
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
       return { cashFlow: recalculated };
     });
@@ -2932,7 +3133,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let recalculated = cashFlow;
       const allStatements = { incomeStatement: state.incomeStatement, balanceSheet: state.balanceSheet, cashFlow };
       allYears.forEach((year) => {
-        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        recalculated = recomputeCalculations(recalculated, year, recalculated, allStatements, state.sbcBreakdowns, state.danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
       return { cashFlow: recalculated };
     });
@@ -3028,7 +3229,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let newCF = cashFlow;
       allYears.forEach((year) => {
         const allStatements = { incomeStatement, balanceSheet, cashFlow: newCF };
-        newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
       if (newCF !== cashFlow) set({ cashFlow: newCF });
       return;
@@ -3048,7 +3249,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     let newCF = cashFlow;
     allYears.forEach((year) => {
       const allStatements = { incomeStatement, balanceSheet, cashFlow: newCF };
-      newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+      newCF = recomputeCalculations(newCF, year, newCF, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     });
     if (newCF !== cashFlow) set({ cashFlow: newCF });
   },
@@ -3094,7 +3295,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
           state.sbcBreakdowns,
           state.danaBreakdowns,
           undefined,
-          state.embeddedDisclosures ?? []
+          state.embeddedDisclosures ?? [],
+          state.sbcDisclosureEnabled ?? true
         );
       });
       
@@ -3130,7 +3332,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
           state.sbcBreakdowns,
           state.danaBreakdowns,
           undefined,
-          state.embeddedDisclosures ?? []
+          state.embeddedDisclosures ?? [],
+          state.sbcDisclosureEnabled ?? true
         );
       });
       return { incomeStatement: recalculated };
@@ -3175,7 +3378,24 @@ export const useModelStore = create<ModelState & ModelActions>()(
     });
   },
 
-  resetFinancialInputs: () => {
+  setSbcDisclosureEnabled: (enabled) => {
+    set((state) => {
+      const next = { ...state, sbcDisclosureEnabled: enabled };
+      // Recompute cashFlow for all years so stored SBC (and operating_cf) values reflect the toggle; otherwise stale disclosure values stay in row.values.
+      const allYears = [...(state.meta?.years?.historical ?? []), ...(state.meta?.years?.projection ?? [])];
+      let cashFlow = state.cashFlow ?? [];
+      const allStatements = { incomeStatement: state.incomeStatement ?? [], balanceSheet: state.balanceSheet ?? [], cashFlow };
+      allYears.forEach((year) => {
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, state.sbcBreakdowns ?? {}, state.danaBreakdowns ?? {}, undefined, state.embeddedDisclosures ?? [], enabled);
+        allStatements.cashFlow = cashFlow;
+      });
+      return { ...next, cashFlow };
+    });
+  },
+
+  resetFinancialInputs: () => get().resetAllFinancialInputs(),
+
+  resetAllFinancialInputs: () => {
     const state = get();
     const clearedIS = clearRowValues(state.incomeStatement);
     const clearedBS = clearRowValues(state.balanceSheet);
@@ -3241,6 +3461,81 @@ export const useModelStore = create<ModelState & ModelActions>()(
       intangiblesHistoricalAmortizationByYear: {},
       bsBuildPreviewOverrides: {},
     });
+    get().recalculateAll();
+  },
+
+  resetIncomeStatementInputs: () => {
+    set((state) => ({
+      incomeStatement: createIncomeStatementTemplate(),
+      revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+      cogsPctByRevenueLine: {},
+      cogsPctModeByRevenueLine: {},
+      cogsPctByRevenueLineByYear: {},
+      sgaPctByItemId: {},
+      sgaPctModeByItemId: {},
+      sgaPctByItemIdByYear: {},
+      sgaPctOfParentByItemId: {},
+      sgaPctOfParentModeByItemId: {},
+      sgaPctOfParentByItemIdByYear: {},
+      sgaHistoricAmountByItemIdByYear: {},
+    }));
+    get().recalculateAll();
+  },
+
+  resetBalanceSheetInputs: () => {
+    set((state) => ({
+      balanceSheet: createBalanceSheetTemplate(),
+      wcDriverTypeByItemId: {},
+      wcDaysByItemId: {},
+      wcDaysByItemIdByYear: {},
+      wcDaysBaseByItemId: {},
+      wcPctBaseByItemId: {},
+      wcPctByItemId: {},
+      wcPctByItemIdByYear: {},
+      capexForecastMethod: "pct_revenue",
+      capexPctRevenue: 0,
+      capexManualByYear: {},
+      capexGrowthPct: 0,
+      capexSplitByBucket: true,
+      capexForecastBucketsIndependently: false,
+      capexTimingConvention: "mid",
+      capexBucketAllocationPct: {},
+      capexBucketLabels: {},
+      capexCustomBucketIds: [],
+      capexBucketMethod: {},
+      capexBucketPctRevenue: {},
+      capexBucketManualByYear: {},
+      capexBucketGrowthPct: {},
+      ppeUsefulLifeByBucket: { ...CAPEX_IB_DEFAULT_USEFUL_LIVES },
+      ppeUsefulLifeSingle: 10,
+      capexHistoricByBucketByYear: {},
+      capexHelperPpeByBucketByYear: {},
+      capexIncludeInAllocationByBucket: {},
+      capexModelIntangibles: true,
+      intangiblesForecastMethod: "pct_revenue",
+      intangiblesAmortizationLifeYears: 7,
+      intangiblesPctRevenue: 0,
+      intangiblesManualByYear: {},
+      intangiblesPctOfCapex: 0,
+      intangiblesHasHistoricalAmortization: false,
+      intangiblesHistoricalAmortizationByYear: {},
+      schedules: {
+        ...state.schedules,
+        workingCapital: clearRowValues(state.schedules?.workingCapital ?? []),
+        debt: clearRowValues(state.schedules?.debt ?? []),
+        capex: clearRowValues(state.schedules?.capex ?? []),
+      },
+      bsBuildPreviewOverrides: {},
+    }));
+    get().recalculateAll();
+  },
+
+  resetCashFlowInputs: () => {
+    set((state) => ({
+      // Template has wc_change with children: [] — no BS-derived or placeholder rows; user adds WC components explicitly
+      cashFlow: createCashFlowTemplate(),
+      confirmedRowIds: {},
+    }));
     get().recalculateAll();
   },
 
@@ -3334,7 +3629,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
         state.sbcBreakdowns,
         state.danaBreakdowns,
         parentIdsWithProjectionBreakdowns,
-        state.embeddedDisclosures ?? []
+        state.embeddedDisclosures ?? [],
+        state.sbcDisclosureEnabled ?? true
       );
       return { incomeStatement: recomputed };
     });
@@ -3410,9 +3706,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const parentIdsWithProjectionBreakdowns = new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns]);
       allNewYears.forEach((year) => {
         const allStatements = { incomeStatement, balanceSheet, cashFlow };
-        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? []);
-        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
-        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+        incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+        balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+        cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
 
       return {
@@ -3960,6 +4256,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }),
     {
       name: "financial-model-storage",
+      ...(persistStorage ? { storage: persistStorage } : {}),
       // Persist all state; always write current project into projectStates so no progress is lost
       partialize: (state) => {
         const { _hasHydrated, ...stateToPersist } = state;
@@ -4386,18 +4683,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
             boundaries.financingEnd++;
           }
 
-          // Migration: Remove other_investing if it exists (no longer a default item)
-          const otherInvestingIndex = cashFlow.findIndex((r) => r.id === "other_investing");
-          if (otherInvestingIndex >= 0) {
-            cashFlow.splice(otherInvestingIndex, 1);
-            // Update boundaries after removal
-            if (otherInvestingIndex < boundaries.investingEnd) {
-              boundaries.investingEnd--;
-              boundaries.financingStart--;
-              boundaries.financingEnd--;
-            }
-          }
-
           // Migration: Ensure Investing section items exist (capex, investing_cf)
           const hasCapex = cashFlow.some((r) => r.id === "capex");
           if (!hasCapex) {
@@ -4462,6 +4747,18 @@ export const useModelStore = create<ModelState & ModelActions>()(
             });
           }
 
+          // Normalize CFI/CFF: ensure all fixed anchor rows exist in order (idempotent; preserves existing rows and values)
+          ensureCFSAnchorRowsInPlace(cashFlow);
+          // Backfill forecast-driver and historical nature for fixed anchors (missing on old persisted models)
+          for (let i = 0; i < cashFlow.length; i++) {
+            let row = applyAnchorForecastDriver(cashFlow[i]) as Row;
+            row = applyAnchorHistoricalNature(row) as Row;
+            cashFlow[i] = row;
+          }
+
+          // Normalize: move top-level WC-classified rows into wc_change.children (single architecture for historical WC)
+          cashFlow = normalizeWcStructure(cashFlow);
+
           // Recalculate all years for all statements. Preserve historical values for rows with IS Build breakdowns (rev/cogs/sga parents and SG&A children like R&D that have sub-items).
           const sgaChildren = findRowDeep(state.incomeStatement, "sga")?.children ?? [];
           const sgaParentIdsWithBreakdowns = collectParentIdsWithChildren(sgaChildren);
@@ -4472,9 +4769,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
             const allStatements = { incomeStatement, balanceSheet, cashFlow };
             const sbcBreakdowns = state.sbcBreakdowns;
             const danaBreakdowns = state.danaBreakdowns || {};
-            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? []);
-            balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
-            cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? []);
+            incomeStatement = recomputeCalculations(incomeStatement, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns, parentIdsWithProjectionBreakdowns, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+            balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+            cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
           });
 
           // Temporary: verify top-level IS after rehydration normalization

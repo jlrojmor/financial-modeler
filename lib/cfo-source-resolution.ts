@@ -31,6 +31,8 @@ export interface CfoSourceContext {
   incomeStatement: Row[];
   balanceSheet: Row[];
   embeddedDisclosures?: EmbeddedDisclosureItem[];
+  /** When false, SBC disclosure is not used as fallback for CFS SBC (reported/manual only). */
+  sbcDisclosureEnabled?: boolean;
   danaBreakdowns?: Record<string, number>;
 }
 
@@ -41,10 +43,14 @@ function getStoredCfsValue(cashFlowRows: Row[], rowId: string, year: string): nu
   return v !== undefined ? v : undefined;
 }
 
-/** True if user has entered a value for this CFS row/year (used for "reported" priority). */
-function hasReportedCfsValue(cashFlowRows: Row[], rowId: string, year: string): boolean {
-  const v = getStoredCfsValue(cashFlowRows, rowId, year);
-  return v !== undefined && v !== 0;
+/**
+ * True only if the user has explicitly entered a value for this CFS row/year.
+ * Untouched/default/blank must not block fallback to disclosure or derived source.
+ * Reported CFS wins only when this is true.
+ */
+export function hasMeaningfulHistoricalValue(row: Row, year: string): boolean {
+  if (!row.cfsUserSetYears?.includes(year)) return false;
+  return row.values?.[year] !== undefined;
 }
 
 /**
@@ -69,27 +75,32 @@ export function resolveHistoricalCfoValue(
     };
   }
 
-  // --- SBC: 1) reported CFS (if user entered a value for this year), 2) embedded disclosure total, 3) zero. Legacy sbcBreakdowns is NOT used for CFS. ---
+  // --- SBC: 1) reported CFS only if user meaningfully entered a value, 2) embedded disclosure total (only when SBC disclosure is enabled), 3) zero. ---
   if (rowId === "sbc") {
+    const sbcRow = cashFlowRows.find((r) => r.id === "sbc");
     const reported = getStoredCfsValue(cashFlowRows, "sbc", year);
-    if (reported !== undefined) {
+    if (sbcRow && reported !== undefined && hasMeaningfulHistoricalValue(sbcRow, year)) {
       return { value: reported, sourceType: "reported", sourceDetail: "Reported CFS SBC" };
     }
-    const fromEmbedded = getTotalSbcForYearFromEmbedded(embeddedDisclosures, year);
-    if (fromEmbedded !== 0) {
-      return {
-        value: fromEmbedded,
-        sourceType: "embedded_disclosure",
-        sourceDetail: "SBC disclosure total (embedded disclosures)",
-      };
+    const useSbcDisclosure = context.sbcDisclosureEnabled !== false;
+    if (useSbcDisclosure) {
+      const fromEmbedded = getTotalSbcForYearFromEmbedded(embeddedDisclosures ?? [], year);
+      if (fromEmbedded !== 0) {
+        return {
+          value: fromEmbedded,
+          sourceType: "embedded_disclosure",
+          sourceDetail: "SBC disclosure total (embedded disclosures)",
+        };
+      }
     }
-    return { value: 0, sourceType: "manual", sourceDetail: "No SBC (zero)" };
+    return { value: 0, sourceType: "manual", sourceDetail: useSbcDisclosure ? "No SBC (zero)" : "SBC disclosure off; enter value in CFS or turn disclosure on" };
   }
 
-  // --- D&A: 1) reported CFS D&A (if user entered a value for this year), 2) IS D&A or danaBreakdowns, 3) zero ---
+  // --- D&A: 1) reported CFS only if user meaningfully entered a value, 2) IS D&A or danaBreakdowns, 3) zero ---
   if (rowId === "danda") {
+    const dandaRow = cashFlowRows.find((r) => r.id === "danda");
     const reported = getStoredCfsValue(cashFlowRows, "danda", year);
-    if (reported !== undefined) {
+    if (dandaRow && reported !== undefined && hasMeaningfulHistoricalValue(dandaRow, year)) {
       return { value: reported, sourceType: "reported", sourceDetail: "Reported CFS D&A" };
     }
     const isDanda = findRowInTree(incomeStatement, "danda");
@@ -104,11 +115,11 @@ export function resolveHistoricalCfoValue(
     return { value: 0, sourceType: "manual", sourceDetail: "No D&A (zero)" };
   }
 
-  // --- Amortization (separate row): not in default CFS template.
-  // If a separate amortization row is added later: 1) reported CFS, 2) amortization disclosure total, 3) zero.
+  // --- Amortization (separate row): 1) reported CFS only if user meaningfully entered, 2) disclosure total, 3) zero. ---
   if (rowId === "amortization" || rowId === "amortization_intangibles") {
+    const amortRow = cashFlowRows.find((r) => r.id === rowId);
     const reported = getStoredCfsValue(cashFlowRows, rowId, year);
-    if (reported !== undefined && reported !== 0) {
+    if (amortRow && reported !== undefined && hasMeaningfulHistoricalValue(amortRow, year)) {
       return { value: reported, sourceType: "reported", sourceDetail: "Reported CFS amortization" };
     }
     const fromEmbedded = getTotalAmortizationForYearFromEmbedded(embeddedDisclosures, year);

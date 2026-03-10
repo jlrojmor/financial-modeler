@@ -590,8 +590,9 @@ export function exportStatementToExcel(
     // Add CFS sign if applicable
     if (isCashFlow) {
       const cfsSection = getCFSSection(row.id, rows, parentId);
-      const sign = getCFOSign(row.id, row, cfsSection || undefined, parentId);
-      if (sign && (cfsSection === "operating" || cfsSection === "investing" || cfsSection === "financing")) {
+      const signSection = cfsSection === "operating" || cfsSection === "investing" || cfsSection === "financing" ? cfsSection : undefined;
+      const sign = getCFOSign(row.id, row, signSection, parentId);
+      if (sign && signSection) {
         labelText = indent + `(${sign}) ` + row.label;
       }
     }

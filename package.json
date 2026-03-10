@@ -2,6 +2,9 @@
   "name": "financial-modeler",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "dev:3002": "next dev -p 3002",

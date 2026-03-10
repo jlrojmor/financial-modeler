@@ -852,9 +852,13 @@ function CFSSectionComponent({
       newRow.cfsForecastDriver = "manual_other";
     }
 
-    // Operating: deterministic default from subgroup so rows land in the right place even before AI
-    if (section.id === "operating" && addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base") {
-      newRow.historicalCfsNature = getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup);
+    // Operating: deterministic default from subgroup so rows land in the right place even before AI (earnings_base and total have no nature)
+    const subgroupWithNature: "non_cash" | "working_capital" | "other_operating" | null =
+      addingFromOperatingSubgroup === "non_cash" || addingFromOperatingSubgroup === "working_capital" || addingFromOperatingSubgroup === "other_operating"
+        ? addingFromOperatingSubgroup
+        : null;
+    if (section.id === "operating" && subgroupWithNature) {
+      newRow.historicalCfsNature = getDefaultNatureForOperatingSubgroup(subgroupWithNature);
     }
 
     const OVERRIDE_SUBGROUP_THRESHOLD = 0.9; // Do not let AI move row out of subgroup unless confidence >= this
@@ -868,9 +872,7 @@ function CFSSectionComponent({
         body: JSON.stringify({
           label: newItemLabel.trim(),
           sectionContext: section.id,
-          ...(section.id === "operating" && addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base"
-            ? { operatingSubgroup: addingFromOperatingSubgroup }
-            : {}),
+          ...(section.id === "operating" && subgroupWithNature ? { operatingSubgroup: subgroupWithNature } : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -884,9 +886,9 @@ function CFSSectionComponent({
         newRow.cfsForecastDriver = suggestion.forecastDriver;
         let effectiveNature = suggestion.historicalCfsNature ?? (section.id === "cash_bridge" ? "reported_meta" : section.id === "operating" ? "reported_operating_other" : section.id === "investing" ? "reported_investing" : "reported_financing");
         // Conservative override: do not let AI move operating row out of the subgroup it was added from unless confidence is very high
-        if (section.id === "operating" && addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base") {
-          const subgroupDefault = getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup);
-          if (wouldMoveOutOfOperatingSubgroup(addingFromOperatingSubgroup, effectiveNature) && confidence < OVERRIDE_SUBGROUP_THRESHOLD) {
+        if (section.id === "operating" && subgroupWithNature) {
+          const subgroupDefault = getDefaultNatureForOperatingSubgroup(subgroupWithNature);
+          if (wouldMoveOutOfOperatingSubgroup(subgroupWithNature, effectiveNature) && confidence < OVERRIDE_SUBGROUP_THRESHOLD) {
             effectiveNature = subgroupDefault;
           }
         }
@@ -910,14 +912,14 @@ function CFSSectionComponent({
         newRow.classificationSource = "fallback";
         newRow.forecastMetadataStatus = "needs_review";
         newRow.historicalCfsNature = section.id === "cash_bridge" ? "reported_meta" : section.id === "operating"
-          ? (addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base" ? getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup) : "reported_operating_other")
+          ? (subgroupWithNature ? getDefaultNatureForOperatingSubgroup(subgroupWithNature) : "reported_operating_other")
           : section.id === "investing" ? "reported_investing" : "reported_financing";
       }
     } catch {
       newRow.classificationSource = "fallback";
       newRow.forecastMetadataStatus = "needs_review";
       newRow.historicalCfsNature = section.id === "cash_bridge" ? "reported_meta" : section.id === "operating"
-        ? (addingFromOperatingSubgroup && addingFromOperatingSubgroup !== "earnings_base" ? getDefaultNatureForOperatingSubgroup(addingFromOperatingSubgroup) : "reported_operating_other")
+        ? (subgroupWithNature ? getDefaultNatureForOperatingSubgroup(subgroupWithNature) : "reported_operating_other")
         : section.id === "investing" ? "reported_investing" : "reported_financing";
     } finally {
       setAddingWithAI(false);

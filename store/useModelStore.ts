@@ -663,8 +663,6 @@ export type ModelActions = {
   addWcChild: (row: Row, insertAtIndex?: number) => void;
   /** Cash Flow builder: move a row out of Working Capital (becomes top-level operating item, no longer in WC subtotal). */
   moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number) => void;
-  /** Cash Flow builder: ensure CFI/CFF fixed anchor rows exist (runs on builder mount so anchors show after rehydration). */
-  ensureCFSAnchorRows: () => void;
   /** Balance Sheet builder: reorder items within a category (e.g., current_assets, fixed_assets). */
   reorderBalanceSheetCategory: (category: "current_assets" | "fixed_assets" | "current_liabilities" | "non_current_liabilities" | "equity", fromIndex: number, toIndex: number) => void;
   /** Balance Sheet builder: set cash flow behavior for a row (WC/CFI/CFF/non-cash). */

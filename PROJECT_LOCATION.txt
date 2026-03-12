@@ -1,0 +1,14 @@
+Financial Modeler — Project location on this computer
+
+Full path:
+  /Users/JLRM/financial-modeler
+
+To open in Terminal:
+  cd /Users/JLRM/financial-modeler
+
+To open in Finder:
+  Open Finder → Go → Go to Folder (Cmd+Shift+G) → paste:
+  /Users/JLRM/financial-modeler
+
+All project files (app, components, lib, store, etc.) live in this folder.
+Git is initialized here; your work is saved in this directory.

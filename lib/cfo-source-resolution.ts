@@ -169,3 +169,18 @@ export function resolveHistoricalCfoValueOnly(
 ): number {
   return resolveHistoricalCfoValue(rowId, year, context).value;
 }
+
+/**
+ * True only when SBC disclosure is enabled and there is actual disclosure data for that year.
+ * Used by the CFS builder to decide editability: if no disclosure value is available,
+ * the SBC row must remain manually editable; if disclosure value is present, row can be read-only/auto-populated.
+ */
+export function hasSbcDisclosureValueForYear(
+  year: string,
+  embeddedDisclosures: EmbeddedDisclosureItem[],
+  sbcDisclosureEnabled: boolean
+): boolean {
+  if (!sbcDisclosureEnabled) return false;
+  const total = getTotalSbcForYearFromEmbedded(embeddedDisclosures ?? [], year);
+  return total !== 0;
+}

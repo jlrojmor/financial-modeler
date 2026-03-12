@@ -4,10 +4,12 @@
  * Derives the list of WC items from CFO (wc_change children) and computes
  * historic drivers (days, % of revenue/COGS) and projected balances from driver inputs.
  * IB-grade: only items that are actually used in Cash Flow from Operations are included.
+ * Phase 2: Prefer metadata-based routing (cashFlowBehavior === "working_capital") when available.
  */
 
 import type { Row } from "@/types/finance";
 import { getRowsForCategory } from "./bs-category-mapper";
+import { getForecastRoutingState } from "./forecast-routing";
 
 export type WcScheduleItem = {
   id: string;
@@ -16,19 +18,30 @@ export type WcScheduleItem = {
 };
 
 /**
- * Get the ordered list of Working Capital items from the Cash Flow Statement.
- * Uses only wc_change children (synced from BS: current assets except cash, current liabilities except short-term debt).
+ * Get WC item ids from Balance Sheet using forecast routing (metadata-first).
+ * Returns row ids that route to working_capital_schedule.
+ */
+export function getWcScheduleItemIdsFromRouting(balanceSheet: Row[]): Set<string> {
+  const wcIds = new Set<string>();
+  for (const row of balanceSheet) {
+    if (row.id.startsWith("total_") || row.id === "cash") continue;
+    const routing = getForecastRoutingState(row, "balanceSheet");
+    if (routing.owner === "working_capital_schedule") {
+      wcIds.add(row.id);
+    }
+  }
+  return wcIds;
+}
+
+/**
+ * Get the ordered list of Working Capital items.
+ * Prefers metadata-based routing (cashFlowBehavior === "working_capital"); falls back to wc_change.children + category.
  * Order: current assets first (BS order), then current liabilities (BS order).
  */
 export function getWcScheduleItems(
   cashFlow: Row[],
   balanceSheet: Row[]
 ): WcScheduleItem[] {
-  const wcRow = cashFlow.find((r) => r.id === "wc_change");
-  const children = wcRow?.children ?? [];
-  if (children.length === 0) return [];
-
-  const childIds = new Set(children.map((c) => c.id));
   const currentAssets = getRowsForCategory(balanceSheet, "current_assets").filter(
     (r) => !["cash", "total_current_assets"].includes(r.id) && !r.id.startsWith("total_")
   );
@@ -36,7 +49,28 @@ export function getWcScheduleItems(
     (r) => !["st_debt", "total_current_liabilities"].includes(r.id) && !r.id.startsWith("total_")
   );
 
+  const wcIdsFromRouting = getWcScheduleItemIdsFromRouting(balanceSheet);
+  const useRouting = wcIdsFromRouting.size > 0;
+
   const out: WcScheduleItem[] = [];
+  if (useRouting) {
+    for (const r of currentAssets) {
+      if (wcIdsFromRouting.has(r.id)) {
+        out.push({ id: r.id, label: r.label, side: "asset" });
+      }
+    }
+    for (const r of currentLiabilities) {
+      if (wcIdsFromRouting.has(r.id)) {
+        out.push({ id: r.id, label: r.label, side: "liability" });
+      }
+    }
+    return out;
+  }
+
+  const wcRow = cashFlow.find((r) => r.id === "wc_change");
+  const children = wcRow?.children ?? [];
+  if (children.length === 0) return [];
+  const childIds = new Set(children.map((c) => c.id));
   for (const r of currentAssets) {
     if (childIds.has(r.id)) {
       out.push({ id: r.id, label: r.label, side: "asset" });

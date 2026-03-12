@@ -506,6 +506,8 @@ function StatementTable({
       if (entry.row.id === "other_operating") continue; // placeholder row: do not add to any bucket so header is not shown when empty
       const sg = getFinalOperatingSubgroup(entry.row, entry.parentId);
       if (!sg || sg === "total" || !buckets[sg]) continue;
+      // Canonical rule: working_capital bucket only includes wc_change and its children (structure-only). No semantic-only WC rows.
+      if (sg === "working_capital" && entry.row.id !== "wc_change" && entry.parentId !== "wc_change") continue;
       buckets[sg].push(entry);
     }
     return buckets;

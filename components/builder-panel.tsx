@@ -12,6 +12,7 @@ import YearsEditor from "@/components/years-editor";
 import { checkBalanceSheetBalance } from "@/lib/calculations";
 import { getUnclassifiedNonCoreBsRows } from "@/lib/bs-core-rows";
 import { getIsRowsMissingClassification } from "@/lib/is-classification";
+import { getFullClassificationReport, getReviewItemsForHistoricals } from "@/lib/classification-completeness";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 
 export default function BuilderPanel() {
@@ -25,6 +26,7 @@ export default function BuilderPanel() {
   const resetIncomeStatementInputs = useModelStore((s) => s.resetIncomeStatementInputs);
   const resetBalanceSheetInputs = useModelStore((s) => s.resetBalanceSheetInputs);
   const resetCashFlowInputs = useModelStore((s) => s.resetCashFlowInputs);
+  const confirmRowReview = useModelStore((s) => s.confirmRowReview);
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const currencyUnit = meta?.currencyUnit ?? "millions";
@@ -59,6 +61,40 @@ export default function BuilderPanel() {
     if (currentStepId !== "historicals" || !incomeStatement?.length) return [];
     return getIsRowsMissingClassification(incomeStatement);
   }, [currentStepId, incomeStatement]);
+
+  const cashFlow = useModelStore((s) => s.cashFlow);
+
+  // Compute report and review items from current store state every render when on historicals
+  // so the panel updates immediately when row metadata is fixed (no stale memoization).
+  const classificationReport =
+    currentStepId === "historicals"
+      ? getFullClassificationReport({
+          incomeStatement: incomeStatement ?? [],
+          balanceSheet: balanceSheet ?? [],
+          cashFlow: cashFlow ?? [],
+        })
+      : null;
+
+  const reviewItems =
+    currentStepId === "historicals" && classificationReport
+      ? getReviewItemsForHistoricals(classificationReport, {
+          incomeStatement: incomeStatement ?? [],
+          balanceSheet: balanceSheet ?? [],
+          cashFlow: cashFlow ?? [],
+        })
+      : [];
+
+  const reviewByStatement = useMemo(() => {
+    const byStatement: { income: typeof reviewItems; balance: typeof reviewItems; cashFlow: typeof reviewItems } = {
+      income: [],
+      balance: [],
+      cashFlow: [],
+    };
+    for (const item of reviewItems) {
+      byStatement[item.statementKey].push(item);
+    }
+    return byStatement;
+  }, [reviewItems]);
 
   // Disable Continue if balance doesn't check in historicals step, BS Build has unclassified CF rows, or IS has rows missing classification
   const canContinue = isCurrentStepComplete &&
@@ -99,6 +135,13 @@ export default function BuilderPanel() {
             <div className="text-xs text-slate-400">
               Current step: <span className="text-slate-200">{currentStepId}</span>
             </div>
+            {reviewItems.length > 0 && (
+              <div className="mt-1 text-xs text-amber-400/90">
+                {reviewItems.some((i) => i.reviewState === "setup_required")
+                  ? "Some rows need setup so the model knows where they belong."
+                  : "Some rows have suggested classification; confirm to accept."}
+              </div>
+            )}
           </div>
 
           <div className="flex gap-2">
@@ -355,6 +398,79 @@ export default function BuilderPanel() {
         
         {currentStepId === "historicals" && (
           <div className="space-y-6">
+            {/* Rows Requiring Review - actionable rows only; split into Needs setup vs Needs confirmation */}
+            {reviewItems.length > 0 && (
+              <div className="rounded-lg border border-amber-600/40 bg-amber-950/20 p-4">
+                <h3 className="text-sm font-semibold text-amber-200 mb-3">
+                  Rows Requiring Review
+                </h3>
+                <p className="text-xs text-slate-300/90 mb-3">
+                  Fix or confirm the rows below in each statement builder. Rows with a suggested type can be confirmed; others need setup in the builder.
+                </p>
+                <div className="space-y-4">
+                  {(["income", "balance", "cashFlow"] as const).map((key) => {
+                    const items = reviewByStatement[key];
+                    if (!items.length) return null;
+                    const statementName = items[0].statementName;
+                    const storeStatementKey =
+                      key === "income" ? "incomeStatement" : key === "balance" ? "balanceSheet" : "cashFlow";
+                    const needsSetup = items.filter((i) => i.isUnresolved);
+                    const needsConfirmation = items.filter((i) => i.canConfirm);
+                    return (
+                      <div key={key}>
+                        <div className="text-xs font-medium text-slate-200 mb-2">
+                          {statementName}
+                        </div>
+                        {needsSetup.length > 0 && (
+                          <div className="mb-2">
+                            <div className="text-[11px] font-medium text-amber-300/90 mb-1">Needs setup</div>
+                            <ul className="space-y-1.5">
+                              {needsSetup.map((item) => (
+                                <li
+                                  key={`${item.statementKey}:${item.rowId}`}
+                                  className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs"
+                                >
+                                  <span className="font-medium text-slate-100">{item.label}</span>
+                                  <span className="text-amber-300">{item.issueText}</span>
+                                  <span className="text-slate-400">{item.reason}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {needsConfirmation.length > 0 && (
+                          <div>
+                            <div className="text-[11px] font-medium text-amber-200/90 mb-1">Needs confirmation</div>
+                            <ul className="space-y-1.5">
+                              {needsConfirmation.map((item) => (
+                                <li
+                                  key={`${item.statementKey}:${item.rowId}`}
+                                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"
+                                >
+                                  <span className="font-medium text-slate-100">{item.label}</span>
+                                  <span className="text-amber-200/90" title={item.reason}>
+                                    {item.suggestedLabel ? `Suggested: ${item.suggestedLabel}` : `Confirm: accept suggested classification for “${item.label}”`}
+                                  </span>
+                                  <span className="text-slate-400">{item.reason}</span>
+                                  <button
+                                    type="button"
+                                    className="ml-1 rounded px-2 py-0.5 text-[11px] font-medium bg-amber-600/80 text-white hover:bg-amber-500/90 transition-colors"
+                                    onClick={() => confirmRowReview(storeStatementKey, item.rowId)}
+                                  >
+                                    Confirm
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Workflow Guide - static guidance only */}
             <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 p-4">
               <h3 className="text-sm font-semibold text-slate-200 mb-2">

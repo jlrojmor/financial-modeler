@@ -6,7 +6,7 @@
 import type { Row } from "@/types/finance";
 
 /** Known template IS row IDs + calculated rows that must never require classification (e.g. EBITDA). */
-const TEMPLATE_IS_ROW_IDS = new Set([
+export const TEMPLATE_IS_ROW_IDS = new Set([
   "rev", "cogs", "gross_profit", "gross_margin", "operating_expenses", "sga", "ebit", "ebit_margin",
   "rd", "other_opex", "danda", "interest_expense", "interest_income", "other_income",
   "ebt", "ebt_margin", "tax", "net_income", "net_income_margin",

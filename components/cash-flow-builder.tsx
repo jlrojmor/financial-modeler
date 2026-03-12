@@ -7,6 +7,7 @@ import {
   displayToStored,
   storedToDisplay,
   getUnitLabel,
+  formatIntegerWithSeparators,
 } from "@/lib/currency-utils";
 import CollapsibleSection from "@/components/collapsible-section";
 import { findTermKnowledge } from "@/lib/financial-terms-knowledge";
@@ -14,13 +15,14 @@ import { analyzeBSItemsForCFO, type CFOItem } from "@/lib/cfo-intelligence";
 import { getSuggestedCFIItems, validateCFIItem, findCFIItem, type CFIItem } from "@/lib/cfi-intelligence";
 import { getSuggestedCFFItems, validateCFFItem, findCFFItem, type CFFItem } from "@/lib/cff-intelligence";
 import { computeRowValue } from "@/lib/calculations";
-import { resolveHistoricalCfoValue, resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
+import { resolveHistoricalCfoValue, resolveHistoricalCfoValueOnly, hasSbcDisclosureValueForYear } from "@/lib/cfo-source-resolution";
 import {
   getFinalOperatingSubgroup,
   OPERATING_SUBGROUP_ORDER,
   OPERATING_SUBGROUP_LABELS,
   type OperatingSubgroupId,
 } from "@/lib/cfs-operating-subgroups";
+import { getFinalRowClassificationState } from "@/lib/final-row-classification";
 // UUID helper
 function uuid() {
   return `id_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -205,6 +207,7 @@ function CFSSectionComponent({
   const moveCashFlowRowOutOfWc = useModelStore((s) => s.moveCashFlowRowOutOfWc);
   const confirmedRowIds = useModelStore((s) => s.confirmedRowIds);
   const toggleConfirmedRow = useModelStore((s) => s.toggleConfirmedRow);
+  const confirmRowReview = useModelStore((s) => s.confirmRowReview);
   const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
   // Always use currentCashFlow from store as the source of truth
   const currentRows = currentCashFlow;
@@ -1160,6 +1163,30 @@ function CFSSectionComponent({
                                   {child.id === "other_wc_reclass" && (
                                     <div className="text-[10px] text-slate-500 italic mt-0.5">Optional manual reclass. Leave blank unless the company reports a specific working-capital reclassification item.</div>
                                   )}
+                                  {(() => {
+                                    const final = getFinalRowClassificationState(child, "cashFlow", { parentId: "wc_change", sectionId: "operating", subgroupId: "working_capital" });
+                                    if (final.reviewState === "setup_required") {
+                                      return <span className="text-[10px] text-amber-500/90 ml-1">— Setup required</span>;
+                                    }
+                                    if (final.reviewState === "needs_confirmation") {
+                                      return (
+                                        <span className="inline-flex flex-wrap items-center gap-1.5 ml-1">
+                                          {final.suggestedLabel && (
+                                            <span className="text-[10px] text-amber-400/90" title={final.reason}>— Suggested: {final.suggestedLabel}</span>
+                                          )}
+                                          {!final.suggestedLabel && <span className="text-[10px] text-amber-400/90">— Suggested classification</span>}
+                                          <button
+                                            type="button"
+                                            onClick={() => confirmRowReview("cashFlow", child.id)}
+                                            className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-600/80 text-white hover:bg-amber-500/90 transition-colors"
+                                          >
+                                            Confirm
+                                          </button>
+                                        </span>
+                                      );
+                                    }
+                                    return null;
+                                  })()}
                                 </div>
                               </div>
                               <div className="flex items-center gap-2 shrink-0">
@@ -1260,12 +1287,33 @@ function CFSSectionComponent({
                           — {sourceBadge}
                         </span>
                       )}
-                      {/* Lightweight review cue: driven by trust state so projection logic can consistently ignore/warn on needs_review */}
-                      {!isStandard && !isTotalRow && row.forecastMetadataStatus === "needs_review" && (
-                        <span className="text-[10px] text-amber-400/90 ml-1" title={row.classificationReason || "Forecast metadata may need review"}>
-                          — Review
-                        </span>
-                      )}
+                      {/* Single canonical review state from getFinalRowClassificationState */}
+                      {!isStandard && !isTotalRow && (() => {
+                        const context = section.id ? { sectionId: section.id, subgroupId: row.id === "wc_change" ? "working_capital" : undefined } : undefined;
+                        const final = getFinalRowClassificationState(row, "cashFlow", context);
+                        if (final.reviewState === "setup_required") {
+                          return <span className="text-[10px] text-amber-500/90 ml-1" title={final.reason}>— Setup required</span>;
+                        }
+                        if (final.reviewState === "needs_confirmation") {
+                          return (
+                            <span className="inline-flex flex-wrap items-center gap-1.5 ml-1">
+                              {final.suggestedLabel ? (
+                                <span className="text-[10px] text-amber-400/90" title={final.reason}>— Suggested: {final.suggestedLabel}</span>
+                              ) : (
+                                <span className="text-[10px] text-amber-400/90" title={final.reason}>— Suggested classification</span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => confirmRowReview("cashFlow", row.id)}
+                                className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-600/80 text-white hover:bg-amber-500/90 transition-colors"
+                              >
+                                Confirm
+                              </button>
+                            </span>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -1352,9 +1400,11 @@ function CFSSectionComponent({
                       const unitLabel = getUnitLabel(meta?.currencyUnit);
                       
                       // Determine if field is read-only
+                      // Net Income: always read-only. SBC: only read-only when disclosure actually has a value for this year; otherwise editable.
                       // WC Change: historical years are editable, projection years are calculated (read-only)
                       const isWcChangeProjection = row.id === "wc_change" && year.endsWith("E");
-                      const isReadOnly = (row.id === "net_income" || row.id === "sbc") || isWcChangeProjection;
+                      const sbcDisclosureDrivenThisYear = row.id === "sbc" && hasSbcDisclosureValueForYear(year, embeddedDisclosures ?? [], sbcDisclosureEnabled);
+                      const isReadOnly = (row.id === "net_income" || sbcDisclosureDrivenThisYear) || isWcChangeProjection;
                       const isDanda = row.id === "danda";
                       // Net Income: display-only (no input boxes) so it clearly looks read-only / calculated
                       const isNetIncomeReadOnlyDisplay = row.id === "net_income";
@@ -1485,6 +1535,10 @@ function CFSSectionComponent({
                                 impact: item.impact,
                                 description: item.description,
                               },
+                              historicalCfsNature: "reported_investing",
+                              classificationSource: "user",
+                              forecastMetadataStatus: "trusted",
+                              taxonomyStatus: "trusted",
                             };
                             insertRow("cashFlow", insertIndex, newRow);
                           }}
@@ -1562,6 +1616,10 @@ function CFSSectionComponent({
                                 impact: item.impact,
                                 description: item.description,
                               },
+                              historicalCfsNature: "reported_financing",
+                              classificationSource: "user",
+                              forecastMetadataStatus: "trusted",
+                              taxonomyStatus: "trusted",
                             };
                             insertRow("cashFlow", insertIndex, newRow);
                           }}
@@ -1911,8 +1969,8 @@ export default function CashFlowBuilder() {
                   const computedValue = getNetChangeForYear(year);
                   const unitLabel = getUnitLabel(meta?.currencyUnit);
                   const isUnavailable = computedValue === null || Number.isNaN(computedValue);
-                  const displayValue = !isUnavailable ? storedToDisplay(computedValue as number, meta?.currencyUnit) : "";
-                  const cellText = isUnavailable ? "—" : `${displayValue}${unitLabel ? ` ${unitLabel}` : ""}`;
+                  const displayValue = !isUnavailable ? storedToDisplay(computedValue as number, meta?.currencyUnit) : null;
+                  const cellText = isUnavailable ? "—" : `${formatIntegerWithSeparators(displayValue)}${unitLabel ? ` ${unitLabel}` : ""}`;
 
                   return (
                     <div key={year} className="flex flex-col">
@@ -1942,7 +2000,8 @@ export default function CashFlowBuilder() {
           const formatValue = (v: number | undefined): string => {
             if (v === undefined) return "—";
             const display = storedToDisplay(v, meta?.currencyUnit ?? "units");
-            return unitLabel ? `${display} ${unitLabel}` : String(display);
+            const formatted = formatIntegerWithSeparators(display);
+            return unitLabel ? `${formatted} ${unitLabel}` : formatted;
           };
 
           return (

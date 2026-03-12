@@ -107,3 +107,53 @@ export function groupOperatingRowsIntoBuckets(
 
   return buckets;
 }
+
+/**
+ * Flatten CFS rows with parentId for validation (top-level has no parentId; children have parent row id).
+ */
+function flattenCfsWithParentId(rows: Row[], parentId?: string): Array<{ row: Row; parentId?: string }> {
+  const out: Array<{ row: Row; parentId?: string }> = [];
+  for (const r of rows) {
+    out.push({ row: r, parentId });
+    if (r.children?.length) {
+      out.push(...flattenCfsWithParentId(r.children, r.id));
+    }
+  }
+  return out;
+}
+
+/**
+ * Dev validation: ensure every operating row's final subgroup matches its structural placement.
+ * - working_capital ⇒ must be wc_change or child of wc_change (parentId === "wc_change")
+ * - parentId === "wc_change" or row.id === "wc_change" ⇒ subgroup must be working_capital
+ * Logs console warnings when mismatched. Call after normalization or from console (e.g. __validateOperatingCfsStructure(store.getState().cashFlow)).
+ */
+export function validateOperatingCfsStructure(cashFlow: Row[]): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const entries = flattenCfsWithParentId(cashFlow ?? []);
+  const operatingSectionIds = new Set(["net_income", "danda", "sbc", "wc_change", "other_operating", "operating_cf"]);
+  for (const { row, parentId } of entries) {
+    const inOperating =
+      operatingSectionIds.has(row.id) ||
+      (parentId != null && operatingSectionIds.has(parentId)) ||
+      row.cfsLink?.section === "operating";
+    if (!inOperating) continue;
+    const sg = getFinalOperatingSubgroup(row, parentId);
+    if (sg === "working_capital") {
+      if (row.id !== "wc_change" && parentId !== "wc_change") {
+        errors.push(`Row "${row.label}" (id=${row.id}) has subgroup working_capital but is not under wc_change (parentId=${parentId ?? "top-level"}).`);
+      }
+    }
+    if ((row.id === "wc_change" || parentId === "wc_change") && sg !== "working_capital") {
+      errors.push(`Row "${row.label}" (id=${row.id}) is structurally WC (parentId=${parentId}) but subgroup is ${sg ?? "null"}.`);
+    }
+  }
+  if (errors.length > 0 && typeof console !== "undefined" && console.warn) {
+    console.warn("[CFS structure validation]", errors);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+if (typeof window !== "undefined") {
+  (window as unknown as { __validateOperatingCfsStructure?: typeof validateOperatingCfsStructure }).__validateOperatingCfsStructure = validateOperatingCfsStructure;
+}

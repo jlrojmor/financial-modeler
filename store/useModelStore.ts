@@ -30,6 +30,10 @@ import {
 import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
 import { displayToStored } from "@/lib/currency-utils";
 import { applyAnchorForecastDriver, applyAnchorHistoricalNature } from "@/lib/cfs-forecast-drivers";
+import { backfillClassificationCompleteness } from "@/lib/classification-completeness";
+import { backfillTaxonomy, applyTaxonomyToRow } from "@/lib/row-taxonomy";
+import { backfillCfsMetadataNature } from "@/lib/cfs-metadata-backfill";
+import { getFinalOperatingSubgroup } from "@/lib/cfs-operating-subgroups";
 
 /**
  * Helpers
@@ -246,7 +250,14 @@ function updateIsRowMetadataDeep(
 ): Row[] {
   return rows.map((r) => {
     if (r.id === rowId) {
-      return { ...r, ...patch };
+      const next = { ...r, ...patch };
+      // When user sets classification in builder, mark as trusted and user so row fully resolves
+      if (patch.sectionOwner !== undefined || patch.isOperating !== undefined) {
+        next.forecastMetadataStatus = "trusted" as const;
+        next.taxonomyStatus = "trusted" as const;
+        next.classificationSource = "user" as const;
+      }
+      return next;
     }
     if (r.children?.length) {
       return { ...r, children: updateIsRowMetadataDeep(r.children, rowId, patch) };
@@ -255,7 +266,25 @@ function updateIsRowMetadataDeep(
   });
 }
 
-/** Patch CFS row metadata (forecast driver, historical nature, classification, cfsLink, trust state). */
+/** Set forecastMetadataStatus, taxonomyStatus, and classificationSource to "trusted"/"user" for a row by id (any statement).
+ *  Ensures the row fully exits all review conditions (canonical state becomes trusted). */
+function updateRowReviewTrustedDeep(rows: Row[], rowId: string): Row[] {
+  return rows.map((r) => {
+    if (r.id === rowId) {
+      return {
+        ...r,
+        forecastMetadataStatus: "trusted" as const,
+        taxonomyStatus: "trusted" as const,
+        classificationSource: "user" as const,
+      };
+    }
+    if (r.children?.length) {
+      return { ...r, children: updateRowReviewTrustedDeep(r.children, rowId) };
+    }
+    return r;
+  });
+}
+
 function updateCashFlowRowMetadataDeep(
   rows: Row[],
   rowId: string,
@@ -281,8 +310,15 @@ function updateCashFlowRowMetadataDeep(
       if (patch.cfsLink !== undefined) {
         next.cfsLink = next.cfsLink ? { ...next.cfsLink, ...patch.cfsLink } : patch.cfsLink as Row["cfsLink"];
       }
-      if (patch.classificationSource === "user" && next.forecastMetadataStatus !== "trusted") {
+      // When user sets classification (source, section, or nature), mark fully trusted so row resolves
+      if (
+        patch.classificationSource === "user" ||
+        patch.historicalCfsNature !== undefined ||
+        patch.cfsLink !== undefined
+      ) {
+        next.classificationSource = "user";
         next.forecastMetadataStatus = "trusted";
+        next.taxonomyStatus = "trusted";
       }
       return next;
     }
@@ -299,15 +335,20 @@ function uuid() {
 }
 
 /**
- * Normalize CFS so that rows classified as Working Capital are structural children of wc_change.
- * Moves any top-level operating row with historicalCfsNature === "reported_working_capital_movement"
- * into wc_change.children, preserving values and metadata. Idempotent.
+ * Normalize CFS so that any row whose final operating subgroup is working_capital
+ * is stored inside wc_change.children. Uses getFinalOperatingSubgroup (single source of truth).
+ * Top-level rows that resolve to working_capital (except wc_change itself) are moved into wc_change.children.
+ * Idempotent.
  */
 function normalizeWcStructure(cashFlow: Row[]): Row[] {
-  const topLevelWc = cashFlow.filter((r) => r.historicalCfsNature === "reported_working_capital_movement");
+  const topLevelWc = cashFlow.filter(
+    (r) => r.id !== "wc_change" && getFinalOperatingSubgroup(r, undefined) === "working_capital"
+  );
   if (topLevelWc.length === 0) return cashFlow;
 
-  const rest = cashFlow.filter((r) => r.historicalCfsNature !== "reported_working_capital_movement");
+  const rest = cashFlow.filter(
+    (r) => r.id === "wc_change" || getFinalOperatingSubgroup(r, undefined) !== "working_capital"
+  );
   const wcChange = rest.find((r) => r.id === "wc_change");
   if (!wcChange) return cashFlow;
 
@@ -644,6 +685,9 @@ export type ModelActions = {
     forecastMetadataStatus?: "trusted" | "needs_review";
     cfsLink?: Partial<NonNullable<Row["cfsLink"]>>;
   }) => void;
+
+  /** Mark a row as reviewed/trusted so it no longer appears in "Rows Requiring Review". Sets forecastMetadataStatus and taxonomyStatus to "trusted". */
+  confirmRowReview: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", rowId: string) => void;
 
   /** Sync Working Capital change children from Balance Sheet (CA except cash, CL except short-term debt). */
   ensureWcChildrenFromBS: () => void;
@@ -1679,13 +1723,26 @@ export const useModelStore = create<ModelState & ModelActions>()(
           }
         : {};
 
+      // Classification completeness: ensure every row has deterministic/AI/user or explicit unresolved state
+      const classificationBackfilled = backfillClassificationCompleteness({
+        incomeStatement,
+        balanceSheet,
+        cashFlow,
+      });
+
+      // Taxonomy backfill: ensure every row has semantic type metadata
+      const backfilled = backfillTaxonomy(classificationBackfilled);
+
+      // CFS metadata backfill: set historicalCfsNature where section is set but nature is missing (one-time normalize)
+      const cashFlowWithNature = backfillCfsMetadataNature(backfilled.cashFlow);
+
       set({
         meta,
         isInitialized: true,
         currentStepId: "historicals",
-        incomeStatement,
-        balanceSheet,
-        cashFlow,
+        incomeStatement: backfilled.incomeStatement,
+        balanceSheet: backfilled.balanceSheet,
+        cashFlow: cashFlowWithNature,
         ...cleanInputState,
       });
     } else {
@@ -2406,6 +2463,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
     if (statement === "incomeStatement" && parentId === "operating_expenses") {
       sectionMeta = getFallbackIsClassification(trimmed);
     }
+    // Classification completeness: every new IS row gets sectionOwner/isOperating (fallback or explicit) and trust state
+    if (statement === "incomeStatement" && sectionMeta == null) {
+      sectionMeta = getFallbackIsClassification(trimmed);
+    }
     const child: Row = {
       id: uuid(),
       label: trimmed,
@@ -2413,14 +2474,26 @@ export const useModelStore = create<ModelState & ModelActions>()(
       valueType: "currency",
       values: {},
       children: [],
-      ...(sectionMeta && {
+      ...(sectionMeta && statement === "incomeStatement" && {
         sectionOwner: sectionMeta.sectionOwner,
         isOperating: sectionMeta.isOperating,
-        ...(statement === "incomeStatement" && parentId === "operating_expenses" && { classificationSource: "fallback" as const }),
+        classificationSource: "fallback" as const,
+        forecastMetadataStatus: "needs_review" as const,
+      }),
+      ...(statement === "balanceSheet" && {
+        cashFlowBehavior: "unclassified" as const,
+        classificationSource: "unresolved" as const,
+        forecastMetadataStatus: "needs_review" as const,
+      }),
+      ...(statement === "cashFlow" && {
+        classificationSource: "unresolved" as const,
+        forecastMetadataStatus: "needs_review" as const,
       }),
     };
+    // Phase 2: apply taxonomy in-session so new row is routable without reload
+    const childWithTaxonomy = applyTaxonomyToRow(child, statement);
 
-    console.log("addChildRow: Adding child", child.label, "to parent", parentId, "in", statement);
+    console.log("addChildRow: Adding child", childWithTaxonomy.label, "to parent", parentId, "in", statement);
 
     set((state) => {
       const currentRows = state[statement];
@@ -2444,7 +2517,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       }
 
       // Deep clone to avoid mutation issues
-      const updated = addChildRow(JSON.parse(JSON.stringify(rowsToUse)), parentId, child);
+      const updated = addChildRow(JSON.parse(JSON.stringify(rowsToUse)), parentId, childWithTaxonomy);
       
       // Verify the child was added (parent may be nested, so find in tree)
       const parentRowAfterAdd = findRowDeep(updated, parentId);
@@ -2471,6 +2544,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
           console.log("addChildRow: Converted parent to calc, children count:", convertedParent?.children?.length);
         }
       }
+      if (statement === "cashFlow") finalRows = normalizeWcStructure(finalRows);
       
       // Recalculate all years after adding child
       const allYears = [
@@ -2534,13 +2608,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
   insertRow: (statement, index, row) => {
     set((state) => {
+      // Phase 2: apply taxonomy in-session so new row is routable without reload
+      const rowWithTaxonomy = applyTaxonomyToRow(row, statement);
       const currentRows = [...(state[statement] ?? [])];
-      currentRows.splice(index, 0, row);
-      // Enforce canonical WC structure: any operating row with WC nature must live in wc_change.children (generic add + AI classification path)
-      let rowsToUse: Row[] = currentRows;
-      if (statement === "cashFlow" && row.historicalCfsNature === "reported_working_capital_movement") {
-        rowsToUse = normalizeWcStructure(currentRows);
-      }
+      currentRows.splice(index, 0, rowWithTaxonomy);
+      // Enforce canonical WC structure: any operating row that resolves to working_capital must live in wc_change.children
+      let rowsToUse: Row[] = statement === "cashFlow" ? normalizeWcStructure(currentRows) : currentRows;
 
       const allYears = [
         ...(state.meta.years.historical || []),
@@ -2598,11 +2671,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
       ];
       
       let recalculatedRows = newRows;
+      if (statement === "cashFlow") recalculatedRows = normalizeWcStructure(recalculatedRows);
       allYears.forEach((year) => {
         const allStatements = {
           incomeStatement: state.incomeStatement,
           balanceSheet: state.balanceSheet,
-          cashFlow: state.cashFlow,
+          cashFlow: statement === "cashFlow" ? recalculatedRows : state.cashFlow,
         };
         const sbcBreakdowns = state.sbcBreakdowns;
         const danaBreakdowns = state.danaBreakdowns;
@@ -2667,7 +2741,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
           }
         }
       }
-      const updated = removeRowDeep(currentRows, rowId);
+      let updated = removeRowDeep(currentRows, rowId);
+      if (statement === "cashFlow") updated = normalizeWcStructure(updated);
       
       // Check if we removed the last child from Revenue, COGS, or SG&A
       // If so, convert them back to input
@@ -2800,11 +2875,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
     set((state) => {
       let updated = updateCashFlowRowMetadataDeep(state.cashFlow, rowId, patch);
       if (updated === state.cashFlow) return state;
-      // When classifying as WC, move row into wc_change.children if it is top-level
-      if (patch.historicalCfsNature === "reported_working_capital_movement") {
-        updated = normalizeWcStructure(updated);
-      }
+      // Keep canonical WC structure: any row that now resolves to working_capital must live in wc_change.children
+      updated = normalizeWcStructure(updated);
       return { ...state, cashFlow: updated };
+    });
+  },
+
+  confirmRowReview: (statement, rowId) => {
+    set((state) => {
+      const rows = state[statement];
+      if (!rows?.length) return state;
+      const updated = updateRowReviewTrustedDeep(rows, rowId);
+      if (updated === rows) return state;
+      return { ...state, [statement]: updated };
     });
   },
 
@@ -3100,7 +3183,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
     set((state) => {
       const wcRow = state.cashFlow.find((r) => r.id === "wc_change");
       if (!wcRow) return state;
-      const child = { ...row, children: undefined as Row[] | undefined };
+      // Phase 2: WC children must be routable; set driver and section so routing treats them as working_capital_schedule
+      const childWithMeta: Row = {
+        ...row,
+        children: undefined as Row[] | undefined,
+        cfsForecastDriver: "working_capital_schedule" as const,
+        cfsLink: {
+          ...(row.cfsLink ?? {}),
+          section: "operating" as const,
+          impact: row.cfsLink?.impact ?? "neutral",
+          description: row.cfsLink?.description ?? row.label,
+        },
+      };
+      const child = applyTaxonomyToRow(childWithMeta, "cashFlow");
       const atIndex = insertAtIndex ?? (wcRow.children?.length ?? 0);
       const cashFlow = addExistingChildToParent(state.cashFlow, "wc_change", child, atIndex);
       const allYears = [...(state.meta.years.historical || []), ...(state.meta.years.projection || [])];
@@ -3234,7 +3329,15 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }
     set((s) => ({
       balanceSheet: s.balanceSheet.map((r) =>
-        r.id === rowId ? { ...r, cashFlowBehavior: behavior } : r
+        r.id === rowId
+          ? {
+              ...r,
+              cashFlowBehavior: behavior,
+              forecastMetadataStatus: "trusted" as const,
+              taxonomyStatus: "trusted" as const,
+              classificationSource: "user" as const,
+            }
+          : r
       ),
     }));
     get().ensureWcChildrenFromBS();
@@ -3763,11 +3866,24 @@ export const useModelStore = create<ModelState & ModelActions>()(
     const state = get();
     const snapshot = state.projectStates[projectId];
     if (!snapshot) return;
-    // Apply snapshot (which sets isInitialized: true) and set current project id in one call
     applyProjectSnapshot(set, snapshot);
-    set((s) => ({
-      currentProjectId: projectId,
-    }));
+    // Backfill classification completeness for older projects or legacy paths (preserves user overrides)
+    // Then backfill taxonomy; then CFS metadata (historicalCfsNature where missing)
+    set((s) => {
+      const classificationBackfilled = backfillClassificationCompleteness({
+        incomeStatement: s.incomeStatement ?? [],
+        balanceSheet: s.balanceSheet ?? [],
+        cashFlow: s.cashFlow ?? [],
+      });
+      const backfilled = backfillTaxonomy(classificationBackfilled);
+      const cashFlowWithNature = backfillCfsMetadataNature(backfilled.cashFlow);
+      return {
+        incomeStatement: backfilled.incomeStatement,
+        balanceSheet: backfilled.balanceSheet,
+        cashFlow: cashFlowWithNature,
+        currentProjectId: projectId,
+      };
+    });
   },
 
   saveCurrentProject: () => {

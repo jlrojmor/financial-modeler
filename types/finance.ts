@@ -45,8 +45,8 @@ export interface Row {
   sectionOwner?: "revenue" | "cogs" | "sga" | "rd" | "other_operating" | "non_operating" | "tax" | "operating_expenses";
   /** Income Statement: true = above EBIT (operating), false = Interest & Other (non-operating). */
   isOperating?: boolean;
-  /** Who set classification; "user" = do not overwrite with AI; "fallback" = label-based rules when AI unavailable. */
-  classificationSource?: "user" | "ai" | "fallback";
+  /** Who set classification; "user" = do not overwrite with AI; "ai" | "fallback" = stored; "unresolved" = missing, needs review. */
+  classificationSource?: "user" | "ai" | "fallback" | "unresolved";
   /** AI suggestion reason (when classificationSource === "ai"). */
   classificationReason?: string;
   /** AI confidence 0–1 when classificationSource === "ai". */
@@ -70,6 +70,163 @@ export interface Row {
     | "reported_investing"
     | "reported_financing"
     | "reported_meta";
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // TAXONOMY METADATA (semantic row type families)
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /** IS taxonomy: granular row type. */
+  taxonomyType?:
+    // Revenue
+    | "revenue_product"
+    | "revenue_service"
+    | "revenue_subscription"
+    | "revenue_licensing"
+    | "revenue_other"
+    // Cost of Revenue
+    | "cogs_direct"
+    | "cogs_materials"
+    | "cogs_labor"
+    | "cogs_other"
+    // Operating Expenses
+    | "opex_sga"
+    | "opex_sales_marketing"
+    | "opex_general_admin"
+    | "opex_rd"
+    | "opex_danda"
+    | "opex_depreciation"
+    | "opex_amortization"
+    | "opex_restructuring"
+    | "opex_impairment"
+    | "opex_sbc"
+    | "opex_other"
+    // Non-Operating
+    | "non_op_interest_expense"
+    | "non_op_interest_income"
+    | "non_op_investment_gain"
+    | "non_op_investment_loss"
+    | "non_op_fx_gain"
+    | "non_op_fx_loss"
+    | "non_op_other_income"
+    | "non_op_other_expense"
+    // Tax
+    | "tax_current"
+    | "tax_deferred"
+    | "tax_benefit"
+    | "tax_expense"
+    // Calculated
+    | "calc_gross_profit"
+    | "calc_ebitda"
+    | "calc_ebit"
+    | "calc_ebt"
+    | "calc_net_income"
+    | "calc_margin"
+    // BS taxonomy types (assets)
+    | "asset_cash"
+    | "asset_short_term_investments"
+    | "asset_receivables"
+    | "asset_inventory"
+    | "asset_prepaid"
+    | "asset_other_current"
+    | "asset_ppe"
+    | "asset_intangibles"
+    | "asset_goodwill"
+    | "asset_rou_assets"
+    | "asset_investments"
+    | "asset_deferred_tax"
+    | "asset_other_fixed"
+    // BS taxonomy types (liabilities)
+    | "liab_payables"
+    | "liab_accruals"
+    | "liab_deferred_revenue"
+    | "liab_short_term_debt"
+    | "liab_current_lease"
+    | "liab_other_current"
+    | "liab_long_term_debt"
+    | "liab_deferred_tax"
+    | "liab_pension"
+    | "liab_lease_obligations"
+    | "liab_other_non_current"
+    // BS taxonomy types (equity)
+    | "equity_common_stock"
+    | "equity_preferred_stock"
+    | "equity_apic"
+    | "equity_treasury_stock"
+    | "equity_retained_earnings"
+    | "equity_aoci"
+    | "equity_minority_interest"
+    | "equity_other"
+    // BS calculated
+    | "calc_total"
+    // CFS taxonomy types (operating)
+    | "cfo_net_income"
+    | "cfo_depreciation"
+    | "cfo_amortization"
+    | "cfo_danda"
+    | "cfo_sbc"
+    | "cfo_deferred_tax"
+    | "cfo_impairment"
+    | "cfo_gain_loss"
+    | "cfo_non_cash_other"
+    | "cfo_wc_receivables"
+    | "cfo_wc_inventory"
+    | "cfo_wc_payables"
+    | "cfo_wc_accruals"
+    | "cfo_wc_deferred_revenue"
+    | "cfo_wc_other"
+    | "cfo_wc_total"
+    | "cfo_other"
+    // CFS taxonomy types (investing)
+    | "cfi_capex"
+    | "cfi_acquisitions"
+    | "cfi_asset_sales"
+    | "cfi_investments_purchase"
+    | "cfi_investments_sale"
+    | "cfi_intangibles"
+    | "cfi_other"
+    // CFS taxonomy types (financing)
+    | "cff_debt_issued"
+    | "cff_debt_repaid"
+    | "cff_equity_issued"
+    | "cff_share_repurchases"
+    | "cff_dividends"
+    | "cff_lease_payments"
+    | "cff_other"
+    // CFS taxonomy types (bridge/calc)
+    | "bridge_fx"
+    | "bridge_other"
+    | "calc_operating_cf"
+    | "calc_investing_cf"
+    | "calc_financing_cf"
+    | "calc_net_change";
+
+  /** Taxonomy category (high-level grouping). */
+  taxonomyCategory?:
+    // IS categories
+    | "revenue"
+    | "cost_of_revenue"
+    | "operating_expense"
+    | "non_operating"
+    | "tax"
+    // BS categories
+    | "current_asset"
+    | "fixed_asset"
+    | "current_liability"
+    | "non_current_liability"
+    | "equity"
+    // CFS categories
+    | "operating"
+    | "investing"
+    | "financing"
+    | "cash_bridge"
+    // Shared
+    | "calculated";
+
+  /** Who set the taxonomy; "system" = deterministic template; "user" = do not overwrite; "ai" | "fallback" = auto-derived. */
+  taxonomySource?: "system" | "user" | "ai" | "fallback";
+
+  /** Taxonomy trust status. "trusted" = system/user/high-confidence AI; "needs_review" = fallback/low-confidence AI; "unresolved" = no taxonomy. */
+  taxonomyStatus?: "trusted" | "needs_review" | "unresolved";
 }
 
 /**

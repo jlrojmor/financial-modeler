@@ -66,6 +66,22 @@ export function formatCurrencyDisplay(
 }
 
 /**
+ * Format an integer for display: thousands separators, no decimals, negatives in parentheses.
+ * Use for display-only tables (e.g. Cash Reconciliation). null/undefined → "—".
+ * Examples: 1089104 → "1,089,104"; -259635 → "(259,635)".
+ */
+export function formatIntegerWithSeparators(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  const formatter = new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+    useGrouping: true,
+  });
+  if (value < 0) return `(${formatter.format(-value)})`;
+  return formatter.format(value);
+}
+
+/**
  * Get currency symbol
  */
 export function getCurrencySymbol(currency: string): string {

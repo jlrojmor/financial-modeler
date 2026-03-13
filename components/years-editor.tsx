@@ -201,14 +201,14 @@ export default function YearsEditor() {
           <p className="text-xs text-amber-200 font-semibold mb-1">
             ⚠️ Important
           </p>
-          <p className="text-xs text-amber-300/90">
-            Changing years will:
+          <div className="text-xs text-amber-300/90">
+            <p className="mb-1">Changing years will:</p>
             <ul className="list-disc list-inside mt-1 space-y-0.5">
               <li>Add empty values for new years</li>
               <li>Remove values for deleted years</li>
               <li>Recalculate all formulas for all periods</li>
             </ul>
-          </p>
+          </div>
         </div>
       </div>
     </CollapsibleSection>

@@ -126,6 +126,7 @@ function flattenCfsWithParentId(rows: Row[], parentId?: string): Array<{ row: Ro
  * Dev validation: ensure every operating row's final subgroup matches its structural placement.
  * - working_capital ⇒ must be wc_change or child of wc_change (parentId === "wc_change")
  * - parentId === "wc_change" or row.id === "wc_change" ⇒ subgroup must be working_capital
+ * - top-level row with historicalCfsNature === reported_working_capital_movement ⇒ invalid (must be under wc_change)
  * Logs console warnings when mismatched. Call after normalization or from console (e.g. __validateOperatingCfsStructure(store.getState().cashFlow)).
  */
 export function validateOperatingCfsStructure(cashFlow: Row[]): { valid: boolean; errors: string[] } {
@@ -146,6 +147,9 @@ export function validateOperatingCfsStructure(cashFlow: Row[]): { valid: boolean
     }
     if ((row.id === "wc_change" || parentId === "wc_change") && sg !== "working_capital") {
       errors.push(`Row "${row.label}" (id=${row.id}) is structurally WC (parentId=${parentId}) but subgroup is ${sg ?? "null"}.`);
+    }
+    if (parentId == null && row.id !== "wc_change" && row.historicalCfsNature === "reported_working_capital_movement") {
+      errors.push(`Row "${row.label}" (id=${row.id}) is top-level but has historicalCfsNature reported_working_capital_movement; should be under wc_change.children.`);
     }
   }
   if (errors.length > 0 && typeof console !== "undefined" && console.warn) {

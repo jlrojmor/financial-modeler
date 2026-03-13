@@ -254,7 +254,7 @@ function CFSSectionComponent({
 
   const handleDrop = (
     e: React.DragEvent,
-    target: { type: "top-level"; rowId: string; globalIndex: number } | { type: "wc-container" } | { type: "wc-child"; rowId: string; wcChildIndex: number }
+    target: { type: "top-level"; rowId: string; globalIndex: number; targetSubgroup?: "non_cash" | "other_operating" } | { type: "wc-container" } | { type: "wc-child"; rowId: string; wcChildIndex: number }
   ) => {
     e.preventDefault();
     setDragOverId(null);
@@ -272,7 +272,7 @@ function CFSSectionComponent({
     if (target.type === "top-level") {
       const toIndex = target.globalIndex;
       if (isWcChild) {
-        moveCashFlowRowOutOfWc(rowId, toIndex);
+        moveCashFlowRowOutOfWc(rowId, toIndex, target.targetSubgroup);
       } else {
         const fromIndex = fromTopLevelIndex ?? currentRows.findIndex((r) => r.id === rowId);
         if (fromIndex === -1) return;
@@ -1005,8 +1005,18 @@ function CFSSectionComponent({
             if (block.type === "header") {
               const subgroupId = "subgroupId" in block ? block.subgroupId : undefined;
               const showAddInSubgroup = section.id === "operating" && subgroupId && subgroupId !== "earnings_base" && !isLocked;
+              const isOtherOperatingHeader = section.id === "operating" && subgroupId === "other_operating";
+              const otherOperatingInsertIndex = isOtherOperatingHeader ? (currentRows.findIndex((r) => r.id === "operating_cf") >= 0 ? currentRows.findIndex((r) => r.id === "operating_cf") : currentRows.length) : 0;
               return (
-                <div key={`cfo-h-${block.label}`} className="pt-2 first:pt-0">
+                <div
+                  key={`cfo-h-${block.label}`}
+                  className={`pt-2 first:pt-0 ${isOtherOperatingHeader ? `rounded border border-dashed p-2 -m-0.5 ${dragOverId === "header-other_operating" ? "ring-2 ring-emerald-500 border-slate-500" : "border-slate-600/50"}` : ""}`}
+                  {...(isOtherOperatingHeader ? {
+                    onDragOver: (e: React.DragEvent) => handleDragOver(e, `header-other_operating`),
+                    onDragLeave: handleDragLeave,
+                    onDrop: (e: React.DragEvent) => handleDrop(e, { type: "top-level", rowId: "operating_cf", globalIndex: otherOperatingInsertIndex, targetSubgroup: "other_operating" }),
+                  } : {})}
+                >
                   <div className="flex items-center justify-between gap-2 border-b border-slate-700/60 pb-1.5 mb-2">
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{block.label}</span>
                     {showAddInSubgroup && (
@@ -1250,7 +1260,12 @@ function CFSSectionComponent({
                 className={`rounded-lg border ${colors.border} ${colors.bg} p-3 ${dragOverId === row.id ? "ring-2 ring-emerald-500" : ""}`}
                 onDragOver={(e) => handleDragOver(e, row.id)}
                 onDragLeave={handleDragLeave}
-                onDrop={(e) => handleDrop(e, { type: "top-level", rowId: row.id, globalIndex })}
+                onDrop={(e) => handleDrop(e, {
+                  type: "top-level",
+                  rowId: row.id,
+                  globalIndex,
+                  ...(section.id === "operating" ? { targetSubgroup: getFinalOperatingSubgroup(row) === "other_operating" ? "other_operating" : "non_cash" } : {}),
+                })}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">

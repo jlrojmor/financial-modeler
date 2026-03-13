@@ -706,7 +706,7 @@ export type ModelActions = {
   /** Cash Flow builder: add a new row as a child of wc_change (for WC-classified rows). */
   addWcChild: (row: Row, insertAtIndex?: number) => void;
   /** Cash Flow builder: move a row out of Working Capital (becomes top-level operating item, no longer in WC subtotal). */
-  moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number) => void;
+  moveCashFlowRowOutOfWc: (rowId: string, insertAtTopLevelIndex?: number, targetSubgroup?: "non_cash" | "other_operating") => void;
   /** Balance Sheet builder: reorder items within a category (e.g., current_assets, fixed_assets). */
   reorderBalanceSheetCategory: (category: "current_assets" | "fixed_assets" | "current_liabilities" | "non_current_liabilities" | "equity", fromIndex: number, toIndex: number) => void;
   /** Balance Sheet builder: set cash flow behavior for a row (WC/CFI/CFF/non-cash). */
@@ -3166,7 +3166,16 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let cashFlow = removeRowDeep(state.cashFlow, rowId);
       const wcRow = cashFlow.find((r) => r.id === "wc_change");
       if (!wcRow) return state;
-      const child = { ...row, children: undefined };
+      const child: Row = {
+        ...row,
+        children: undefined,
+        historicalCfsNature: "reported_working_capital_movement",
+        cfsLink: { ...(row.cfsLink ?? {}), section: "operating" as const, impact: row.cfsLink?.impact ?? "neutral", description: row.cfsLink?.description ?? row.label },
+        cfsForecastDriver: "working_capital_schedule" as const,
+        classificationSource: "user" as const,
+        forecastMetadataStatus: "trusted" as const,
+        taxonomyStatus: "trusted" as const,
+      };
       const atIndex = insertAtIndex ?? (wcRow.children?.length ?? 0);
       cashFlow = addExistingChildToParent(cashFlow, "wc_change", child, atIndex);
       const allYears = [...(state.meta.years.historical || []), ...(state.meta.years.projection || [])];
@@ -3208,7 +3217,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     });
   },
 
-  moveCashFlowRowOutOfWc: (rowId, insertAtTopLevelIndex) => {
+  moveCashFlowRowOutOfWc: (rowId, insertAtTopLevelIndex, targetSubgroupFromUi) => {
     set((state) => {
       const wcRow = state.cashFlow.find((r) => r.id === "wc_change");
       const childIndex = wcRow?.children?.findIndex((c) => c.id === rowId) ?? -1;
@@ -3220,7 +3229,25 @@ export const useModelStore = create<ModelState & ModelActions>()(
       );
       const wcChangeIndex = cashFlow.findIndex((r) => r.id === "wc_change");
       const insertAt = insertAtTopLevelIndex ?? Math.min(wcChangeIndex + 1, cashFlow.length);
-      const topLevelRow = { ...row, children: undefined };
+      // Use UI-provided target subgroup when moving out of WC; else infer from insert position.
+      const rowAfter = cashFlow[insertAt];
+      const targetSubgroup: "non_cash" | "other_operating" =
+        targetSubgroupFromUi === "other_operating" || targetSubgroupFromUi === "non_cash"
+          ? targetSubgroupFromUi
+          : rowAfter && (rowAfter.id === "other_operating" || rowAfter.id === "operating_cf")
+            ? "other_operating"
+            : "non_cash";
+      const historicalCfsNature = targetSubgroup === "other_operating" ? "reported_operating_other" : "reported_non_cash_adjustment";
+      const topLevelRow: Row = {
+        ...row,
+        children: undefined,
+        historicalCfsNature,
+        cfsLink: { ...(row.cfsLink ?? {}), section: "operating" as const, impact: row.cfsLink?.impact ?? "neutral", description: row.cfsLink?.description ?? row.label },
+        cfsForecastDriver: "manual_other" as const,
+        classificationSource: "user" as const,
+        forecastMetadataStatus: "trusted" as const,
+        taxonomyStatus: "trusted" as const,
+      };
       cashFlow = [...cashFlow.slice(0, insertAt), topLevelRow, ...cashFlow.slice(insertAt)];
       const allYears = [...(state.meta.years.historical || []), ...(state.meta.years.projection || [])];
       let recalculated = cashFlow;

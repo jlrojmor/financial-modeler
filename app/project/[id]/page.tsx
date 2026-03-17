@@ -3,10 +3,23 @@
 import { useEffect, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { useModelStore } from "@/store/useModelStore";
+import type { WizardStepId } from "@/types/finance";
 import SidebarSteps from "@/components/sidebar-steps";
 import BuilderPanel from "@/components/builder-panel";
 import ExcelPreview from "@/components/excel-preview";
 import ISBuildPreview from "@/components/is-build-preview";
+import CompanyContextPreview from "@/components/company-context-preview";
+
+/** Explicit mapping for workspace header: do not derive from sidebar labels. */
+const STEP_LABEL: Record<WizardStepId, string> = {
+  company_context: "Company Context",
+  historicals: "Historicals",
+  statement_structure: "Statement Structure",
+  forecast_drivers: "Forecast Drivers",
+  schedules: "Schedules",
+  projected_statements: "Projected Statements",
+  dcf: "DCF Valuation",
+};
 
 export default function ProjectPage() {
   const router = useRouter();
@@ -105,30 +118,45 @@ export default function ProjectPage() {
   }
 
   const projectName = projects.find((p) => p.id === projectId)?.name ?? "Project";
+  const stepLabel = STEP_LABEL[currentStepId] ?? currentStepId;
 
   return (
     <main className="h-screen w-screen overflow-hidden flex flex-col">
-      <div className="flex-shrink-0 flex items-center gap-3 border-b border-slate-800 bg-slate-900/80 px-3 py-2">
-        <button
-          type="button"
-          onClick={handleBackToProjects}
-          className="text-sm text-slate-400 hover:text-slate-200 transition"
-        >
-          ← Projects
-        </button>
-        <span className="text-slate-600">|</span>
-        <span className="text-sm font-medium text-slate-200 truncate">{projectName}</span>
-      </div>
+      <header className="flex-shrink-0 border-b border-slate-800 bg-slate-900/80 px-4 py-3 min-h-[72px] flex flex-col justify-center">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleBackToProjects}
+            className="text-sm text-slate-400 hover:text-slate-200 transition shrink-0"
+          >
+            ← Projects
+          </button>
+          <span className="text-slate-600 shrink-0">|</span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-slate-100 truncate">
+              Financial Model Builder
+            </div>
+            <div className="text-xs text-slate-400 truncate">
+              {projectName} • {stepLabel}
+            </div>
+          </div>
+        </div>
+      </header>
       <div className="flex-1 grid grid-cols-[260px_1fr] min-h-0">
         <SidebarSteps />
         <div className="h-full w-full p-4 overflow-hidden">
           <div className="h-full grid grid-cols-[40%_60%] gap-4 overflow-hidden">
             <BuilderPanel />
-            {currentStepId === "is_build" ? (
+            {currentStepId === "company_context" ? (
+              <CompanyContextPreview />
+            ) : currentStepId === "statement_structure" ? (
+              <ExcelPreview />
+            ) : currentStepId === "forecast_drivers" ? (
               <ISBuildPreview />
-            ) : currentStepId === "bs_build" ? (
-              // In BS Build, focus the real-time preview on the Balance Sheet structure only.
+            ) : currentStepId === "schedules" ? (
               <ExcelPreview focusStatement="balance" />
+            ) : currentStepId === "projected_statements" ? (
+              <ExcelPreview />
             ) : (
               <ExcelPreview />
             )}

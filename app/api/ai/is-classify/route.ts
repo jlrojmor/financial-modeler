@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import type { CompanyContext } from "@/types/company-context";
+import { buildModelingContext, getModelingContextSummaryForPrompt } from "@/lib/modeling-context";
 
 export type ISSectionOwner =
   | "revenue"
@@ -33,13 +35,14 @@ const SECTION_OWNERS: ISSectionOwner[] = [
   "tax",
 ];
 
-const PROMPT = `You are a financial modeling expert. Classify each Income Statement line item into exactly one section and whether it is operating or non-operating.
+const PROMPT_BASE = `You are a financial modeling expert. Classify each Income Statement line item into exactly one section and whether it is operating or non-operating.
 
 RULES:
 - Return STRICT JSON only: an array of objects with keys: sectionOwner, isOperating (boolean), confidence (0-1), reason (max 200 chars).
 - sectionOwner must be exactly one of: revenue, cogs, sga, rd, other_operating, non_operating, tax.
 - Operating = included in EBIT / operating profit (revenue, COGS, SG&A, R&D, other operating, D&A).
 - Non-operating = below EBIT: interest, investment gains/losses, other income/expense, tax.
+- Use the company context below to weight suggestions (e.g. SaaS → deferred revenue/SBC/subscription; wholesale → COGS/opex; healthcare lab → relevant peer patterns). Do not force a single answer; suggest the best fit and mention context in reason when relevant.
 
 DEFINITIONS:
 - revenue: Top-line sales, subscriptions, fees.
@@ -50,7 +53,6 @@ DEFINITIONS:
 - non_operating: Interest expense/income, gains/losses on investments, FX, other below EBIT.
 - tax: Income tax expense.
 
-Input items (one per line, JSON):
 `;
 
 function buildItemsSummary(items: ISClassifyItemInput[]): string {
@@ -66,6 +68,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const items: ISClassifyItemInput[] = Array.isArray(body.items) ? body.items : [];
+    const companyContext = body.companyContext as CompanyContext | undefined;
     if (items.length === 0) {
       return NextResponse.json({ suggestions: [] });
     }
@@ -84,8 +87,16 @@ export async function POST(request: Request) {
       );
     }
 
+    const modelingProfile = buildModelingContext(companyContext);
+    const contextSummary = getModelingContextSummaryForPrompt(modelingProfile ?? null);
+    const companyBlock = contextSummary
+      ? `\nCOMPANY CONTEXT (use to weight suggestions; do not force one answer):\n${contextSummary}\n\n`
+      : "";
+
     const prompt =
-      PROMPT +
+      PROMPT_BASE +
+      companyBlock +
+      "Input items (one per line, JSON):\n" +
       buildItemsSummary(items) +
       "\n\nRespond with ONLY a JSON array of suggestion objects (same order as input), no markdown.";
 

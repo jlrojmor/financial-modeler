@@ -7,6 +7,8 @@ import { formatCurrencyDisplay, storedToDisplay, displayToStored, getUnitLabel, 
 import { checkBalanceSheetBalance, computeBalanceSheetTotalsWithOverrides, computeRowValue } from "@/lib/calculations";
 import { resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
+import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
+import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
 import {
   getWcScheduleItems,
   computeWcProjectedBalances,
@@ -597,6 +599,11 @@ function StatementTable({
         const hasTopBorder = isSubtotal || isCalculatedWithChildren || isKeyCalculation || isParentSubtotal || isBalanceSheetSubtotal || isCFSSubtotal;
         const shouldBeBold = isSubtotal || isKeyCalculation || isParentSubtotal || isCalculatedWithChildren || isBalanceSheetSubtotal || isCFSSubtotal;
 
+        // Income Statement: P&L anchor rows (institutional-style hierarchy; no heavy fill or bright colors)
+        const IS_ANCHOR_ROW_IDS = ["rev", "gross_profit", "ebit", "ebt", "net_income"];
+        const isISAnchorRow = isIncomeStatement && IS_ANCHOR_ROW_IDS.includes(row.id);
+        const isISNetIncome = isIncomeStatement && row.id === "net_income";
+
         // For Balance Sheet: when a main section (Assets, Liabilities, Equity) is collapsed,
         // keep only the key totals visible. For category collapse, keep category subtotal.
         const keepWhenSectionCollapsed =
@@ -635,6 +642,10 @@ function StatementTable({
         
         const labelClass = isMargin
           ? "text-slate-400 italic text-[11px]"
+          : isISNetIncome
+          ? "text-slate-200 font-bold"
+          : isISAnchorRow
+          ? "text-slate-200 font-semibold"
           : shouldBeBold
           ? "text-slate-200 font-bold"
           : "text-slate-200";
@@ -647,7 +658,7 @@ function StatementTable({
             {/* Section Header for Balance Sheet (Assets, Liabilities, Shareholders' Equity) */}
             {/* Section Header for Cash Flow Statement (Operating, Investing, Financing) */}
             {isSectionStart && currentSection && (
-              <tr className="border-t-2 border-slate-600">
+              <tr className="border-t border-slate-600">
                 <td colSpan={1 + years.length} className={`px-3 py-2.5 ${sectionColors[currentSection]?.bg || "bg-slate-900/50"}`}>
                   <button
                     type="button"
@@ -714,10 +725,12 @@ function StatementTable({
             {/* Main row */}
             {!shouldHideRow && (
             <tr
-              key={`${row.id}-${flatIndex}`} 
-              className={`border-b border-slate-900 hover:bg-slate-900/40 ${hasTopBorder ? "border-t-2 border-slate-300" : ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/30" : ""}`}
+              key={`${row.id}-${flatIndex}`}
+              className={`border-b border-slate-900 hover:bg-slate-900/40 ${
+                isISNetIncome ? "border-t border-slate-400 bg-slate-900/50" : isISAnchorRow ? "border-t border-slate-500 bg-slate-900/35" : hasTopBorder ? "border-t-2 border-slate-300" : ""
+              } ${shouldBeBold && isBalanceSheet ? "bg-slate-800/30" : ""}`}
             >
-            <td className={`px-3 py-2 ${labelClass} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
+            <td className={`px-3 ${isISAnchorRow ? "py-2.5" : "py-2"} ${labelClass} ${isISNetIncome ? "bg-slate-900/50" : isISAnchorRow ? "bg-slate-900/35" : ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
               <div
                 style={{
                   paddingLeft: isCashFlow && parentId === "wc_change" ? 28 : depth * 14,
@@ -977,7 +990,11 @@ function StatementTable({
                 cellClass += " italic text-[11px]";
               }
               
-              if (shouldBeBold) {
+              if (isISNetIncome) {
+                cellClass += " font-bold";
+              } else if (isISAnchorRow) {
+                cellClass += " font-semibold";
+              } else if (shouldBeBold) {
                 cellClass += " font-bold";
               }
               
@@ -996,8 +1013,9 @@ function StatementTable({
                 ? "0" 
                 : (display || (isInput ? "" : "—"));
               
+              const valueCellBg = isISNetIncome ? "bg-slate-900/50" : isISAnchorRow ? "bg-slate-900/35" : "";
               return (
-                <td key={`${row.id}-${y}`} className={`px-3 py-2 ${cellClass} ${getYearCellClassName?.(y) ?? ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
+                <td key={`${row.id}-${y}`} className={`px-3 ${isISAnchorRow ? "py-2.5" : "py-2"} ${cellClass} ${getYearCellClassName?.(y) ?? ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""} ${valueCellBg}`}>
                   {displayValue}
                 </td>
               );
@@ -1034,6 +1052,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
+  const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
   const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
@@ -1158,7 +1177,22 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
     [incomeStatement, balanceSheet, cashFlow]
   );
   const projectedRevenue = useMemo(() => {
-    if (!incomeStatement?.length || !revenueProjectionConfig?.items || projectionYears.length === 0) return undefined;
+    if (!incomeStatement?.length || projectionYears.length === 0) return undefined;
+    const v1Config = revenueForecastConfigV1 ?? { rows: {} };
+    const v1HasRows = Object.keys(v1Config.rows ?? {}).length > 0;
+    if (v1HasRows && validateRevenueForecastV1(incomeStatement, v1Config).valid) {
+      const { result, valid } = computeRevenueProjectionsV1(
+        incomeStatement,
+        v1Config,
+        projectionYears,
+        lastHistoricYear,
+        allStatementsForProj,
+        sbcBreakdowns ?? {},
+        danaBreakdowns ?? {}
+      );
+      if (valid && Object.keys(result).length > 0) return result;
+    }
+    if (!revenueProjectionConfig?.items || Object.keys(revenueProjectionConfig.items).length === 0) return undefined;
     return computeRevenueProjections(
       incomeStatement,
       revenueProjectionConfig,
@@ -1171,6 +1205,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
     );
   }, [
     incomeStatement,
+    revenueForecastConfigV1,
     revenueProjectionConfig,
     projectionYears,
     lastHistoricYear,

@@ -208,7 +208,9 @@ function CFSSectionComponent({
   const confirmedRowIds = useModelStore((s) => s.confirmedRowIds);
   const toggleConfirmedRow = useModelStore((s) => s.toggleConfirmedRow);
   const confirmRowReview = useModelStore((s) => s.confirmRowReview);
+  const renameRow = useModelStore((s) => s.renameRow);
   const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
+  const companyContext = useModelStore((s) => s.companyContext);
   // Always use currentCashFlow from store as the source of truth
   const currentRows = currentCashFlow;
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -220,9 +222,27 @@ function CFSSectionComponent({
   const [suggestedCFFExpanded, setSuggestedCFFExpanded] = useState(false);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [addingWithAI, setAddingWithAI] = useState(false);
+  const [editingLabelRowId, setEditingLabelRowId] = useState<string | null>(null);
+  const [editingLabelValue, setEditingLabelValue] = useState("");
 
   const toggleConfirmed = (rowId: string) => {
     toggleConfirmedRow(rowId);
+  };
+
+  const handleEditRow = (rowId: string) => {
+    const row = currentRows.find((r) => r.id === rowId) ?? currentRows.find((r) => r.id === "wc_change")?.children?.find((c) => c.id === rowId);
+    if (row) {
+      setEditingLabelRowId(rowId);
+      setEditingLabelValue(row.label);
+    }
+  };
+
+  const handleSaveEditRowLabel = () => {
+    if (editingLabelRowId && editingLabelValue.trim()) {
+      renameRow("cashFlow", editingLabelRowId, editingLabelValue.trim());
+      setEditingLabelRowId(null);
+      setEditingLabelValue("");
+    }
   };
 
   const sectionStartIndex = currentRows.findIndex((r) => {
@@ -876,6 +896,7 @@ function CFSSectionComponent({
           label: newItemLabel.trim(),
           sectionContext: section.id,
           ...(section.id === "operating" && subgroupWithNature ? { operatingSubgroup: subgroupWithNature } : {}),
+          companyContext: companyContext ?? undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1169,8 +1190,23 @@ function CFSSectionComponent({
                                   </span>
                                 )}
                                 <div className="min-w-0">
-                                  <span className={`text-sm font-medium ${colors.text} truncate`}>{child.label}</span>
-                                  {child.id === "other_wc_reclass" && (
+                                  {editingLabelRowId === child.id ? (
+                                    <span className="inline-flex items-center gap-1 flex-wrap">
+                                      <input
+                                        type="text"
+                                        value={editingLabelValue}
+                                        onChange={(e) => setEditingLabelValue(e.target.value)}
+                                        onKeyDown={(e) => { if (e.key === "Enter") handleSaveEditRowLabel(); if (e.key === "Escape") { setEditingLabelRowId(null); setEditingLabelValue(""); } }}
+                                        className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-sm text-slate-200 min-w-[120px]"
+                                        autoFocus
+                                      />
+                                      <button type="button" onClick={handleSaveEditRowLabel} className="text-xs text-emerald-400 hover:text-emerald-300">Save</button>
+                                      <button type="button" onClick={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }} className="text-xs text-slate-400 hover:text-slate-300">Cancel</button>
+                                    </span>
+                                  ) : (
+                                    <span className={`text-sm font-medium ${colors.text} truncate`}>{child.label}</span>
+                                  )}
+                                  {child.id === "other_wc_reclass" && editingLabelRowId !== child.id && (
                                     <div className="text-[10px] text-slate-500 italic mt-0.5">Optional manual reclass. Leave blank unless the company reports a specific working-capital reclassification item.</div>
                                   )}
                                   {(() => {
@@ -1203,12 +1239,15 @@ function CFSSectionComponent({
                                 <button
                                   type="button"
                                   onClick={() => toggleConfirmed(child.id)}
-                                  className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
-                                    isConfirmed ? "bg-slate-600 text-slate-300 hover:bg-slate-500" : "bg-emerald-600 text-white hover:bg-emerald-500"
-                                  }`}
+                                  className="text-xs text-blue-400 hover:text-blue-300"
                                 >
-                                  {isConfirmed ? "Edit" : "Done"}
+                                  {isConfirmed ? "Edit values" : "Collapse"}
                                 </button>
+                                {!section.standardItems.includes(child.id) && (
+                                  <button type="button" onClick={() => handleEditRow(child.id)} className="text-xs text-slate-400 hover:text-slate-300">
+                                    Edit row
+                                  </button>
+                                )}
                                 {!isLocked && (
                                   <button type="button" onClick={() => handleRemoveItem(child.id)} className="text-xs text-red-400 hover:text-red-300">
                                     Remove
@@ -1286,9 +1325,24 @@ function CFSSectionComponent({
                           ({getCFOSign(row)})
                         </span>
                       )}
-                      <span className={`text-sm font-medium ${colors.text}`}>
-                        {row.label}
-                      </span>
+                      {editingLabelRowId === row.id ? (
+                        <span className="inline-flex items-center gap-1 flex-wrap">
+                          <input
+                            type="text"
+                            value={editingLabelValue}
+                            onChange={(e) => setEditingLabelValue(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") handleSaveEditRowLabel(); if (e.key === "Escape") { setEditingLabelRowId(null); setEditingLabelValue(""); } }}
+                            className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-sm text-slate-200 min-w-[120px]"
+                            autoFocus
+                          />
+                          <button type="button" onClick={handleSaveEditRowLabel} className="text-xs text-emerald-400 hover:text-emerald-300">Save</button>
+                          <button type="button" onClick={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }} className="text-xs text-slate-400 hover:text-slate-300">Cancel</button>
+                        </span>
+                      ) : (
+                        <span className={`text-sm font-medium ${colors.text}`}>
+                          {row.label}
+                        </span>
+                      )}
                       {!isTopConfirmed && isCalculated && (row.id === "net_income" || row.id === "sbc") && (
                         <span className="text-xs text-slate-400 italic">(Calculated)</span>
                       )}
@@ -1335,12 +1389,15 @@ function CFSSectionComponent({
                     <button
                       type="button"
                       onClick={() => toggleConfirmed(row.id)}
-                      className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
-                        isTopConfirmed ? "bg-slate-600 text-slate-300 hover:bg-slate-500" : "bg-emerald-600 text-white hover:bg-emerald-500"
-                      }`}
+                      className="text-xs text-blue-400 hover:text-blue-300"
                     >
-                      {isTopConfirmed ? "Edit" : "Done"}
+                      {isTopConfirmed ? "Edit values" : "Collapse"}
                     </button>
+                    {!isStandard && !isTotalRow && (
+                      <button type="button" onClick={() => handleEditRow(row.id)} className="text-xs text-slate-400 hover:text-slate-300">
+                        Edit row
+                      </button>
+                    )}
                     {!isProtected && !isLocked && (
                       <button
                         type="button"
@@ -1778,6 +1835,7 @@ export default function CashFlowBuilder() {
   const cashFlow = useModelStore((s) => s.cashFlow);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const incomeStatement = useModelStore((s) => s.incomeStatement);
+  const companyContext = useModelStore((s) => s.companyContext);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns);
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const danaLocation = useModelStore((s) => s.danaLocation);

@@ -3,7 +3,26 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { Row, WizardStepId, EmbeddedDisclosureItem, EmbeddedDisclosureType } from "@/types/finance";
-import { WIZARD_STEPS } from "@/types/finance";
+import { WIZARD_STEPS, migrateStepId, migrateCompletedStepIds } from "@/types/finance";
+import type { CompanyContext, SuggestedComp, IndustryBenchmarks, ModelingImplications, WaccValuationContext, CompDerivedMetrics } from "@/types/company-context";
+import { getDefaultCompanyContext, getCompanyContextInputsHash } from "@/types/company-context";
+import { runCompanyResearch } from "@/lib/company-research";
+import {
+  interpretCompanyFromInputs,
+  debugInterpretedProfile,
+  classifySubtype,
+  getAllowedBusinessModelsForPeers,
+  runPeerResearch,
+  computeConfidence,
+  getNotEnoughEvidenceMessage,
+  getBenchmarksFromEvidence,
+  getWaccContextFromProfile,
+  getModelingImplicationsFromProfile,
+  getAiContextFromProfile,
+  buildResearchEvidenceV2,
+  resolveComp,
+  getCompDerivedMetrics,
+} from "@/lib/company-context-interpretation";
 import type {
   RevenueProjectionConfig,
   RevenueProjectionMethod,
@@ -11,6 +30,8 @@ import type {
   RevenueBreakdownItem,
 } from "@/types/revenue-projection";
 import { DEFAULT_REVENUE_PROJECTION_CONFIG } from "@/types/revenue-projection";
+import type { RevenueForecastConfigV1, RevenueForecastRowConfigV1 } from "@/types/revenue-forecast-v1";
+import { DEFAULT_REVENUE_FORECAST_CONFIG_V1 } from "@/types/revenue-forecast-v1";
 import { recomputeCalculations, computeRowValue } from "@/lib/calculations";
 import {
   createIncomeStatementTemplate,
@@ -19,7 +40,9 @@ import {
 } from "@/lib/statement-templates";
 import { getRowsForCategory } from "@/lib/bs-category-mapper";
 import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
+import { TEMPLATE_IS_ROW_IDS } from "@/lib/is-classification";
 import { isCoreBsRow, getCoreLockedBehavior } from "@/lib/bs-core-rows";
+import { CFS_ANCHOR_HISTORICAL_NATURE } from "@/lib/cfs-forecast-drivers";
 import { CAPEX_IB_DEFAULT_USEFUL_LIVES, isLegacyWrongUsefulLives, CAPEX_DEFAULT_BUCKET_IDS } from "@/lib/capex-defaults";
 import { getWcScheduleItems, computeWcProjectedBalances, type WcDriverState } from "@/lib/working-capital-schedule";
 import {
@@ -58,6 +81,27 @@ function clearRowValues(rows: Row[]): Row[] {
     values: {},
     children: r.children?.length ? clearRowValues(r.children) : [],
   }));
+}
+
+/** Apply comp-derived metrics to WACC and market_data when source is accepted_comps. */
+function applyCompDerivedToContext(compDerivedMetrics: CompDerivedMetrics | undefined): { wacc: Partial<WaccValuationContext>; market: Partial<CompanyContext["market_data"]> } {
+  if (!compDerivedMetrics || compDerivedMetrics.source !== "accepted_comps") return { wacc: {}, market: {} };
+  const wacc: Partial<WaccValuationContext> = {};
+  if (compDerivedMetrics.medianBeta != null) {
+    wacc.betaEstimate = compDerivedMetrics.medianBeta;
+    wacc.selectedBetaEstimate = compDerivedMetrics.medianBeta;
+  }
+  if (compDerivedMetrics.betaRangeMin != null) wacc.peerBetaRangeMin = compDerivedMetrics.betaRangeMin;
+  if (compDerivedMetrics.betaRangeMax != null) wacc.peerBetaRangeMax = compDerivedMetrics.betaRangeMax;
+  if (compDerivedMetrics.medianNetDebtEbitda != null || (compDerivedMetrics.leverageRangeMin != null && compDerivedMetrics.leverageRangeMax != null)) {
+    const parts: string[] = [];
+    if (compDerivedMetrics.medianNetDebtEbitda != null) parts.push(`median ${compDerivedMetrics.medianNetDebtEbitda.toFixed(2)}x`);
+    if (compDerivedMetrics.leverageRangeMin != null && compDerivedMetrics.leverageRangeMax != null)
+      parts.push(`range ${compDerivedMetrics.leverageRangeMin}–${compDerivedMetrics.leverageRangeMax}x`);
+    wacc.leverageBenchmark = `Net debt / EBITDA (from comps): ${parts.join("; ")}`;
+  }
+  const market = compDerivedMetrics.medianBeta != null ? { beta: compDerivedMetrics.medianBeta } : {};
+  return { wacc, market };
 }
 
 function isOpexRow(row: Row): boolean {
@@ -186,6 +230,22 @@ function findRowDeep(rows: Row[], rowId: string): Row | null {
     }
   }
   return null;
+}
+
+/** Collect row id and all descendant ids (for cleanup when removing a row). */
+function collectSubtreeIds(row: Row): string[] {
+  const out: string[] = [row.id];
+  (row.children ?? []).forEach((c) => out.push(...collectSubtreeIds(c)));
+  return out;
+}
+
+/** Update a row in the tree by id (replaces with result of updater). */
+function updateRowDeep(rows: Row[], rowId: string, updater: (row: Row) => Row): Row[] {
+  return rows.map((r) => {
+    if (r.id === rowId) return updater(r);
+    if (r.children?.length) return { ...r, children: updateRowDeep(r.children, rowId, updater) };
+    return r;
+  });
 }
 
 /** Collect ids of rows that have children (so we don't overwrite their values with sum-of-children in recompute). */
@@ -451,8 +511,9 @@ export type ProjectSnapshot = {
   sbcDisclosureEnabled: boolean;
   danaLocation: "cogs" | "sga" | "both" | null;
   danaBreakdowns: Record<string, number>;
-  currentStepId: WizardStepId;
-  completedStepIds: WizardStepId[];
+  /** May be legacy step id when loading from saved project; migrate in applyProjectSnapshot. */
+  currentStepId: WizardStepId | string;
+  completedStepIds: (WizardStepId | string)[];
   isModelComplete: boolean;
   sectionLocks: Record<string, boolean>;
   sectionExpanded: Record<string, boolean>;
@@ -461,6 +522,8 @@ export type ProjectSnapshot = {
   wcExcludedIds: string[];
   /** IS Build: how each revenue stream/sub-item is forecasted (method + inputs) */
   revenueProjectionConfig: RevenueProjectionConfig;
+  /** Revenue forecast v1 (roles, methods, parameters). */
+  revenueForecastConfigV1: RevenueForecastConfigV1;
   /** IS Build: COGS as % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' = one % for all years, 'custom' = per-year %. */
@@ -527,6 +590,8 @@ export type ProjectSnapshot = {
   intangiblesPctOfCapex: number;
   intangiblesHasHistoricalAmortization: boolean;
   intangiblesHistoricalAmortizationByYear: Record<string, number>;
+  /** Company Context (step before Historicals): user inputs, AI context, overrides. */
+  companyContext: CompanyContext;
 };
 
 export type ProjectMeta = {
@@ -582,8 +647,10 @@ export type ModelState = {
   confirmedRowIds: Record<string, boolean>; // { [rowId]: isConfirmed }
   /** BS CA/CL row IDs user removed from CFO WC section; kept so they stay excluded after save */
   wcExcludedIds: string[];
-  /** IS Build: revenue projection method + inputs per stream/sub-item */
+  /** IS Build: revenue projection method + inputs per stream/sub-item (legacy). */
   revenueProjectionConfig: RevenueProjectionConfig;
+  /** Revenue forecast v1: structured roles/methods (Forecast Drivers → Revenue). When valid, used for projected revenue. */
+  revenueForecastConfigV1: RevenueForecastConfigV1;
   /** IS Build: COGS % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' | 'custom' per COGS line. */
@@ -649,6 +716,8 @@ export type ModelState = {
   intangiblesHistoricalAmortizationByYear: Record<string, number>;
   /** BS Build preview only: rowId -> year -> value. WC schedule, PP&E, Intangibles schedule outputs. Not persisted. */
   bsBuildPreviewOverrides: Record<string, Record<string, number>>;
+  /** Company Context step: user inputs, AI context, overrides. */
+  companyContext: CompanyContext;
 };
 
 export type ModelActions = {
@@ -658,6 +727,34 @@ export type ModelActions = {
   completeCurrentStep: () => void;
   saveCurrentStep: () => void;
   continueToNextStep: () => void;
+
+  /** Company Context: update user input fields. */
+  updateCompanyContextInputs: (patch: Partial<CompanyContext["user_inputs"]>) => void;
+  /** Company Context: run AI enrichment (mock for now) and set ai_context + market_data. */
+  generateCompanyContext: () => Promise<void>;
+  /** Company Context: update one AI context card (user edit); stored in user_overrides for that key. */
+  updateCompanyContextCard: (key: keyof CompanyContext["ai_context"], value: string) => void;
+  /** Company Context: override a market/AI numeric value (e.g. beta). */
+  updateCompanyContextOverride: (key: string, value: string | number | undefined) => void;
+  /** Company Context: replace suggested comps list (e.g. after user edit). */
+  setSuggestedComps: (comps: SuggestedComp[]) => void;
+  /** Company Context: update one suggested comp by id. */
+  updateSuggestedComp: (id: string, patch: Partial<SuggestedComp>) => void;
+  /** Re-resolve and enrich a comp by id (e.g. after user edits name/ticker). */
+  enrichSuggestedComp: (id: string) => void;
+  /** Company Context: add a suggested comp. */
+  /** Add a manual comp; returns the new comp's id so the UI can open it in edit mode. */
+  addSuggestedComp: (comp: Omit<SuggestedComp, "id">) => string;
+  /** Company Context: remove a suggested comp by id. */
+  removeSuggestedComp: (id: string) => void;
+  /** Company Context: update industry benchmarks (merge patch). */
+  updateIndustryBenchmarks: (patch: Partial<IndustryBenchmarks>) => void;
+  /** Company Context: update modeling implications (merge patch). */
+  updateModelingImplications: (patch: Partial<ModelingImplications>) => void;
+  /** Company Context: update WACC / market valuation context (merge patch). */
+  updateWaccContext: (patch: Partial<WaccValuationContext>) => void;
+  /** Company Context: accept a suggested comp (mark as accepted). */
+  acceptSuggestedComp: (id: string) => void;
 
   // Row management - generic for any statement
   addChildRow: (statement: "incomeStatement" | "balanceSheet" | "cashFlow", parentId: string, label: string) => void;
@@ -750,12 +847,16 @@ export type ModelActions = {
   resetCashFlowInputs: () => void;
 
   // Legacy/backward compatibility
-  addRevenueStream: (label: string) => void;
+  addRevenueStream: (label: string) => string | undefined;
+  /** Add a child breakdown under a revenue stream (v1 hierarchy). */
+  addRevenueStreamChild: (parentStreamId: string, label: string) => void;
   updateIncomeStatementValue: (rowId: string, year: string, value: number) => void;
 
   // IS Build: revenue projection config (method + inputs per stream/sub-item)
   setRevenueProjectionMethod: (itemId: string, method: RevenueProjectionMethod) => void;
   setRevenueProjectionInputs: (itemId: string, inputs: RevenueProjectionInputs) => void;
+  /** Revenue forecast v1: set/update config for one row (role, method, parameters, reason). */
+  setRevenueForecastRowV1: (rowId: string, patch: Partial<RevenueForecastRowConfigV1>) => void;
   /** IS Build: set COGS as % of revenue (0–100) for a projected revenue line. */
   setCogsPctForRevenueLine: (revenueLineId: string, pct: number) => void;
   setCogsPctModeForRevenueLine: (revenueLineId: string, mode: "constant" | "custom") => void;
@@ -917,7 +1018,7 @@ const defaultState: ModelState = {
   danaLocation: null,
   danaBreakdowns: {},
 
-  currentStepId: "historicals",
+  currentStepId: "company_context",
   completedStepIds: [],
   isModelComplete: false,
 
@@ -929,6 +1030,7 @@ const defaultState: ModelState = {
   confirmedRowIds: {},
   wcExcludedIds: [],
   revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+  revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
   cogsPctByRevenueLine: {},
   cogsPctModeByRevenueLine: {},
   cogsPctByRevenueLineByYear: {},
@@ -974,6 +1076,7 @@ const defaultState: ModelState = {
   intangiblesHasHistoricalAmortization: false,
   intangiblesHistoricalAmortizationByYear: {},
   bsBuildPreviewOverrides: {},
+  companyContext: getDefaultCompanyContext(),
 };
 
 /** Build a snapshot of current model state for storing per-project */
@@ -998,6 +1101,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     confirmedRowIds: state.confirmedRowIds,
     wcExcludedIds: state.wcExcludedIds,
     revenueProjectionConfig: state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
+    revenueForecastConfigV1: state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1,
     cogsPctByRevenueLine: state.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: state.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: state.cogsPctByRevenueLineByYear ?? {},
@@ -1042,6 +1146,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     intangiblesPctOfCapex: state.intangiblesPctOfCapex ?? 0,
     intangiblesHasHistoricalAmortization: state.intangiblesHasHistoricalAmortization ?? false,
     intangiblesHistoricalAmortizationByYear: state.intangiblesHistoricalAmortizationByYear ?? {},
+    companyContext: state.companyContext ?? getDefaultCompanyContext(),
   };
 }
 
@@ -1072,14 +1177,15 @@ function applyProjectSnapshot(
     sbcDisclosureEnabled: snapshot.sbcDisclosureEnabled ?? true,
     danaLocation: snapshot.danaLocation,
     danaBreakdowns: snapshot.danaBreakdowns,
-    currentStepId: snapshot.currentStepId,
-    completedStepIds: snapshot.completedStepIds,
+    currentStepId: migrateStepId(String(snapshot.currentStepId)),
+    completedStepIds: migrateCompletedStepIds((snapshot.completedStepIds ?? []).map(String)),
     isModelComplete: snapshot.isModelComplete,
     sectionLocks: snapshot.sectionLocks ?? {},
     sectionExpanded: snapshot.sectionExpanded ?? {},
     confirmedRowIds: snapshot.confirmedRowIds ?? {},
     wcExcludedIds: snapshot.wcExcludedIds ?? [],
     revenueProjectionConfig: snapshot.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
+    revenueForecastConfigV1: snapshot.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1,
     cogsPctByRevenueLine: snapshot.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: snapshot.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: snapshot.cogsPctByRevenueLineByYear ?? {},
@@ -1129,6 +1235,24 @@ function applyProjectSnapshot(
     intangiblesPctOfCapex: snapshot.intangiblesPctOfCapex ?? 0,
     intangiblesHasHistoricalAmortization: snapshot.intangiblesHasHistoricalAmortization ?? false,
     intangiblesHistoricalAmortizationByYear: snapshot.intangiblesHistoricalAmortizationByYear ?? {},
+    companyContext: (() => {
+      const def = getDefaultCompanyContext();
+      const snap = snapshot.companyContext;
+      if (!snap) return def;
+      const merged = {
+        ...def,
+        ...snap,
+        user_inputs: { ...def.user_inputs, ...(snap.user_inputs ?? {}) },
+        suggested_comps: Array.isArray(snap.suggested_comps) ? snap.suggested_comps : def.suggested_comps,
+        industry_benchmarks: { ...def.industry_benchmarks, ...(snap.industry_benchmarks ?? {}) },
+        modeling_implications: { ...def.modeling_implications, ...(snap.modeling_implications ?? {}) },
+        wacc_context: { ...def.wacc_context, ...(snap.wacc_context ?? {}) },
+      };
+      if (merged.generatedAt != null && merged.lastGeneratedFromInputsHash == null) {
+        merged.isContextStale = true;
+      }
+      return merged;
+    })(),
   }));
 }
 
@@ -1674,6 +1798,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
             confirmedRowIds: {} as Record<string, boolean>,
             wcExcludedIds: [] as string[],
             revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+            revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
             cogsPctByRevenueLine: {},
             cogsPctModeByRevenueLine: {},
             cogsPctByRevenueLineByYear: {},
@@ -1739,11 +1864,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
       set({
         meta,
         isInitialized: true,
-        currentStepId: "historicals",
+        currentStepId: "company_context",
         incomeStatement: backfilled.incomeStatement,
         balanceSheet: backfilled.balanceSheet,
         cashFlow: cashFlowWithNature,
         ...cleanInputState,
+        ...(force ? { companyContext: getDefaultCompanyContext() } : {}),
       });
     } else {
       // If already initialized, just update meta if needed
@@ -2444,6 +2570,251 @@ export const useModelStore = create<ModelState & ModelActions>()(
     });
   },
 
+  updateCompanyContextInputs: (patch) => {
+    set((s) => {
+      const nextInputs = { ...s.companyContext.user_inputs, ...patch };
+      const newHash = getCompanyContextInputsHash(nextInputs);
+      const hadGenerated = s.companyContext.generatedAt != null;
+      const lastHash = s.companyContext.lastGeneratedFromInputsHash;
+      const isStale = hadGenerated && lastHash != null && newHash !== lastHash;
+      return {
+        companyContext: {
+          ...s.companyContext,
+          user_inputs: nextInputs,
+          isContextStale: isStale,
+        },
+      };
+    });
+  },
+
+  generateCompanyContext: async () => {
+    const state = get();
+    const u = state.companyContext.user_inputs;
+    await new Promise((r) => setTimeout(r, 800));
+    const ts = Date.now();
+
+    const companyResearch = runCompanyResearch(u);
+    const profile = interpretCompanyFromInputs(u);
+    debugInterpretedProfile(profile);
+    if (typeof window !== "undefined") {
+      (window as unknown as { __companyContextProfile?: typeof profile }).__companyContextProfile = profile;
+    }
+
+    const subtypeResult = classifySubtype(u, profile, companyResearch);
+    const allowedBusinessModels = getAllowedBusinessModelsForPeers(profile, subtypeResult);
+    const { candidatePeers, recommendedComps } = runPeerResearch(u, profile, ts, allowedBusinessModels);
+    const suggested_comps = recommendedComps;
+    const hasUserHints = (profile.manualCompHints?.length ?? 0) > 0;
+    const confidence = computeConfidence(u, profile, subtypeResult, candidatePeers.length, hasUserHints);
+    const notEnoughEvidenceMessage = confidence.overall === "low" ? getNotEnoughEvidenceMessage(confidence) : undefined;
+
+    const benchmarkResult = getBenchmarksFromEvidence(profile, recommendedComps);
+    const industry_benchmarks = benchmarkResult.ranges;
+    const wacc_context = getWaccContextFromProfile(profile, recommendedComps);
+    const modeling_implications = getModelingImplicationsFromProfile(profile);
+    const evidence = buildResearchEvidenceV2(profile, u, candidatePeers, recommendedComps, benchmarkResult, wacc_context);
+    if (typeof window !== "undefined") {
+      (window as unknown as { __companyContextEvidence?: typeof evidence }).__companyContextEvidence = evidence;
+    }
+
+    const ai_context = getAiContextFromProfile(u, profile, evidence, companyResearch);
+
+    const marketType = profile.market_region_type === "developed" ? "developed" : "emerging";
+    const inputsHash = getCompanyContextInputsHash(u);
+
+    const compDerivedMetrics = getCompDerivedMetrics(suggested_comps);
+    set((s) => ({
+      companyContext: {
+        ...s.companyContext,
+        market_data: {
+          beta: wacc_context.betaEstimate ?? 1.1,
+          countryRiskPremium: marketType === "emerging" ? 1.5 : 0,
+          peerTickers: u.publicPrivate === "public" && u.ticker?.trim() ? [u.ticker.trim()] : [],
+          reportingCurrency: profile.reportingCurrency,
+          marketType,
+        },
+        wacc_context,
+        ai_context,
+        suggested_comps,
+        compDerivedMetrics,
+        industry_benchmarks,
+        modeling_implications,
+        user_overrides: { ...s.companyContext.user_overrides },
+        generatedAt: ts,
+        lastGeneratedFromInputsHash: inputsHash,
+        isContextStale: false,
+        confidence,
+        notEnoughEvidenceMessage,
+        companyResearch,
+      },
+    }));
+  },
+
+  updateCompanyContextCard: (key, value) => {
+    set((s) => ({
+      companyContext: {
+        ...s.companyContext,
+        user_overrides: { ...s.companyContext.user_overrides, [`ai_context.${key}`]: value },
+        ai_context: { ...s.companyContext.ai_context, [key]: value },
+      },
+    }));
+  },
+
+  updateCompanyContextOverride: (key, value) => {
+    set((s) => ({
+      companyContext: {
+        ...s.companyContext,
+        user_overrides: { ...s.companyContext.user_overrides, [key]: value },
+        market_data: key === "beta" && typeof value === "number"
+          ? { ...s.companyContext.market_data, beta: value }
+          : s.companyContext.market_data,
+      },
+    }));
+  },
+
+  setSuggestedComps: (comps) => {
+    set((s) => {
+      const compDerivedMetrics = getCompDerivedMetrics(comps);
+      const { wacc, market } = applyCompDerivedToContext(compDerivedMetrics);
+      return {
+        companyContext: {
+          ...s.companyContext,
+          suggested_comps: comps,
+          compDerivedMetrics,
+          wacc_context: { ...s.companyContext.wacc_context, ...wacc },
+          market_data: { ...s.companyContext.market_data, ...market },
+        },
+      };
+    });
+  },
+
+  updateSuggestedComp: (id, patch) => {
+    set((s) => {
+      const nextComps = s.companyContext.suggested_comps.map((c) =>
+        c.id === id ? { ...c, ...patch } : c
+      );
+      const compDerivedMetrics = getCompDerivedMetrics(nextComps);
+      const { wacc, market } = applyCompDerivedToContext(compDerivedMetrics);
+      return {
+        companyContext: {
+          ...s.companyContext,
+          suggested_comps: nextComps,
+          compDerivedMetrics,
+          wacc_context: { ...s.companyContext.wacc_context, ...wacc },
+          market_data: { ...s.companyContext.market_data, ...market },
+        },
+      };
+    });
+  },
+
+  enrichSuggestedComp: (id) => {
+    set((s) => {
+      const comp = s.companyContext.suggested_comps.find((c) => c.id === id);
+      if (!comp) return s;
+      const enrichment = resolveComp(comp.companyName ?? "", comp.ticker);
+      const nextComps = s.companyContext.suggested_comps.map((c) =>
+        c.id === id ? { ...c, ...enrichment } : c
+      );
+      const compDerivedMetrics = getCompDerivedMetrics(nextComps);
+      const { wacc, market } = applyCompDerivedToContext(compDerivedMetrics);
+      return {
+        companyContext: {
+          ...s.companyContext,
+          suggested_comps: nextComps,
+          compDerivedMetrics,
+          wacc_context: { ...s.companyContext.wacc_context, ...wacc },
+          market_data: { ...s.companyContext.market_data, ...market },
+        },
+      };
+    });
+  },
+
+  addSuggestedComp: (comp) => {
+    const id = `comp_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const enrichment = resolveComp(comp.companyName ?? "", comp.ticker);
+    set((s) => {
+      const nextComps = [
+        ...s.companyContext.suggested_comps,
+        { ...comp, ...enrichment, id, status: "accepted" as const },
+      ];
+      const compDerivedMetrics = getCompDerivedMetrics(nextComps);
+      const { wacc, market } = applyCompDerivedToContext(compDerivedMetrics);
+      return {
+        companyContext: {
+          ...s.companyContext,
+          suggested_comps: nextComps,
+          compDerivedMetrics,
+          wacc_context: { ...s.companyContext.wacc_context, ...wacc },
+          market_data: { ...s.companyContext.market_data, ...market },
+        },
+      };
+    });
+    return id;
+  },
+
+  acceptSuggestedComp: (id) => {
+    set((s) => {
+      const nextComps = s.companyContext.suggested_comps.map((c) =>
+        c.id === id ? { ...c, status: "accepted" as const } : c
+      );
+      const compDerivedMetrics = getCompDerivedMetrics(nextComps);
+      const { wacc, market } = applyCompDerivedToContext(compDerivedMetrics);
+      return {
+        companyContext: {
+          ...s.companyContext,
+          suggested_comps: nextComps,
+          compDerivedMetrics,
+          wacc_context: { ...s.companyContext.wacc_context, ...wacc },
+          market_data: { ...s.companyContext.market_data, ...market },
+        },
+      };
+    });
+  },
+
+  updateWaccContext: (patch) => {
+    set((s) => ({
+      companyContext: {
+        ...s.companyContext,
+        wacc_context: { ...s.companyContext.wacc_context, ...patch },
+      },
+    }));
+  },
+
+  removeSuggestedComp: (id) => {
+    set((s) => {
+      const nextComps = s.companyContext.suggested_comps.filter((c) => c.id !== id);
+      const compDerivedMetrics = getCompDerivedMetrics(nextComps);
+      const { wacc, market } = applyCompDerivedToContext(compDerivedMetrics);
+      return {
+        companyContext: {
+          ...s.companyContext,
+          suggested_comps: nextComps,
+          compDerivedMetrics,
+          wacc_context: { ...s.companyContext.wacc_context, ...wacc },
+          market_data: { ...s.companyContext.market_data, ...market },
+        },
+      };
+    });
+  },
+
+  updateIndustryBenchmarks: (patch) => {
+    set((s) => ({
+      companyContext: {
+        ...s.companyContext,
+        industry_benchmarks: { ...s.companyContext.industry_benchmarks, ...patch },
+      },
+    }));
+  },
+
+  updateModelingImplications: (patch) => {
+    set((s) => ({
+      companyContext: {
+        ...s.companyContext,
+        modeling_implications: { ...s.companyContext.modeling_implications, ...patch },
+      },
+    }));
+  },
+
   // Generic row management actions
   addChildRow: (statement, parentId, label) => {
     const trimmed = (label ?? "").trim();
@@ -2601,7 +2972,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
     if (!trimmed) return;
     set((state) => {
       const currentRows = state[statement];
-      const updated = renameRowDeep(currentRows, rowId, trimmed);
+      let updated = renameRowDeep(currentRows, rowId, trimmed);
+      const row = findRowDeep(updated, rowId);
+      const isTemplate =
+        row?.isTemplateRow === true ||
+        (statement === "incomeStatement" && row && TEMPLATE_IS_ROW_IDS.has(row.id)) ||
+        (statement === "balanceSheet" && row && isCoreBsRow(row.id)) ||
+        (statement === "cashFlow" && row && Object.prototype.hasOwnProperty.call(CFS_ANCHOR_HISTORICAL_NATURE, row.id));
+      if (row && !isTemplate) {
+        updated = updateRowDeep(updated, rowId, (r) => {
+          const withTax = applyTaxonomyToRow({ ...r, label: trimmed }, statement);
+          return { ...withTax, forecastMetadataStatus: "needs_review" as const, taxonomyStatus: "needs_review" as const };
+        });
+      }
       return { ...state, [statement]: updated };
     });
   },
@@ -2743,6 +3126,20 @@ export const useModelStore = create<ModelState & ModelActions>()(
       }
       let updated = removeRowDeep(currentRows, rowId);
       if (statement === "cashFlow") updated = normalizeWcStructure(updated);
+
+      // When removing an IS row, clear that row (and descendants) from revenue forecast v1 config
+      let nextRevenueForecastConfigV1 = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+      if (statement === "incomeStatement") {
+        const rowToRemove = findRowDeep(currentRows, rowId);
+        if (rowToRemove) {
+          const idsToRemove = new Set(collectSubtreeIds(rowToRemove));
+          if (idsToRemove.size > 0 && nextRevenueForecastConfigV1.rows) {
+            const nextRows = { ...nextRevenueForecastConfigV1.rows };
+            idsToRemove.forEach((id) => delete nextRows[id]);
+            nextRevenueForecastConfigV1 = { ...nextRevenueForecastConfigV1, rows: nextRows };
+          }
+        }
+      }
       
       // Check if we removed the last child from Revenue, COGS, or SG&A
       // If so, convert them back to input
@@ -2800,6 +3197,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         if (statement === "cashFlow" && wcExcludedIds !== (state.wcExcludedIds ?? [])) {
           out.wcExcludedIds = wcExcludedIds;
         }
+        if (statement === "incomeStatement") out.revenueForecastConfigV1 = nextRevenueForecastConfigV1;
         return out;
       }
       
@@ -2807,6 +3205,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       if (statement === "cashFlow" && wcExcludedIds !== (state.wcExcludedIds ?? [])) {
         out.wcExcludedIds = wcExcludedIds;
       }
+      if (statement === "incomeStatement") out.revenueForecastConfigV1 = nextRevenueForecastConfigV1;
       return out;
     });
   },
@@ -3543,6 +3942,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       cashFlow: clearedCF,
       schedules: clearedSchedules,
       revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+      revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
       cogsPctByRevenueLine: {},
       cogsPctModeByRevenueLine: {},
       cogsPctByRevenueLineByYear: {},
@@ -3596,6 +3996,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
     set((state) => ({
       incomeStatement: createIncomeStatementTemplate(),
       revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
+      revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
       cogsPctByRevenueLine: {},
       cogsPctModeByRevenueLine: {},
       cogsPctByRevenueLineByYear: {},
@@ -3720,6 +4121,25 @@ export const useModelStore = create<ModelState & ModelActions>()(
   // Legacy/backward compatibility actions
   addRevenueStream: (label) => {
     const trimmed = (label ?? "").trim();
+    if (!trimmed) return undefined;
+    const id = uuid();
+    const child: Row = {
+      id,
+      label: trimmed,
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+    };
+    set((state) => ({
+      incomeStatement: addChildRow(state.incomeStatement, "rev", child),
+    }));
+    return id;
+  },
+
+  /** Add a child breakdown row under a revenue stream (Forecast Drivers → Revenue v1). Tree child with sectionOwner revenue. */
+  addRevenueStreamChild: (parentStreamId, label) => {
+    const trimmed = (label ?? "").trim();
     if (!trimmed) return;
 
     const child: Row = {
@@ -3729,11 +4149,33 @@ export const useModelStore = create<ModelState & ModelActions>()(
       valueType: "currency",
       values: {},
       children: [],
+      sectionOwner: "revenue",
+      isOperating: true,
+      classificationSource: "user",
+      forecastMetadataStatus: "needs_review",
     };
 
-    set((state) => ({
-      incomeStatement: addChildRow(state.incomeStatement, "rev", child),
-    }));
+    set((state) => {
+      const rev = findRowDeep(state.incomeStatement, "rev");
+      const stream = rev?.children?.find((s) => s.id === parentStreamId);
+      if (!stream) return state;
+      const updated = addChildRow(JSON.parse(JSON.stringify(state.incomeStatement)), parentStreamId, child);
+      const config = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+      const streamCfg = config.rows?.[parentStreamId];
+      const childRole = streamCfg?.forecastRole === "independent_driver" ? "allocation_of_parent" : "independent_driver";
+      const nextRows = {
+        ...config.rows,
+        [child.id]: {
+          rowId: child.id,
+          forecastRole: childRole,
+          forecastParameters: childRole === "allocation_of_parent" ? { allocationPercent: 0 } : { ratePercent: 0 },
+        },
+      };
+      return {
+        incomeStatement: updated,
+        revenueForecastConfigV1: { ...config, rows: nextRows },
+      };
+    });
   },
 
   updateIncomeStatementValue: (rowId, year, value) => {
@@ -3977,6 +4419,24 @@ export const useModelStore = create<ModelState & ModelActions>()(
         revenueProjectionConfig: {
           ...config,
           items: { ...config.items, [itemId]: { method, inputs: (existing?.inputs ?? defaultInputs) as RevenueProjectionInputs } },
+        },
+      };
+    });
+  },
+
+  setRevenueForecastRowV1: (rowId, patch) => {
+    set((state) => {
+      const config = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+      const existing = config.rows[rowId] ?? { rowId, forecastRole: "independent_driver" as const };
+      const next: RevenueForecastRowConfigV1 = {
+        ...existing,
+        ...patch,
+        rowId,
+      };
+      return {
+        revenueForecastConfigV1: {
+          ...config,
+          rows: { ...config.rows, [rowId]: next },
         },
       };
     });
@@ -4411,6 +4871,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
         return { ...stateToPersist, projectStates };
       },
       onRehydrateStorage: () => (state) => {
+        // Migration: legacy step ids → new workflow step ids (is_build/bs_build/cfs_build → statement_structure, projections → forecast_drivers)
+        if (state?.currentStepId != null) {
+          state.currentStepId = migrateStepId(String(state.currentStepId)) as WizardStepId;
+        }
+        if (state?.completedStepIds != null && state.completedStepIds.length > 0) {
+          state.completedStepIds = migrateCompletedStepIds(state.completedStepIds.map(String)) as WizardStepId[];
+        }
+
         // Migration: existing users with no projects — create one project from current state
         if (
           state &&

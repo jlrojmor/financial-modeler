@@ -243,14 +243,18 @@ export interface EmbeddedDisclosureItem {
   label?: string;
 }
 
+/** Current workflow step ids (post–forecast-workflow architecture). */
 export type WizardStepId =
+  | "company_context"
   | "historicals"
-  | "is_build"
-  | "bs_build"
-  | "cfs_build"
+  | "statement_structure"
+  | "forecast_drivers"
   | "schedules"
-  | "projections"
+  | "projected_statements"
   | "dcf";
+
+/** Legacy step ids from saved projects; mapped to WizardStepId on load. */
+export type LegacyStepId = "is_build" | "bs_build" | "cfs_build" | "projections";
 
 export interface WizardStep {
   id: WizardStepId;
@@ -259,42 +263,37 @@ export interface WizardStep {
 }
 
 export const WIZARD_STEPS: WizardStep[] = [
-  {
-    id: "historicals",
-    label: "Historicals",
-    description: "Enter and normalize historical financials",
-  },
-  {
-    id: "is_build",
-    label: "IS Build",
-    description: "Build the Income Statement structure",
-  },
-  {
-    id: "bs_build",
-    label: "BS Build",
-    description: "Build the Balance Sheet structure",
-  },
-  {
-    id: "cfs_build",
-    label: "CFS Build",
-    description: "Build the Cash Flow Statement structure",
-  },
-  {
-    id: "schedules",
-    label: "Schedules",
-    description: "Working Capital, Debt, Capex schedules",
-  },
-  {
-    id: "projections",
-    label: "Projections",
-    description: "Forecast 5–10 years using drivers",
-  },
-  {
-    id: "dcf",
-    label: "DCF Valuation",
-    description: "UFCF + WACC + terminal value",
-  },
+  { id: "company_context", label: "Company Context", description: "Company profile for forecasting and WACC" },
+  { id: "historicals", label: "Historicals", description: "Enter and normalize historical financials" },
+  { id: "statement_structure", label: "Statement Structure", description: "Define forecastable rows and confirm structure" },
+  { id: "forecast_drivers", label: "Forecast Drivers", description: "Set forecast methods and assumptions" },
+  { id: "schedules", label: "Schedules", description: "Working Capital, Capex, Intangibles, Debt" },
+  { id: "projected_statements", label: "Projected Statements", description: "Review projected IS, BS, and CFS" },
+  { id: "dcf", label: "DCF Valuation", description: "UFCF + WACC + terminal value" },
 ];
+
+/** Map legacy step id (from saved projects) to current WizardStepId. */
+export function migrateStepId(stepId: string): WizardStepId {
+  switch (stepId) {
+    case "is_build":
+    case "bs_build":
+    case "cfs_build":
+      return "statement_structure";
+    case "projections":
+      return "forecast_drivers";
+    default:
+      return stepId as WizardStepId;
+  }
+}
+
+/** Map legacy completedStepIds to current WizardStepIds and dedupe. */
+export function migrateCompletedStepIds(completed: string[]): WizardStepId[] {
+  const set = new Set<WizardStepId>();
+  for (const id of completed) {
+    set.add(migrateStepId(id));
+  }
+  return Array.from(set);
+}
 
 export type CompanyType = "public" | "private";
 

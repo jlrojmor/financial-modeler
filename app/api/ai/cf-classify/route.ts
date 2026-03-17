@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import type { CompanyContext } from "@/types/company-context";
+import { buildModelingContext, getModelingContextSummaryForPrompt } from "@/lib/modeling-context";
 
 export type CFRecommendation = "working_capital" | "investing" | "financing" | "non_cash";
 
@@ -22,11 +24,12 @@ export interface CFClassifySuggestion {
   alternatives?: CFRecommendation[];
 }
 
-const PROMPT = `You are a financial modeling expert. Classify each Balance Sheet line item into exactly one cash flow treatment for the Cash Flow Statement.
+const PROMPT_BASE = `You are a financial modeling expert. Classify each Balance Sheet line item into exactly one cash flow treatment for the Cash Flow Statement.
 
 RULES:
 - Core rows (e.g. Cash, AR, Inventory, AP, PP&E, Debt, Equity) are LOCKED; do not override. Only classify non-core/custom rows.
 - Return STRICT JSON only: an array of objects with keys: rowId, recommendation, confidence (0-1), reason (max 200 chars), alternatives (optional array).
+- Use the company context below to weight suggestions (e.g. inventory-heavy WC → working_capital emphasis; SaaS → deferred revenue / low WC; non-cash adjustments). Do not force one answer; suggest best fit and mention context in reason when relevant.
 
 DEFINITIONS:
 - working_capital: Operating current assets/liabilities excluding cash and short-term debt (receivables, payables, inventory, prepaid, accrued, deferred revenue, other operating CA/CL).
@@ -34,7 +37,6 @@ DEFINITIONS:
 - financing: Debt (short/long-term), equity balances (common stock, APIC, treasury, dividends payable).
 - non_cash: Accounting-only or schedule-handled elsewhere (e.g. goodwill, some other equity, DTA/DTL, ROU assets/liabilities that are not debt).
 
-Input items (JSON):
 `;
 
 function buildItemsSummary(items: CFClassifyItemInput[]): string {
@@ -50,6 +52,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const items: CFClassifyItemInput[] = Array.isArray(body.items) ? body.items : [];
+    const companyContext = body.companyContext as CompanyContext | undefined;
     if (items.length === 0) {
       return NextResponse.json({ suggestions: [] });
     }
@@ -68,7 +71,18 @@ export async function POST(request: Request) {
       );
     }
 
-    const prompt = PROMPT + buildItemsSummary(items) + "\n\nRespond with ONLY a JSON array of suggestion objects, no markdown.";
+    const modelingProfile = buildModelingContext(companyContext);
+    const contextSummary = getModelingContextSummaryForPrompt(modelingProfile ?? null);
+    const companyBlock = contextSummary
+      ? `\nCOMPANY CONTEXT (use to weight WC vs non-cash vs investing; do not force one answer):\n${contextSummary}\n\n`
+      : "";
+
+    const prompt =
+      PROMPT_BASE +
+      companyBlock +
+      "Input items (JSON):\n" +
+      buildItemsSummary(items) +
+      "\n\nRespond with ONLY a JSON array of suggestion objects, no markdown.";
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",

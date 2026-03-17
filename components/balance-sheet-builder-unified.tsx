@@ -5,6 +5,7 @@ import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { findGlossaryItem } from "@/lib/financial-glossary";
 import { getCommonBSItems, filterAlreadyAdded } from "@/lib/common-suggestions";
+import { getCompanyAwareSuggestionExplanation, suggestCashFlowBehaviorWithContext } from "@/lib/company-aware-suggestions";
 import { suggestBestMatch, validateConceptForStatement } from "@/lib/ai-item-matcher";
 import { getRowsForCategory, getInsertionIndexForCategory, getBSCategoryForRow } from "@/lib/bs-category-mapper";
 import { getMissingRequiredBsRows, getRequiredRowTemplate } from "@/lib/bs-required-rows";
@@ -18,6 +19,8 @@ import { computeRowValue } from "@/lib/calculations";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 import WorkingCapitalScheduleCard from "@/components/working-capital-schedule-card";
 import CapexDaScheduleCard from "@/components/capex-da-schedule-card";
+import { getFinalRowClassificationState } from "@/lib/final-row-classification";
+import { buildModelingContext } from "@/lib/modeling-context";
 
 // UUID helper
 function uuid() {
@@ -114,9 +117,11 @@ const EXTRA_EQUITY_SUGGESTIONS = [
  * - Edit/Confirm/Remove functionality
  * - Organized by categories (Assets, Liabilities, Equity)
  * When stepId === "historicals", only the BS structure is shown (no WC or Capex & D&A schedules).
+ * When stepId === "statement_structure", structure + CF Treatment Check only (no Apply, no schedule cards).
  */
-export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "historicals" | "bs_build" }) {
+export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "historicals" | "bs_build" | "statement_structure" }) {
   const isHistoricalsStep = stepId === "historicals";
+  const showScheduleSection = stepId === "bs_build";
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const missingRequiredRows = useMemo(
@@ -126,6 +131,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
   const updateRowValue = useModelStore((s) => s.updateRowValue);
   const insertRow = useModelStore((s) => s.insertRow);
   const removeRow = useModelStore((s) => s.removeRow);
+  const confirmRowReview = useModelStore((s) => s.confirmRowReview);
+  const renameRow = useModelStore((s) => s.renameRow);
   const reorderBalanceSheetCategory = useModelStore((s) => s.reorderBalanceSheetCategory);
   const applyBsBuildProjectionsToModel = useModelStore((s) => s.applyBsBuildProjectionsToModel);
   const setBalanceSheetRowCashFlowBehavior = useModelStore((s) => s.setBalanceSheetRowCashFlowBehavior);
@@ -140,6 +147,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
   const [validationError, setValidationError] = useState<string | null>(null);
   const [matchResult, setMatchResult] = useState<any>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [editingLabelRowId, setEditingLabelRowId] = useState<string | null>(null);
+  const [editingLabelValue, setEditingLabelValue] = useState("");
   const [isMatching, setIsMatching] = useState(false);
   const [showAddCADialog, setShowAddCADialog] = useState(false);
   const [newCALabel, setNewCALabel] = useState("");
@@ -167,19 +176,21 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
 
   const isLocked = useModelStore((s) => s.sectionLocks["balance_sheet"] ?? false);
   const incomeStatement = useModelStore((s) => s.incomeStatement);
+  const companyContext = useModelStore((s) => s.companyContext);
   
-  // Get common suggestions by category
+  const modelingProfile = useMemo(() => buildModelingContext(companyContext), [companyContext]);
+
+  // Get common suggestions by category (company-aware ranking when profile exists)
   const commonSuggestions = useMemo(() => {
-    const assets = getCommonBSItems("Assets");
-    const liabilities = getCommonBSItems("Liabilities");
-    const equity = getCommonBSItems("Equity");
-    
+    const assets = getCommonBSItems("Assets", modelingProfile);
+    const liabilities = getCommonBSItems("Liabilities", modelingProfile);
+    const equity = getCommonBSItems("Equity", modelingProfile);
     return {
       assets: filterAlreadyAdded(assets, balanceSheet.map(r => ({ label: r.label, id: r.id }))),
       liabilities: filterAlreadyAdded(liabilities, balanceSheet.map(r => ({ label: r.label, id: r.id }))),
       equity: filterAlreadyAdded(equity, balanceSheet.map(r => ({ label: r.label, id: r.id }))),
     };
-  }, [balanceSheet]);
+  }, [balanceSheet, modelingProfile]);
   
   // Organize BS items by category
   const sections = useMemo(() => {
@@ -264,7 +275,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       }
     }
     newRow.scheduleOwner = "none";
-    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(item.concept, cfsSection ?? undefined);
+    const { behavior: contextBehavior } = suggestCashFlowBehaviorWithContext(item.concept, modelingProfile ?? null);
+    newRow.cashFlowBehavior = contextBehavior ?? resolveCashFlowBehaviorForNewRow(item.concept, cfsSection ?? undefined);
     insertRow("balanceSheet", insertIndex, newRow);
   };
 
@@ -374,7 +386,7 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       const res = await fetch("/api/ai/cf-classify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: payload }),
+        body: JSON.stringify({ items: payload, companyContext: companyContext ?? undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && Array.isArray(data.suggestions) && data.suggestions.length > 0) {
@@ -384,12 +396,12 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       // fallback below
     }
     return rows.map((r) => {
-      const rec = suggestCashFlowBehaviorFromLabel(r.label);
+      const { behavior, explanation } = suggestCashFlowBehaviorWithContext(r.label, modelingProfile ?? null);
       return {
         rowId: r.id,
-        recommendation: rec ?? "non_cash",
+        recommendation: behavior ?? "non_cash",
         confidence: 0,
-        reason: "Heuristic fallback (AI unavailable or failed). Please review.",
+        reason: explanation ?? "Heuristic fallback (AI unavailable or failed). Please review.",
       };
     });
   }
@@ -490,6 +502,22 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
   const handleRemoveItem = (rowId: string) => {
     if (protectedTotalRows.includes(rowId)) return;
     removeRow("balanceSheet", rowId);
+  };
+
+  const handleEditRow = (rowId: string) => {
+    const row = balanceSheet?.find((r) => r.id === rowId);
+    if (row) {
+      setEditingLabelRowId(rowId);
+      setEditingLabelValue(row.label);
+    }
+  };
+
+  const handleSaveEditRowLabel = () => {
+    if (editingLabelRowId && editingLabelValue.trim()) {
+      renameRow("balanceSheet", editingLabelRowId, editingLabelValue.trim());
+      setEditingLabelRowId(null);
+      setEditingLabelValue("");
+    }
   };
 
   const handleDragStart = (e: React.DragEvent, payload: { rowId: string; category: BalanceSheetCategory; fromIndex: number }) => {
@@ -960,8 +988,16 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                   colorClass={colorClass}
                   onUpdateValue={updateRowValue.bind(null, "balanceSheet")}
                   onRemove={handleRemoveItem}
+                  reviewState={getFinalRowClassificationState(row, "balance").reviewState}
+                  onConfirmSuggestion={() => confirmRowReview("balanceSheet", row.id)}
                   showRemove={!isTotalRow}
-                  showConfirm={true}
+                  showEditRow={!isTotalRow}
+                  onEditRow={handleEditRow}
+                  editingLabelRowId={editingLabelRowId}
+                  editingLabelValue={editingLabelValue}
+                  onEditingLabelChange={setEditingLabelValue}
+                  onSaveEditLabel={handleSaveEditRowLabel}
+                  onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                   protectedRows={protectedTotalRows}
                   draggable={!isLocked && !isTotalRow}
                   onDragStart={(e) => handleDragStart(e, { rowId: row.id, category, fromIndex: reorderableIndex })}
@@ -1023,8 +1059,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
   return (
     <CollapsibleSection
       sectionId="balance_sheet_all"
-      title={isHistoricalsStep ? "Balance Sheet (Historical)" : "Balance Sheet Builder"}
-      description={isHistoricalsStep ? "Enter historical Balance Sheet data for Assets, Liabilities, and Equity. Working Capital and Capex & D&A schedules are set up in the BS Build step." : "Build your Balance Sheet with Assets, Liabilities, and Equity. All items are organized by category."}
+      title={isHistoricalsStep ? "Balance Sheet (Historical)" : showScheduleSection ? "Balance Sheet Builder" : "Balance Sheet"}
+      description={isHistoricalsStep ? "Enter historical Balance Sheet data for Assets, Liabilities, and Equity. Working Capital and Capex & D&A schedules are set up in the Schedules step." : showScheduleSection ? "Build your Balance Sheet with Assets, Liabilities, and Equity. All items are organized by category." : "Confirm Balance Sheet structure and cash flow treatment for each row."}
       colorClass="green"
       defaultExpanded={true}
     >
@@ -1060,18 +1096,20 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
         )}
         {!isHistoricalsStep && (
           <>
-            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
-              <span className="text-xs text-slate-400">
-                Forecasts are preview-only until applied. CFS (e.g. WC change, operating CF) will use applied values.
-              </span>
-              <button
-                type="button"
-                onClick={() => applyBsBuildProjectionsToModel()}
-                className="px-4 py-2 rounded-md bg-emerald-700 text-emerald-100 text-sm font-medium hover:bg-emerald-600 transition-colors"
-              >
-                Apply Forecasts to Model
-              </button>
-            </div>
+            {showScheduleSection && (
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+                <span className="text-xs text-slate-400">
+                  Forecasts are preview-only until applied. CFS (e.g. WC change, operating CF) will use applied values.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => applyBsBuildProjectionsToModel()}
+                  className="px-4 py-2 rounded-md bg-emerald-700 text-emerald-100 text-sm font-medium hover:bg-emerald-600 transition-colors"
+                >
+                  Apply Forecasts to Model
+                </button>
+              </div>
+            )}
 
             {/* CF Treatment Check: summary + unclassified rows with inline dropdown */}
             {(() => {
@@ -1122,8 +1160,12 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
               );
             })()}
 
-            <WorkingCapitalScheduleCard />
-            <CapexDaScheduleCard />
+            {showScheduleSection && (
+              <>
+                <WorkingCapitalScheduleCard />
+                <CapexDaScheduleCard />
+              </>
+            )}
           </>
         )}
         {/* Assets Section */}
@@ -1179,8 +1221,16 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       colorClass="blue"
                       onUpdateValue={updateRowValue.bind(null, "balanceSheet")}
                       onRemove={handleRemoveItem}
+                      reviewState={getFinalRowClassificationState(row, "balance").reviewState}
+                      onConfirmSuggestion={() => confirmRowReview("balanceSheet", row.id)}
                       showRemove={!isTotalRow}
-                      showConfirm={true}
+                      showEditRow={!isTotalRow}
+                      onEditRow={handleEditRow}
+                      editingLabelRowId={editingLabelRowId}
+                      editingLabelValue={editingLabelValue}
+                      onEditingLabelChange={setEditingLabelValue}
+                      onSaveEditLabel={handleSaveEditRowLabel}
+                      onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                       protectedRows={protectedTotalRows}
                       draggable={!isLocked && !isTotalRow}
                       onDragStart={(e) => {
@@ -1232,6 +1282,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                             <p className="text-xs text-blue-300/70 mt-1">
                               {item.description}
                             </p>
+                            {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile) && (
+                              <p className="text-[11px] text-emerald-400/90 mt-1">
+                                {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile)}
+                              </p>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -1352,8 +1407,16 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       colorClass="green"
                       onUpdateValue={updateRowValue.bind(null, "balanceSheet")}
                       onRemove={handleRemoveItem}
+                      reviewState={getFinalRowClassificationState(row, "balance").reviewState}
+                      onConfirmSuggestion={() => confirmRowReview("balanceSheet", row.id)}
                       showRemove={!isTotalRow}
-                      showConfirm={true}
+                      showEditRow={!isTotalRow}
+                      onEditRow={handleEditRow}
+                      editingLabelRowId={editingLabelRowId}
+                      editingLabelValue={editingLabelValue}
+                      onEditingLabelChange={setEditingLabelValue}
+                      onSaveEditLabel={handleSaveEditRowLabel}
+                      onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                       protectedRows={protectedTotalRows}
                       draggable={!isLocked && !isTotalRow}
                       onDragStart={(e) => {
@@ -1401,6 +1464,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                             <p className="text-xs text-green-300/70 mt-1">
                               {item.description}
                             </p>
+                            {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile) && (
+                              <p className="text-[11px] text-emerald-400/90 mt-1">
+                                {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile)}
+                              </p>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -1526,8 +1594,16 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       colorClass="orange"
                       onUpdateValue={updateRowValue.bind(null, "balanceSheet")}
                       onRemove={handleRemoveItem}
+                      reviewState={getFinalRowClassificationState(row, "balance").reviewState}
+                      onConfirmSuggestion={() => confirmRowReview("balanceSheet", row.id)}
                       showRemove={!isTotalRow}
-                      showConfirm={true}
+                      showEditRow={!isTotalRow}
+                      onEditRow={handleEditRow}
+                      editingLabelRowId={editingLabelRowId}
+                      editingLabelValue={editingLabelValue}
+                      onEditingLabelChange={setEditingLabelValue}
+                      onSaveEditLabel={handleSaveEditRowLabel}
+                      onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                       protectedRows={protectedTotalRows}
                       draggable={!isLocked && !isTotalRow}
                       onDragStart={(e) => {
@@ -1575,6 +1651,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                             <p className="text-xs text-orange-300/70 mt-1">
                               {item.description}
                             </p>
+                            {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile) && (
+                              <p className="text-[11px] text-emerald-400/90 mt-1">
+                                {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile)}
+                              </p>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -1695,8 +1776,16 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       colorClass="red"
                       onUpdateValue={updateRowValue.bind(null, "balanceSheet")}
                       onRemove={handleRemoveItem}
+                      reviewState={getFinalRowClassificationState(row, "balance").reviewState}
+                      onConfirmSuggestion={() => confirmRowReview("balanceSheet", row.id)}
                       showRemove={!isTotalRow}
-                      showConfirm={true}
+                      showEditRow={!isTotalRow}
+                      onEditRow={handleEditRow}
+                      editingLabelRowId={editingLabelRowId}
+                      editingLabelValue={editingLabelValue}
+                      onEditingLabelChange={setEditingLabelValue}
+                      onSaveEditLabel={handleSaveEditRowLabel}
+                      onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                       protectedRows={protectedTotalRows}
                       draggable={!isLocked && !isTotalRow}
                       onDragStart={(e) => {
@@ -1744,6 +1833,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                             <p className="text-xs text-red-300/70 mt-1">
                               {item.description}
                             </p>
+                            {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile) && (
+                              <p className="text-[11px] text-emerald-400/90 mt-1">
+                                {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile)}
+                              </p>
+                            )}
                           </div>
                           <button
                             type="button"
@@ -1868,8 +1962,16 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                       colorClass="purple"
                       onUpdateValue={updateRowValue.bind(null, "balanceSheet")}
                       onRemove={handleRemoveItem}
+                      reviewState={getFinalRowClassificationState(row, "balance").reviewState}
+                      onConfirmSuggestion={() => confirmRowReview("balanceSheet", row.id)}
                       showRemove={!isTotalRow}
-                      showConfirm={true}
+                      showEditRow={!isTotalRow}
+                      onEditRow={handleEditRow}
+                      editingLabelRowId={editingLabelRowId}
+                      editingLabelValue={editingLabelValue}
+                      onEditingLabelChange={setEditingLabelValue}
+                      onSaveEditLabel={handleSaveEditRowLabel}
+                      onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                       protectedRows={protectedTotalRows}
                       draggable={!isLocked && !isTotalRow}
                       onDragStart={(e) => {
@@ -1917,6 +2019,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
                             <p className="text-xs text-purple-300/70 mt-1">
                               {item.description}
                             </p>
+                            {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile) && (
+                              <p className="text-[11px] text-emerald-400/90 mt-1">
+                                {getCompanyAwareSuggestionExplanation(item.concept, "BS", modelingProfile)}
+                              </p>
+                            )}
                           </div>
                           <button
                             type="button"

@@ -9,6 +9,9 @@ import CollapsibleSection from "@/components/collapsible-section";
 import { computeRowValue } from "@/lib/calculations";
 import { getIsRowsMissingClassification, getIsRowsClassifiedCustom, getIsSectionKey } from "@/lib/is-classification";
 import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
+import { buildModelingContext, getSuggestionReasoningFromContext } from "@/lib/modeling-context";
+import { getSectionOwnerOrderForProfile } from "@/lib/company-aware-suggestions";
+import { getFinalRowClassificationState } from "@/lib/final-row-classification";
 import SbcOptionalSection from "@/components/sbc-optional-section";
 import AmortizationOptionalSection from "@/components/amortization-optional-section";
 import DepreciationOptionalSection from "@/components/depreciation-optional-section";
@@ -44,8 +47,13 @@ export default function IncomeStatementBuilder() {
   const reorderIncomeStatementChildren = useModelStore((s) => s.reorderIncomeStatementChildren);
   const reorderIncomeStatementRows = useModelStore((s) => s.reorderIncomeStatementRows);
   const updateIncomeStatementRowMetadata = useModelStore((s) => s.updateIncomeStatementRowMetadata);
-  
+  const confirmRowReview = useModelStore((s) => s.confirmRowReview);
+  const renameRow = useModelStore((s) => s.renameRow);
+  const companyContext = useModelStore((s) => s.companyContext);
+
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [editingLabelRowId, setEditingLabelRowId] = useState<string | null>(null);
+  const [editingLabelValue, setEditingLabelValue] = useState("");
   const [dragOverTopLevelId, setDragOverTopLevelId] = useState<string | null>(null);
   const [newBreakdownLabels, setNewBreakdownLabels] = useState<Record<string, string>>({});
   const [showAddBreakdown, setShowAddBreakdown] = useState<Record<string, boolean>>({});
@@ -282,6 +290,7 @@ export default function IncomeStatementBuilder() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           items: [{ label, parentContext, nearbySection: parentContext, historicalValues }],
+          companyContext: companyContext ?? undefined,
         }),
       });
       const data = await res.json();
@@ -309,20 +318,24 @@ export default function IncomeStatementBuilder() {
         const fallback = getFallbackIsClassification(label);
         appliedSectionOwner = fallback.sectionOwner;
         appliedIsOperating = fallback.isOperating;
+        const fallbackReason = getSuggestionReasoningFromContext(buildModelingContext(companyContext) ?? null, "is_classification");
         updateIncomeStatementRowMetadata(rowId, {
           sectionOwner: fallback.sectionOwner,
           isOperating: fallback.isOperating,
           classificationSource: "fallback",
+          classificationReason: fallbackReason ?? undefined,
         });
       }
     } catch {
       const fallback = getFallbackIsClassification(label);
       appliedSectionOwner = fallback.sectionOwner;
       appliedIsOperating = fallback.isOperating;
+      const fallbackReason = getSuggestionReasoningFromContext(buildModelingContext(companyContext) ?? null, "is_classification");
       updateIncomeStatementRowMetadata(rowId, {
         sectionOwner: fallback.sectionOwner,
         isOperating: fallback.isOperating,
         classificationSource: "fallback",
+        classificationReason: fallbackReason ?? undefined,
       });
     } finally {
       if (appliedSource === "ai") appliedConfidence = (await (async () => {
@@ -353,11 +366,27 @@ export default function IncomeStatementBuilder() {
       "ebt", "ebt_margin",
       "net_income", "net_income_margin"
     ];
-    // Core anchors only; operating-expense children (sga, rd, other_opex, danda, custom) are removable
     const coreInputItems = ["rev", "cogs", "tax", "operating_expenses"];
     const protectedRows = [...calculatedOutputItems, ...coreInputItems];
     if (protectedRows.includes(rowId)) return;
     removeRow("incomeStatement", rowId);
+  };
+
+  const handleEditRow = (rowId: string) => {
+    const row = incomeStatement?.find((r) => r.id === rowId)
+      ?? incomeStatement?.flatMap((r) => r.children ?? []).find((c) => c.id === rowId);
+    if (row) {
+      setEditingLabelRowId(rowId);
+      setEditingLabelValue(row.label);
+    }
+  };
+
+  const handleSaveEditRowLabel = () => {
+    if (editingLabelRowId && editingLabelValue.trim()) {
+      renameRow("incomeStatement", editingLabelRowId, editingLabelValue.trim());
+      setEditingLabelRowId(null);
+      setEditingLabelValue("");
+    }
   };
   
   const renderSection = (
@@ -470,8 +499,16 @@ export default function IncomeStatementBuilder() {
                   colorClass={colorClass}
                   onUpdateValue={updateRowValue.bind(null, "incomeStatement")}
                   onRemove={handleRemoveItem}
+                  reviewState={getFinalRowClassificationState(row, "income").reviewState}
+                  onConfirmSuggestion={() => confirmRowReview("incomeStatement", row.id)}
                   showRemove={!isCalculatedOutput && !allProtectedItems.includes(row.id)}
-                  showConfirm={!isCalculatedOutput}
+                  showEditRow={!isCalculatedOutput && !allProtectedItems.includes(row.id)}
+                  onEditRow={handleEditRow}
+                  editingLabelRowId={editingLabelRowId}
+                  editingLabelValue={editingLabelValue}
+                  onEditingLabelChange={setEditingLabelValue}
+                  onSaveEditLabel={handleSaveEditRowLabel}
+                  onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                   protectedRows={allProtectedItems}
                   draggable={(isInterestSection || isOpExChild) && !isLocked}
                   onDragStart={isInterestSection ? (e) => { e.stopPropagation(); handleDragStartTopLevel(e, globalIndex); } : isOpExChild ? (e) => { e.stopPropagation(); handleDragStart(e, { parentId: opExParentId, childId: row.id, fromIndex: opExChildIndex }); } : undefined}
@@ -506,8 +543,16 @@ export default function IncomeStatementBuilder() {
                                 colorClass={colorClass}
                                 onUpdateValue={updateRowValue.bind(null, "incomeStatement")}
                                 onRemove={handleRemoveItem}
+                                reviewState={getFinalRowClassificationState(child, "income").reviewState}
+                                onConfirmSuggestion={() => confirmRowReview("incomeStatement", child.id)}
                                 showRemove={true}
-                                showConfirm={true}
+                                showEditRow={true}
+                                onEditRow={handleEditRow}
+                                editingLabelRowId={editingLabelRowId}
+                                editingLabelValue={editingLabelValue}
+                                onEditingLabelChange={setEditingLabelValue}
+                                onSaveEditLabel={handleSaveEditRowLabel}
+                                onCancelEditLabel={() => { setEditingLabelRowId(null); setEditingLabelValue(""); }}
                                 protectedRows={[]}
                                 allowNegative={row.id === "rev"}
                                 draggable={!isLocked}
@@ -728,15 +773,20 @@ export default function IncomeStatementBuilder() {
     );
   };
   
-  const sectionOwnerOptions: { value: Row["sectionOwner"]; label: string }[] = [
-    { value: "revenue", label: "Revenue" },
-    { value: "cogs", label: "Cost of Goods Sold" },
-    { value: "sga", label: "SG&A" },
-    { value: "rd", label: "Research & Development" },
-    { value: "other_operating", label: "Other Operating" },
-    { value: "non_operating", label: "Non-operating" },
-    { value: "tax", label: "Tax" },
-  ];
+  const modelingProfile = useMemo(() => buildModelingContext(companyContext), [companyContext]);
+  const sectionOwnerOptions: { value: Row["sectionOwner"]; label: string }[] = useMemo(() => {
+    const labels: Record<string, string> = {
+      revenue: "Revenue",
+      cogs: "Cost of Goods Sold",
+      sga: "SG&A",
+      rd: "Research & Development",
+      other_operating: "Other Operating",
+      non_operating: "Non-operating",
+      tax: "Tax",
+    };
+    const order = getSectionOwnerOrderForProfile(modelingProfile);
+    return order.map((value) => ({ value, label: labels[value] ?? value }));
+  }, [modelingProfile]);
 
   const aiClassifiedCount = useMemo(
     () => rowsClassifiedCustom.filter((r) => r.classificationSource === "ai").length,

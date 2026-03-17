@@ -5,8 +5,6 @@ import { useModelStore } from "@/store/useModelStore";
 import IncomeStatementBuilder from "@/components/income-statement-builder";
 import BalanceSheetBuilder from "@/components/balance-sheet-builder-unified";
 import CashFlowBuilder from "@/components/cash-flow-builder";
-import ISBuildView from "@/components/is-build-view";
-import RevenueProjectionStep from "@/components/revenue-projection-step";
 import CollapsibleSection from "@/components/collapsible-section";
 import YearsEditor from "@/components/years-editor";
 import { checkBalanceSheetBalance } from "@/lib/calculations";
@@ -14,6 +12,13 @@ import { getUnclassifiedNonCoreBsRows } from "@/lib/bs-core-rows";
 import { getIsRowsMissingClassification } from "@/lib/is-classification";
 import { getFullClassificationReport, getReviewItemsForHistoricals } from "@/lib/classification-completeness";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
+import HistoricalsHelpModal from "@/components/historicals-help-modal";
+import CompanyContextTab from "@/components/company-context-tab";
+import StatementStructureShell from "@/components/statement-structure-shell";
+import ForecastDriversShell from "@/components/forecast-drivers-shell";
+import SchedulesShell from "@/components/schedules-shell";
+import ProjectedStatementsShell from "@/components/projected-statements-shell";
+import DcfShell from "@/components/dcf-shell";
 
 export default function BuilderPanel() {
   const currentStepId = useModelStore((s) => s.currentStepId);
@@ -52,7 +57,7 @@ export default function BuilderPanel() {
   }, [currentStepId, balanceSheet, meta?.years?.historical]);
 
   const unclassifiedCfRows = useMemo(() => {
-    if (currentStepId !== "bs_build" || !balanceSheet?.length) return [];
+    if (currentStepId !== "statement_structure" || !balanceSheet?.length) return [];
     return getUnclassifiedNonCoreBsRows(balanceSheet);
   }, [currentStepId, balanceSheet]);
 
@@ -96,14 +101,15 @@ export default function BuilderPanel() {
     return byStatement;
   }, [reviewItems]);
 
-  // Disable Continue if balance doesn't check in historicals step, BS Build has unclassified CF rows, or IS has rows missing classification
+  // Disable Continue if balance doesn't check in historicals step, Statement Structure has unclassified CF rows, or IS has rows missing classification
   const canContinue = isCurrentStepComplete &&
     (currentStepId !== "historicals" || (balanceCheck.isBalanced || !balanceCheck.hasData) && rowsMissingIsClassification.length === 0) &&
-    (currentStepId !== "bs_build" || unclassifiedCfRows.length === 0);
+    (currentStepId !== "statement_structure" || unclassifiedCfRows.length === 0);
 
   // Save button feedback state
   const [saveFeedback, setSaveFeedback] = useState<"idle" | "saving" | "saved">("idle");
   const [showResetModal, setShowResetModal] = useState(false);
+  const [showHistoricalsHelp, setShowHistoricalsHelp] = useState(false);
   type ResetScope = "all" | "income_statement" | "balance_sheet" | "cash_flow" | null;
   const [resetScope, setResetScope] = useState<ResetScope>(null);
   const [resetConfirmStep, setResetConfirmStep] = useState(false);
@@ -125,18 +131,37 @@ export default function BuilderPanel() {
 
   return (
     <section className="h-full w-full rounded-lg border border-slate-800 bg-slate-950 flex flex-col overflow-hidden">
+      <HistoricalsHelpModal open={showHistoricalsHelp} onClose={() => setShowHistoricalsHelp(false)} />
       {/* Header - Fixed */}
       <div className="flex-shrink-0 p-4 pb-2 border-b border-slate-800">
-        <div className="mb-4 flex items-start justify-between">
-          <div>
-            <div className="text-sm font-semibold text-slate-100">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          {/* Title block: clean alignment, help as contextual link */}
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-slate-100 tracking-tight">
               Builder Panel
-            </div>
-            <div className="text-xs text-slate-400">
-              Current step: <span className="text-slate-200">{currentStepId}</span>
+            </h2>
+            <div className="mt-0.5 flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-slate-400">
+                Current step: <span className="text-slate-200">{currentStepId}</span>
+              </span>
+              {currentStepId === "historicals" && (
+                <>
+                  <span className="text-slate-600">·</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowHistoricalsHelp(true)}
+                    className="text-xs text-blue-400 hover:text-blue-300 hover:underline rounded-md px-1.5 py-0.5 -ml-0.5 hover:bg-slate-800/50 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5 text-blue-400/90 hover:text-blue-300 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    How this works
+                  </button>
+                </>
+              )}
             </div>
             {reviewItems.length > 0 && (
-              <div className="mt-1 text-xs text-amber-400/90">
+              <div className="mt-1.5 text-xs text-amber-400/90">
                 {reviewItems.some((i) => i.reviewState === "setup_required")
                   ? "Some rows need setup so the model knows where they belong."
                   : "Some rows have suggested classification; confirm to accept."}
@@ -144,22 +169,21 @@ export default function BuilderPanel() {
             )}
           </div>
 
-          <div className="flex gap-2">
+          {/* Actions: tertiary → secondary → primary, consistent height */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              className="rounded-md px-4 py-2 text-xs font-semibold border border-slate-600 text-slate-200 bg-slate-800/80 hover:bg-slate-700/80 transition-colors"
+              className="rounded-md h-9 px-3 text-xs font-medium text-slate-300 hover:text-slate-200 border border-slate-600 bg-slate-800 hover:bg-slate-700 hover:border-slate-500 transition-colors cursor-pointer"
               onClick={() => setShowResetModal(true)}
             >
               Reset Inputs
             </button>
-
             <button
-              className={[
-                "rounded-md px-4 py-2 text-xs font-semibold",
+              className={`rounded-md h-9 px-3 text-xs font-medium transition-colors ${
                 canDownload
-                  ? "bg-emerald-600 text-white hover:bg-emerald-500"
-                  : "bg-slate-800 text-slate-400 cursor-not-allowed",
-              ].join(" ")}
+                  ? "text-slate-300 border border-slate-600 bg-slate-800 hover:bg-slate-700 hover:border-slate-500"
+                  : "text-slate-500 border border-slate-700 bg-slate-800/60 cursor-not-allowed"
+              }`}
               disabled={!canDownload}
               onClick={async () => {
                 const state = useModelStore.getState();
@@ -168,7 +192,6 @@ export default function BuilderPanel() {
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify(state),
                 });
-                
                 if (response.ok) {
                   const blob = await response.blob();
                   const url = window.URL.createObjectURL(blob);
@@ -187,31 +210,28 @@ export default function BuilderPanel() {
                 }
               }}
             >
-              Download Excel (.xlsx)
+              Download Excel
             </button>
-
             <button
-              className={[
-                "rounded-md px-4 py-2 text-xs font-semibold transition-colors",
+              className={`rounded-md h-9 px-3 text-xs font-medium transition-colors ${
                 saveFeedback === "saved"
-                  ? "bg-emerald-600 text-white"
+                  ? "text-emerald-300 border border-emerald-600/60 bg-emerald-950/40"
                   : saveFeedback === "saving"
-                  ? "bg-blue-500 text-white cursor-wait"
-                  : "bg-blue-600 text-white hover:bg-blue-500"
-              ].join(" ")}
+                  ? "text-blue-200 border border-blue-600/60 bg-blue-950/40 cursor-wait"
+                  : "text-blue-100 border border-blue-700 bg-blue-900 hover:bg-blue-800 hover:border-blue-600"
+              }`}
               onClick={handleSave}
               disabled={saveFeedback === "saving"}
             >
               {saveFeedback === "saved" ? "✓ Saved" : saveFeedback === "saving" ? "Saving..." : "Save"}
             </button>
-
+            <div className="w-px h-6 bg-slate-700" aria-hidden />
             <button
-              className={[
-                "rounded-md px-4 py-2 text-xs font-semibold",
+              className={`rounded-md h-9 px-4 text-xs font-semibold transition-colors ${
                 canContinue
                   ? "bg-slate-100 text-slate-950 hover:bg-white"
-                  : "bg-slate-800 text-slate-400 cursor-not-allowed",
-              ].join(" ")}
+                  : "bg-slate-800 text-slate-500 cursor-not-allowed"
+              }`}
               onClick={continueToNextStep}
               disabled={!canContinue}
               title={
@@ -221,7 +241,7 @@ export default function BuilderPanel() {
                   ? "Classify all custom Income Statement rows (section & operating vs non-operating) before continuing"
                   : currentStepId === "historicals" && !balanceCheck.isBalanced && balanceCheck.hasData
                   ? "Balance sheet must balance for all historical years before continuing"
-                  : currentStepId === "bs_build" && unclassifiedCfRows.length > 0
+                  : currentStepId === "statement_structure" && unclassifiedCfRows.length > 0
                   ? "Classify cash flow treatment for all custom BS rows before continuing"
                   : undefined
               }
@@ -342,8 +362,8 @@ export default function BuilderPanel() {
           </div>
         )}
 
-        {/* Balance Check Warning for Historicals Step */}
-        {currentStepId === "bs_build" && unclassifiedCfRows.length > 0 && (
+        {/* Statement Structure: classify CF treatment for custom BS rows */}
+        {currentStepId === "statement_structure" && unclassifiedCfRows.length > 0 && (
           <div className="mt-3 rounded-md border border-amber-600/50 bg-amber-950/30 p-3">
             <div className="flex items-start gap-2">
               <span className="text-amber-400 text-sm">⚠️</span>
@@ -352,7 +372,7 @@ export default function BuilderPanel() {
                   Classify cash flow treatment for custom rows
                 </p>
                 <p className="text-xs text-amber-200/90 mt-1">
-                  {unclassifiedCfRows.length} custom Balance Sheet row(s) need a cash flow treatment (Working Capital, Investing, Financing, or Non-cash). Use the &quot;Cash flow&quot; dropdown on each row or the CF Treatment Check section below.
+                  {unclassifiedCfRows.length} custom Balance Sheet row(s) need a cash flow treatment (Working Capital, Investing, Financing, or Non-cash). Use the Balance Sheet tab and the &quot;Cash flow&quot; dropdown on each row or the CF Treatment Check section.
                 </p>
               </div>
             </div>
@@ -389,12 +409,18 @@ export default function BuilderPanel() {
         )}
       </div>
 
-      {/* Step-specific content - Scrollable */}
+        {/* Step-specific content - Scrollable */}
       <div className="flex-1 overflow-y-auto p-4">
-        {/* Years Editor - Available in all steps */}
-        <div className="mb-6">
-          <YearsEditor />
-        </div>
+        {/* Years Editor - Available in all steps except Company Context */}
+        {currentStepId !== "company_context" && (
+          <div className="mb-6">
+            <YearsEditor />
+          </div>
+        )}
+
+        {currentStepId === "company_context" && (
+          <CompanyContextTab />
+        )}
         
         {currentStepId === "historicals" && (
           <div className="space-y-6">
@@ -505,19 +531,17 @@ export default function BuilderPanel() {
           </div>
         )}
 
-        {currentStepId === "is_build" && <ISBuildView />}
+        {currentStepId === "statement_structure" && <StatementStructureShell />}
 
-        {currentStepId === "bs_build" && (
-          <BalanceSheetBuilder stepId="bs_build" />
-        )}
+        {currentStepId === "forecast_drivers" && <ForecastDriversShell />}
 
-        {currentStepId === "cfs_build" && (
-          <CashFlowBuilder />
-        )}
+        {currentStepId === "schedules" && <SchedulesShell />}
 
-        {currentStepId === "projections" && <RevenueProjectionStep />}
+        {currentStepId === "projected_statements" && <ProjectedStatementsShell />}
 
-        {!["historicals", "is_build", "bs_build", "cfs_build", "projections"].includes(currentStepId) && (
+        {currentStepId === "dcf" && <DcfShell />}
+
+        {!["company_context", "historicals", "statement_structure", "forecast_drivers", "schedules", "projected_statements", "dcf"].includes(currentStepId) && (
           <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-8 text-center">
             <p className="text-sm text-slate-400">
               Step-specific builder coming soon for: <span className="text-slate-200">{currentStepId}</span>

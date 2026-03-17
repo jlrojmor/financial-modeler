@@ -11,6 +11,8 @@ import {
 import { computeRowValue } from "@/lib/calculations";
 import { findRowInTree } from "@/lib/row-utils";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
+import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
+import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
 import { getSbcDisclosures, getTotalSbcByYearFromEmbedded } from "@/lib/embedded-disclosure-sbc";
 import { getAmortizationDisclosures, getTotalAmortizationByYearFromEmbedded } from "@/lib/embedded-disclosure-amortization";
 import { getDepreciationDisclosures, getTotalDepreciationByYearFromEmbedded } from "@/lib/embedded-disclosure-depreciation";
@@ -64,6 +66,7 @@ export default function ISBuildPreview() {
   );
 
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
+  const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
   const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
@@ -151,9 +154,22 @@ export default function ISBuildPreview() {
   );
 
   const projectedValues = useMemo(() => {
-    if (!incomeStatement?.length || !revenueProjectionConfig?.items || projectionYears.length === 0) {
-      return {};
+    if (!incomeStatement?.length || projectionYears.length === 0) return {};
+    const v1Config = revenueForecastConfigV1 ?? { rows: {} };
+    const v1HasRows = Object.keys(v1Config.rows ?? {}).length > 0;
+    if (v1HasRows && validateRevenueForecastV1(incomeStatement, v1Config).valid) {
+      const { result, valid } = computeRevenueProjectionsV1(
+        incomeStatement,
+        v1Config,
+        projectionYears,
+        lastHistoricYear,
+        allStatements,
+        sbcBreakdowns ?? {},
+        danaBreakdowns ?? {}
+      );
+      if (valid && Object.keys(result).length > 0) return result;
     }
+    if (!revenueProjectionConfig?.items || Object.keys(revenueProjectionConfig.items).length === 0) return {};
     return computeRevenueProjections(
       incomeStatement,
       revenueProjectionConfig,
@@ -166,6 +182,7 @@ export default function ISBuildPreview() {
     );
   }, [
     incomeStatement,
+    revenueForecastConfigV1,
     revenueProjectionConfig,
     projectionYears,
     lastHistoricYear,

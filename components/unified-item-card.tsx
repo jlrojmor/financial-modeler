@@ -20,9 +20,22 @@ interface UnifiedItemCardProps {
   colorClass?: "blue" | "green" | "orange" | "purple" | "amber" | "slate" | "red";
   onUpdateValue: (rowId: string, year: string, value: number) => void;
   onRemove: (rowId: string) => void;
-  onConfirm?: (rowId: string) => void; // Optional confirm callback
+  /** Call when user accepts suggested classification (row has reviewState needs_confirmation). */
+  onConfirmSuggestion?: (rowId: string) => void;
+  /** Show "Confirm" only when row has a pending suggestion to accept (not for collapse). */
+  reviewState?: "trusted" | "needs_confirmation" | "setup_required";
   showRemove?: boolean;
+  /** If true, show "Confirm" for collapse in expanded state (legacy). Prefer reviewState + onConfirmSuggestion for suggestion Confirm. */
   showConfirm?: boolean;
+  /** Show "Edit row" (label/classification); call onEditRow when clicked. */
+  showEditRow?: boolean;
+  onEditRow?: (rowId: string) => void;
+  /** When set and === row.id, show inline label input instead of row.label (parent controls state). */
+  editingLabelRowId?: string | null;
+  editingLabelValue?: string;
+  onEditingLabelChange?: (value: string) => void;
+  onSaveEditLabel?: () => void;
+  onCancelEditLabel?: () => void;
   protectedRows?: string[]; // Rows that cannot be removed
   customDescription?: string; // Override description from glossary
   draggable?: boolean; // Whether this item can be dragged
@@ -65,9 +78,17 @@ export default function UnifiedItemCard({
   colorClass = "slate",
   onUpdateValue,
   onRemove,
-  onConfirm,
+  onConfirmSuggestion,
+  reviewState,
   showRemove = true,
   showConfirm = true,
+  showEditRow = false,
+  onEditRow,
+  editingLabelRowId = null,
+  editingLabelValue = "",
+  onEditingLabelChange,
+  onSaveEditLabel,
+  onCancelEditLabel,
   protectedRows = [],
   customDescription,
   draggable = false,
@@ -141,28 +162,23 @@ export default function UnifiedItemCard({
   const canEdit = !isLocked && !isCalculated;
   const description = customDescription || glossaryItem?.description || linkInfo?.text || "";
   const isTotalRow = row.id.startsWith("total_") || row.kind === "total" || row.kind === "subtotal";
-  // Always show Confirm for non-total, non-calculated items that can be edited
-  const shouldShowConfirm = showConfirm && !isTotalRow && canEdit && !isCalculated;
+  // Confirm (suggestion): only when row has pending classification to accept
+  const shouldShowConfirmSuggestion = reviewState === "needs_confirmation" && !!onConfirmSuggestion && !isTotalRow && canEdit;
 
   const handleToggleExpand = () => {
     if (!isLocked) {
       if (!isExpanded && isConfirmed) {
-        // When expanding a confirmed item, reset confirmed state so Confirm button shows
         setIsConfirmed(false);
       }
       setIsExpanded(!isExpanded);
     }
   };
 
-  const handleConfirm = () => {
-    setIsConfirmed(true);
-    setIsExpanded(false);
-    if (onConfirm) {
-      onConfirm(row.id);
-    }
+  const handleConfirmSuggestion = () => {
+    onConfirmSuggestion?.(row.id);
   };
 
-  const handleEdit = () => {
+  const handleEditValues = () => {
     setIsConfirmed(false);
     setIsExpanded(true);
   };
@@ -205,9 +221,24 @@ export default function UnifiedItemCard({
             >
               ▶
             </button>
-            <span className={`text-sm font-medium ${colors.text}`}>
-              {row.label}
-            </span>
+            {editingLabelRowId === row.id ? (
+              <span className="inline-flex items-center gap-1 flex-wrap">
+                <input
+                  type="text"
+                  value={editingLabelValue}
+                  onChange={(e) => onEditingLabelChange?.(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") onSaveEditLabel?.(); if (e.key === "Escape") onCancelEditLabel?.(); }}
+                  className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-sm text-slate-200 min-w-[120px]"
+                  autoFocus
+                />
+                <button type="button" onClick={onSaveEditLabel} className="text-xs text-emerald-400 hover:text-emerald-300">Save</button>
+                <button type="button" onClick={onCancelEditLabel} className="text-xs text-slate-400 hover:text-slate-300">Cancel</button>
+              </span>
+            ) : (
+              <span className={`text-sm font-medium ${colors.text}`}>
+                {row.label}
+              </span>
+            )}
             {isCalculated && (
               <span className="text-xs text-slate-400 italic">(Calculated)</span>
             )}
@@ -218,27 +249,26 @@ export default function UnifiedItemCard({
             )}
           </div>
           <div className="flex items-center gap-2">
-            {isConfirmed ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleEditValues();
+              }}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              Edit values
+            </button>
+            {showEditRow && onEditRow && (
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  handleEdit();
+                  onEditRow(row.id);
                 }}
-                className="text-xs text-blue-400 hover:text-blue-300"
+                className="text-xs text-slate-400 hover:text-slate-300"
               >
-                Edit
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleToggleExpand();
-                }}
-                className="text-xs text-emerald-400 hover:text-emerald-300"
-              >
-                Expand
+                Edit row
               </button>
             )}
             {canRemove && (
@@ -299,9 +329,24 @@ export default function UnifiedItemCard({
                 ({signIndicator})
               </span>
             )}
-            <span className={`text-sm font-medium ${colors.text}`}>
-              {row.label}
-            </span>
+            {editingLabelRowId === row.id ? (
+              <span className="inline-flex items-center gap-1 flex-wrap">
+                <input
+                  type="text"
+                  value={editingLabelValue}
+                  onChange={(e) => onEditingLabelChange?.(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") onSaveEditLabel?.(); if (e.key === "Escape") onCancelEditLabel?.(); }}
+                  className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-sm text-slate-200 min-w-[120px]"
+                  autoFocus
+                />
+                <button type="button" onClick={onSaveEditLabel} className="text-xs text-emerald-400 hover:text-emerald-300">Save</button>
+                <button type="button" onClick={onCancelEditLabel} className="text-xs text-slate-400 hover:text-slate-300">Cancel</button>
+              </span>
+            ) : (
+              <span className={`text-sm font-medium ${colors.text}`}>
+                {row.label}
+              </span>
+            )}
             {isCalculated && (
               <span className="text-xs text-slate-400 italic">(Calculated)</span>
             )}
@@ -329,15 +374,24 @@ export default function UnifiedItemCard({
           )}
         </div>
         
-        {/* Action buttons */}
+        {/* Action buttons: Confirm = accept suggestion only; collapse via chevron */}
         <div className="flex gap-2">
-          {shouldShowConfirm && isExpanded && (
+          {shouldShowConfirmSuggestion && (
             <button
               type="button"
-              onClick={handleConfirm}
-              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 transition"
+              onClick={handleConfirmSuggestion}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500 transition"
             >
               Confirm
+            </button>
+          )}
+          {showEditRow && onEditRow && (
+            <button
+              type="button"
+              onClick={() => onEditRow(row.id)}
+              className="text-xs text-slate-400 hover:text-slate-300"
+            >
+              Edit row
             </button>
           )}
           {canRemove && (

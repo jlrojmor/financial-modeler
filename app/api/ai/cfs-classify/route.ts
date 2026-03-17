@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import type { CompanyContext } from "@/types/company-context";
+import { buildModelingContext, getModelingContextSummaryForPrompt } from "@/lib/modeling-context";
 import {
   CFS_FORECAST_DRIVER_VOCABULARY,
   HISTORICAL_CFS_NATURE_VOCABULARY,
@@ -47,6 +49,7 @@ HISTORICAL NATURE DEFINITIONS:
 - reported_meta: Section total or net change (e.g. Cash from Operating, Net Change in Cash).
 
 FORECAST DRIVER: same as before (income_statement, danda_schedule, working_capital_schedule, capex_schedule, debt_schedule, financing_assumption, manual_mna, manual_other, disclosure_or_assumption).
+- Use the company context below to weight suggestions (e.g. WC-heavy → working_capital_schedule; SaaS → non-cash/deferred revenue; distribution → DIO/DPO). Do not force one answer; suggest best fit and mention context in reason when relevant.
 
 Input (JSON):
 `;
@@ -85,6 +88,13 @@ export async function POST(request: Request) {
       );
     }
 
+    const companyContext = body.companyContext as CompanyContext | undefined;
+    const modelingProfile = buildModelingContext(companyContext);
+    const contextSummary = getModelingContextSummaryForPrompt(modelingProfile ?? null);
+    const companyBlock = contextSummary
+      ? `\nCOMPANY CONTEXT (use to weight non-cash vs WC vs other operating; do not force one answer):\n${contextSummary}\n\n`
+      : "";
+
     const sectionContext = item.sectionContext || "operating";
     const operatingSubgroup = item.operatingSubgroup;
     const subgroupPrior =
@@ -93,6 +103,7 @@ export async function POST(request: Request) {
         : "";
     const prompt =
       PROMPT +
+      companyBlock +
       subgroupPrior +
       `{ "label": "${item.label.replace(/"/g, '\\"')}", "sectionContext": "${sectionContext}"${operatingSubgroup ? `, "operatingSubgroup": "${operatingSubgroup}"` : ""} }\n\n` +
       "Respond with ONLY one JSON object (section, forecastDriver, historicalCfsNature, sign, reason, confidence), no markdown.";

@@ -57,7 +57,7 @@ export default function Page() {
         <div className="h-full w-full p-4 overflow-hidden">
           <div className="h-full grid grid-cols-[40%_60%] gap-4 overflow-hidden">
             <BuilderPanel />
-            {currentStepId === "is_build" ? (
+            {currentStepId === "forecast_drivers" ? (
               <ISBuildPreview />
             ) : (
               <ExcelPreview />

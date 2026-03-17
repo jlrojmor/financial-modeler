@@ -375,7 +375,7 @@ export default function RevenueForecastV1Tab() {
                               <input
                                 type="number"
                                 step={0.1}
-                                value={params.ratePercent ?? ""}
+                                value={typeof params.ratePercent === "number" ? params.ratePercent : ""}
                                 onChange={(e) => {
                                   const v = parseFloat(e.target.value);
                                   setRevenueForecastRowV1(stream.id, { forecastParameters: { ...params, ratePercent: isNaN(v) ? 0 : v } });
@@ -392,7 +392,7 @@ export default function RevenueForecastV1Tab() {
                                 value={params.startingAmount != null ? storedToDisplay(Number(params.startingAmount), unit) : ""}
                                 onChange={(e) => {
                                   const raw = parseFloat(e.target.value);
-                                  const stored = raw !== "" && !Number.isNaN(raw) ? displayToStored(raw, unit) : undefined;
+                                  const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : undefined;
                                   setRevenueForecastRowV1(stream.id, {
                                     forecastParameters: { ...params, startingAmount: stored as number | undefined },
                                   });
@@ -444,7 +444,7 @@ export default function RevenueForecastV1Tab() {
                                   value={params.value != null ? storedToDisplay(Number(params.value), unit) : ""}
                                   onChange={(e) => {
                                     const raw = parseFloat(e.target.value);
-                                    const stored = raw !== "" && !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
+                                    const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
                                     setRevenueForecastRowV1(stream.id, { forecastParameters: { ...params, value: stored } });
                                   }}
                                   className="w-24 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
@@ -460,14 +460,14 @@ export default function RevenueForecastV1Tab() {
                                     <input
                                       type="number"
                                       step={0.01}
-                                      value={params.valuesByYear?.[y] != null ? storedToDisplay(Number(params.valuesByYear[y]), unit) : ""}
+                                      value={typeof params.valuesByYear === "object" && params.valuesByYear != null && (params.valuesByYear as Record<string, number>)[y] != null ? storedToDisplay(Number((params.valuesByYear as Record<string, number>)[y]), unit) : ""}
                                       onChange={(e) => {
                                         const raw = parseFloat(e.target.value);
-                                        const stored = raw !== "" && !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
+                                        const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
                                         setRevenueForecastRowV1(stream.id, {
                                           forecastParameters: {
                                             ...params,
-                                            valuesByYear: { ...(params.valuesByYear ?? {}), [y]: stored },
+                                            valuesByYear: { ...((params.valuesByYear as Record<string, number> | undefined) ?? {}), [y]: stored },
                                           },
                                         });
                                       }}
@@ -567,7 +567,7 @@ export default function RevenueForecastV1Tab() {
                                       <input
                                         type="number"
                                         step={0.1}
-                                        value={cParams.ratePercent ?? ""}
+                                        value={typeof cParams.ratePercent === "number" ? cParams.ratePercent : ""}
                                         onChange={(e) => {
                                           const v = parseFloat(e.target.value);
                                           setRevenueForecastRowV1(child.id, { forecastParameters: { ...cParams, ratePercent: isNaN(v) ? 0 : v } });
@@ -584,7 +584,7 @@ export default function RevenueForecastV1Tab() {
                                         value={cParams.startingAmount != null ? storedToDisplay(Number(cParams.startingAmount), unit) : ""}
                                         onChange={(e) => {
                                           const raw = parseFloat(e.target.value);
-                                          const stored = raw !== "" && !Number.isNaN(raw) ? displayToStored(raw, unit) : undefined;
+                                          const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : undefined;
                                           setRevenueForecastRowV1(child.id, {
                                             forecastParameters: { ...cParams, startingAmount: stored as number | undefined },
                                           });
@@ -635,7 +635,7 @@ export default function RevenueForecastV1Tab() {
                                           value={cParams.value != null ? storedToDisplay(Number(cParams.value), unit) : ""}
                                           onChange={(e) => {
                                             const raw = parseFloat(e.target.value);
-                                            const stored = raw !== "" && !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
+                                            const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
                                             setRevenueForecastRowV1(child.id, { forecastParameters: { ...cParams, value: stored } });
                                           }}
                                           className="w-20 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
@@ -653,7 +653,7 @@ export default function RevenueForecastV1Tab() {
                                               value={(cParams.valuesByYear as Record<string, number>)?.[y] != null ? storedToDisplay(Number((cParams.valuesByYear as Record<string, number>)[y]), unit) : ""}
                                               onChange={(e) => {
                                                 const raw = parseFloat(e.target.value);
-                                                const stored = raw !== "" && !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
+                                                const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
                                                 setRevenueForecastRowV1(child.id, {
                                                   forecastParameters: {
                                                     ...cParams,
@@ -679,7 +679,7 @@ export default function RevenueForecastV1Tab() {
                                   min={0}
                                   max={100}
                                   step={0.5}
-                                  value={cParams.allocationPercent ?? ""}
+                                  value={typeof cParams.allocationPercent === "number" ? cParams.allocationPercent : ""}
                                   onChange={(e) => {
                                     const v = parseFloat(e.target.value);
                                     setRevenueForecastRowV1(child.id, {

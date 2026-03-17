@@ -785,7 +785,7 @@ export default function IncomeStatementBuilder() {
       tax: "Tax",
     };
     const order = getSectionOwnerOrderForProfile(modelingProfile);
-    return order.map((value) => ({ value, label: labels[value] ?? value }));
+    return order.map((value) => (value != null ? { value, label: labels[value] ?? value } : { value: undefined, label: "" }));
   }, [modelingProfile]);
 
   const aiClassifiedCount = useMemo(

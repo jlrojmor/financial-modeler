@@ -577,7 +577,7 @@ export default function CompanyContextTab() {
                             <input
                               type="number"
                               step={0.1}
-                              value={benchmarks[minKey] ?? ""}
+                              value={typeof benchmarks[minKey] === "number" ? benchmarks[minKey] : ""}
                               onChange={(e) => updateIndustryBenchmarks({ [minKey]: e.target.value === "" ? undefined : parseFloat(e.target.value) })}
                               placeholder="Min"
                               className="w-14 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-100 text-right"
@@ -586,7 +586,7 @@ export default function CompanyContextTab() {
                             <input
                               type="number"
                               step={0.1}
-                              value={benchmarks[maxKey] ?? ""}
+                              value={typeof benchmarks[maxKey] === "number" ? benchmarks[maxKey] : ""}
                               onChange={(e) => updateIndustryBenchmarks({ [maxKey]: e.target.value === "" ? undefined : parseFloat(e.target.value) })}
                               placeholder="Max"
                               className="w-14 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-100 text-right"

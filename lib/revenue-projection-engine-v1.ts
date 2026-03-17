@@ -137,7 +137,8 @@ export function computeRevenueProjectionsV1(
     for (const child of children) {
       const childCfg = rows[child.id];
       if (childCfg?.forecastRole !== "allocation_of_parent") continue;
-      const pct = (childCfg.forecastParameters?.allocationPercent ?? 0) / 100;
+      const pctVal = childCfg.forecastParameters?.allocationPercent;
+      const pct = (typeof pctVal === "number" ? pctVal : 0) / 100;
       result[child.id] = {};
       for (const year of projectionYears) {
         const parentVal = result[stream.id]?.[year] ?? 0;

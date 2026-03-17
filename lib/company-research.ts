@@ -83,7 +83,7 @@ export function runCompanyResearch(inputs: CompanyContextUserInputs): CompanyRes
 
   const resolvedEntityName = name || "Unknown company";
   const resolvedWebsite = name ? guessDomain(name, headquartersCountry) : undefined;
-  const websiteSummary: string | undefined = undefined; // Reserved for future fetch of homepage/about
+  let websiteSummary: string | undefined = undefined; // Reserved for future fetch of homepage/about
 
   const businessModelEvidence = businessModelClues(description);
   const subtypeEvidence = subtypeClues(description);
@@ -92,7 +92,7 @@ export function runCompanyResearch(inputs: CompanyContextUserInputs): CompanyRes
   let researchConfidence: ResearchConfidence;
   let sourceType: ResearchSourceType;
 
-  if (websiteSummary && websiteSummary.length > 20) {
+  if (websiteSummary != null && (websiteSummary as string).length > 20) {
     researchConfidence = "research_backed";
     sourceType = businessModelEvidence.length > 0 || subtypeEvidence.length > 0 ? "mixed" : "website";
   } else if (description.length >= 15 && (businessModelEvidence.length > 0 || subtypeEvidence.length > 0)) {

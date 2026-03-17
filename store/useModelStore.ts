@@ -30,7 +30,7 @@ import type {
   RevenueBreakdownItem,
 } from "@/types/revenue-projection";
 import { DEFAULT_REVENUE_PROJECTION_CONFIG } from "@/types/revenue-projection";
-import type { RevenueForecastConfigV1, RevenueForecastRowConfigV1 } from "@/types/revenue-forecast-v1";
+import type { RevenueForecastConfigV1, RevenueForecastRowConfigV1, RevenueForecastRoleV1 } from "@/types/revenue-forecast-v1";
 import { DEFAULT_REVENUE_FORECAST_CONFIG_V1 } from "@/types/revenue-forecast-v1";
 import { recomputeCalculations, computeRowValue } from "@/lib/calculations";
 import {
@@ -4162,8 +4162,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const updated = addChildRow(JSON.parse(JSON.stringify(state.incomeStatement)), parentStreamId, child);
       const config = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
       const streamCfg = config.rows?.[parentStreamId];
-      const childRole = streamCfg?.forecastRole === "independent_driver" ? "allocation_of_parent" : "independent_driver";
-      const nextRows = {
+      const childRole: RevenueForecastRoleV1 = streamCfg?.forecastRole === "independent_driver" ? "allocation_of_parent" : "independent_driver";
+      const nextRows: Record<string, RevenueForecastRowConfigV1> = {
         ...config.rows,
         [child.id]: {
           rowId: child.id,

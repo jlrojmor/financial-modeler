@@ -209,7 +209,7 @@ export function validateRevenueForecastV1(
     for (const child of childList) {
       const cCfg = rows[child.id];
       const pct = cCfg?.forecastParameters?.allocationPercent ?? 0;
-      sum += pct;
+      sum += typeof pct === "number" ? pct : 0;
     }
     if (Math.abs(sum - 100) > 0.01) {
       errors.push({

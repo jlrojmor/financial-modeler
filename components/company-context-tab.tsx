@@ -566,7 +566,11 @@ export default function CompanyContextTab() {
                       <tr key={minKey} className="border-b border-slate-700/60 last:border-0">
                         <td className="py-2 px-3 text-slate-400 w-40">{label}</td>
                         <td className="py-2 px-3 text-slate-200">
-                          {formatRange(benchmarks[minKey], benchmarks[maxKey], suffix)}
+                          {formatRange(
+                            typeof benchmarks[minKey] === "number" ? benchmarks[minKey] : undefined,
+                            typeof benchmarks[maxKey] === "number" ? benchmarks[maxKey] : undefined,
+                            suffix
+                          )}
                         </td>
                         <td className="py-2 px-3 w-32">
                           <div className="flex gap-1">

@@ -7,8 +7,11 @@ import { formatCurrencyDisplay, storedToDisplay, displayToStored, getUnitLabel, 
 import { checkBalanceSheetBalance, computeBalanceSheetTotalsWithOverrides, computeRowValue } from "@/lib/calculations";
 import { resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
-import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
 import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
+import {
+  sanitizeHistoricalRevenueInIncomeStatement,
+  mergeForecastRevenueTreeIntoIncomeStatementForPreview,
+} from "@/lib/historical-revenue-cleanup";
 import {
   getWcScheduleItems,
   computeWcProjectedBalances,
@@ -733,7 +736,12 @@ function StatementTable({
             <td className={`px-3 ${isISAnchorRow ? "py-2.5" : "py-2"} ${labelClass} ${isISNetIncome ? "bg-slate-900/50" : isISAnchorRow ? "bg-slate-900/35" : ""} ${shouldBeBold && isBalanceSheet ? "bg-slate-800/20" : ""}`}>
               <div
                 style={{
-                  paddingLeft: isCashFlow && parentId === "wc_change" ? 28 : depth * 14,
+                  paddingLeft:
+                    isCashFlow && parentId === "wc_change"
+                      ? 28
+                      : isIncomeStatement
+                        ? 10 + depth * 18
+                        : depth * 14,
                 }}
                 className="flex items-center gap-1"
               >
@@ -777,11 +785,19 @@ function StatementTable({
                 storedValue = ov !== undefined ? ov : undefined;
               }
               
-              // INCOME STATEMENT REVENUE: projection years use engine (sum of IS Build breakdowns per stream)
+              // INCOME STATEMENT REVENUE: projection years use v1 engine map. Include nested rows under
+              // "Build from child lines" (parentId is stream/derived id, not "rev") — match any row id present in the map.
               const isProjectionYear = y.endsWith("E");
-              const isRevenueRow = label === "Income Statement" && (row.id === "rev" || parentId === "rev");
-              if (label === "Income Statement" && projectedRevenue && isProjectionYear && isRevenueRow) {
-                storedValue = projectedRevenue[row.id]?.[y] ?? storedValue;
+              if (
+                label === "Income Statement" &&
+                projectedRevenue &&
+                isProjectionYear &&
+                Object.prototype.hasOwnProperty.call(projectedRevenue, row.id)
+              ) {
+                const pr = projectedRevenue[row.id][y];
+                if (pr !== undefined && Number.isFinite(pr)) {
+                  storedValue = pr;
+                }
               }
               // INCOME STATEMENT COGS: projection years use revenue × COGS % per line when projectedCogs is set
               if (label === "Income Statement" && row.id === "cogs" && isProjectionYear && projectedCogs?.[y] != null) {
@@ -1053,6 +1069,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
+  const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
   const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
@@ -1130,40 +1147,8 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
     });
   };
 
-  // Income Statement in display order: section-driven explicit order (Revenue → COGS → Gross Profit → Operating Expenses → EBIT → Interest → EBT → Tax → Net Income)
-  const incomeStatementOrdered = useMemo(
-    () => getIncomeStatementDisplayOrder(incomeStatement ?? []),
-    [incomeStatement]
-  );
-
-  // Temporary: log ordered top-level row ids used by IS preview (must show operating_expenses between gross_profit and ebit)
-  useEffect(() => {
-    const ids = (incomeStatementOrdered ?? []).map((r) => r.id);
-    if (ids.length > 0) {
-      console.log("IS PREVIEW ORDER:\n" + ids.join("\n"));
-    }
-  }, [incomeStatementOrdered]);
-
-  // Calculate total rows for display (use same flatten options as StatementTable so CFS includes SBC)
-  const totalRows = useMemo(() => {
-    const isFlat = flattenRows(incomeStatementOrdered, 0, expandedRows, { forStatement: "income" });
-    const bsFlat = flattenRows(balanceSheet ?? [], 0, expandedRows, { forStatement: "balance" });
-    const cfsFlat = flattenRows(cashFlow ?? [], 0, expandedRows, { forStatement: "cashflow" });
-    return isFlat.length + bsFlat.length + cfsFlat.length;
-  }, [incomeStatementOrdered, balanceSheet, cashFlow, expandedRows]);
-
+  const histYearsPreview = meta?.years?.historical ?? [];
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
-  const isProjectionYear = (y: string) => y.endsWith("E") || projectionYears.includes(y);
-  const isFirstProjectionYear = (y: string) => projectionYears[0] === y;
-  const yearColClass = (base: string) => (y: string) =>
-    [
-      base,
-      "min-w-[88px]", // Keep year columns readable; prevents squashing when many years
-      isProjectionYear(y) ? "bg-slate-800/60" : "!text-blue-400",
-      isFirstProjectionYear(y) ? "border-l-2 border-amber-500/70" : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
   const lastHistoricYear = useMemo(
     () => (meta?.years?.historical ?? [])[(meta?.years?.historical ?? []).length - 1] ?? "",
     [meta]
@@ -1176,13 +1161,79 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
     }),
     [incomeStatement, balanceSheet, cashFlow]
   );
+  const incomeStatementSanitizedForPreview = useMemo(
+    () =>
+      sanitizeHistoricalRevenueInIncomeStatement(
+        incomeStatement ?? [],
+        revenueForecastTreeV1,
+        histYearsPreview
+      ),
+    [incomeStatement, revenueForecastTreeV1, histYearsPreview]
+  );
+  const historicalTotalRevByYear = useMemo(() => {
+    const rev = incomeStatement?.find((r) => r.id === "rev");
+    if (!rev || !histYearsPreview.length) return {} as Record<string, number>;
+    const out: Record<string, number> = {};
+    const is = incomeStatement ?? [];
+    for (const y of histYearsPreview) {
+      out[y] = computeRowValue(rev, y, is, is, allStatementsForProj);
+    }
+    return out;
+  }, [incomeStatement, histYearsPreview, allStatementsForProj]);
+  const mergeForecastRevenueInPreview =
+    (currentStepId === "forecast_drivers" ||
+      currentStepId === "projected_statements" ||
+      currentStepId === "dcf") &&
+    revenueForecastTreeV1.length > 0;
+  const incomeStatementForPreview = useMemo(() => {
+    if (mergeForecastRevenueInPreview) {
+      return mergeForecastRevenueTreeIntoIncomeStatementForPreview(
+        incomeStatementSanitizedForPreview,
+        revenueForecastTreeV1,
+        incomeStatement ?? [],
+        historicalTotalRevByYear
+      );
+    }
+    return incomeStatementSanitizedForPreview;
+  }, [
+    mergeForecastRevenueInPreview,
+    incomeStatementSanitizedForPreview,
+    revenueForecastTreeV1,
+    incomeStatement,
+    historicalTotalRevByYear,
+  ]);
+
+  const incomeStatementOrdered = useMemo(
+    () => getIncomeStatementDisplayOrder(incomeStatementForPreview ?? []),
+    [incomeStatementForPreview]
+  );
+
+  const totalRows = useMemo(() => {
+    const isFlat = flattenRows(incomeStatementOrdered, 0, expandedRows, { forStatement: "income" });
+    const bsFlat = flattenRows(balanceSheet ?? [], 0, expandedRows, { forStatement: "balance" });
+    const cfsFlat = flattenRows(cashFlow ?? [], 0, expandedRows, { forStatement: "cashflow" });
+    return isFlat.length + bsFlat.length + cfsFlat.length;
+  }, [incomeStatementOrdered, balanceSheet, cashFlow, expandedRows]);
+
+  const isProjectionYear = (y: string) => y.endsWith("E") || projectionYears.includes(y);
+  const isFirstProjectionYear = (y: string) => projectionYears[0] === y;
+  const yearColClass = (base: string) => (y: string) =>
+    [
+      base,
+      "min-w-[88px]",
+      isProjectionYear(y) ? "bg-slate-800/60" : "!text-blue-400",
+      isFirstProjectionYear(y) ? "border-l-2 border-amber-500/70" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
   const projectedRevenue = useMemo(() => {
     if (!incomeStatement?.length || projectionYears.length === 0) return undefined;
     const v1Config = revenueForecastConfigV1 ?? { rows: {} };
     const v1HasRows = Object.keys(v1Config.rows ?? {}).length > 0;
-    if (v1HasRows && validateRevenueForecastV1(incomeStatement, v1Config).valid) {
+    if (v1HasRows) {
       const { result, valid } = computeRevenueProjectionsV1(
         incomeStatement,
+        revenueForecastTreeV1,
         v1Config,
         projectionYears,
         lastHistoricYear,
@@ -1206,6 +1257,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   }, [
     incomeStatement,
     revenueForecastConfigV1,
+    revenueForecastTreeV1,
     revenueProjectionConfig,
     projectionYears,
     lastHistoricYear,

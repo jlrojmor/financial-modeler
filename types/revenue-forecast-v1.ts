@@ -14,14 +14,30 @@ export type RevenueForecastMethodV1 = "growth_rate" | "fixed_value";
 
 export type ForecastConfidenceV1 = "high" | "medium" | "low";
 
-/** Parameters for growth_rate: constant % or per-year %. Base from last historical or optional starting amount. */
+/** How the first projection year base is determined for growth_rate (historical vs manual start only). */
+export type GrowthStartingBasisV1 = "last_historical" | "starting_amount";
+
+/** How per-year growth is defined (direct growth methods only). */
+export type GrowthPatternTypeV1 = "constant" | "phases" | "by_year";
+
+/** One contiguous phase of constant growth % (projection years inclusive). */
+export interface GrowthPhaseV1 {
+  startYear: string;
+  endYear: string;
+  ratePercent: number;
+}
+
+/**
+ * Parameters for growth_rate: constant %, phased % (expanded to ratesByYear in engine), or by_year %.
+ * Base from last historical or manual starting amount.
+ */
 export interface GrowthRateParamsV1 {
-  /** Constant growth % (e.g. 5 for 5%). Used when ratesByYear is absent. */
   ratePercent?: number;
-  /** Per-year growth % when not constant. year -> percent */
   ratesByYear?: Record<string, number>;
-  /** Optional starting/base amount (stored units). Used as first projection-year base when no last historical value. */
   startingAmount?: number;
+  startingBasis?: GrowthStartingBasisV1;
+  growthPatternType?: GrowthPatternTypeV1;
+  growthPhases?: GrowthPhaseV1[];
 }
 
 /** Parameters for fixed_value: flat (same value each year) or manual by year. */
@@ -44,8 +60,11 @@ export interface RevenueForecastRowConfigV1 {
   rowId: string;
   forecastRole: RevenueForecastRoleV1;
   forecastMethod?: RevenueForecastMethodV1;
-  /** growth_rate: { ratePercent?, ratesByYear?, startingAmount? }. fixed_value: { value?, valuesByYear? }. allocation_of_parent: { allocationPercent? } or { allocationByYear? }. */
-  forecastParameters?: Record<string, number | Record<string, number> | undefined>;
+  /** growth_rate: includes growthPhases, growthPatternType when phased. fixed_value / allocation as before. */
+  forecastParameters?: Record<
+    string,
+    number | Record<string, number> | string | undefined | GrowthPhaseV1[] | unknown[]
+  >;
   forecastReferenceId?: string | null;
   forecastReason?: string;
   forecastConfidence?: ForecastConfidenceV1;
@@ -54,6 +73,18 @@ export interface RevenueForecastRowConfigV1 {
 export interface RevenueForecastConfigV1 {
   /** rowId -> config. Must include "rev" (Total Revenue) and each revenue stream/child. */
   rows: Record<string, RevenueForecastRowConfigV1>;
+}
+
+/**
+ * Forecast-only revenue hierarchy. Independent from incomeStatement rev.children.
+ * Edited only in Forecast Drivers; Historicals never sees these nodes except when id matches a historical row (isForecastOnly: false).
+ */
+export interface ForecastRevenueNodeV1 {
+  id: string;
+  label: string;
+  children: ForecastRevenueNodeV1[];
+  /** True if this line was added in Forecast Drivers only (no row in historical IS). */
+  isForecastOnly: boolean;
 }
 
 export const DEFAULT_REVENUE_FORECAST_CONFIG_V1: RevenueForecastConfigV1 = {

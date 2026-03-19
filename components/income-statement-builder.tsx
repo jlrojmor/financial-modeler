@@ -12,6 +12,7 @@ import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
 import { buildModelingContext, getSuggestionReasoningFromContext } from "@/lib/modeling-context";
 import { getSectionOwnerOrderForProfile } from "@/lib/company-aware-suggestions";
 import { getFinalRowClassificationState } from "@/lib/final-row-classification";
+import { collectForecastOnlyIdsFromTree } from "@/lib/historical-revenue-cleanup";
 import SbcOptionalSection from "@/components/sbc-optional-section";
 import AmortizationOptionalSection from "@/components/amortization-optional-section";
 import DepreciationOptionalSection from "@/components/depreciation-optional-section";
@@ -80,9 +81,15 @@ export default function IncomeStatementBuilder() {
   
   const isLocked = useModelStore((s) => s.sectionLocks["income_statement"] ?? false);
 
+  const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
+  const forecastOnlyIds = useMemo(
+    () => collectForecastOnlyIdsFromTree(revenueForecastTreeV1),
+    [revenueForecastTreeV1]
+  );
   const rowsMissingIsClassification = useMemo(
-    () => getIsRowsMissingClassification(incomeStatement ?? []),
-    [incomeStatement]
+    () =>
+      getIsRowsMissingClassification(incomeStatement ?? [], { excludeRowIds: forecastOnlyIds }),
+    [incomeStatement, forecastOnlyIds]
   );
   const rowsClassifiedCustom = useMemo(
     () => getIsRowsClassifiedCustom(incomeStatement ?? []),

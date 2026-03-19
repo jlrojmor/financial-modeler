@@ -1,6 +1,8 @@
 /**
- * Revenue Forecast v1: validation rules.
- * Enforces approved architectures: independent stream build, or parent + allocation build.
+ * Revenue Forecast v1: recursive hierarchy validation.
+ * - Direct parent (independent_driver): optional allocation children only; if any, sum 100%.
+ * - Build-from-children (derived_sum): children are independent_driver or derived_sum (recursive).
+ * - Total Revenue (rev): forecast directly OR build from top-level lines.
  */
 
 import type { Row } from "@/types/finance";
@@ -9,44 +11,306 @@ import type {
   RevenueForecastRowConfigV1,
   RevenueForecastRoleV1,
   RevenueForecastValidationResult,
+  GrowthStartingBasisV1,
+  ForecastRevenueNodeV1,
 } from "@/types/revenue-forecast-v1";
+import { validateGrowthPhases, type GrowthPhaseV1 } from "@/lib/revenue-growth-phases-v1";
 
-function err(message: string, rowId?: string, code?: string): RevenueForecastValidationResult {
-  return { valid: false, errors: [{ rowId, message, code }] };
-}
+/** Sum of allocation % under a direct row must match 100 within this tolerance (floating-point safe). */
+export const REVENUE_ALLOC_SUM_TOLERANCE = 1e-6;
 
 function ok(): RevenueForecastValidationResult {
   return { valid: true, errors: [] };
 }
 
-function findRowLabel(incomeStatement: Row[], rowId: string): string {
-  const rev = incomeStatement.find((r) => r.id === "rev");
-  if (!rev) return rowId;
-  if (rev.id === rowId) return rev.label ?? rowId;
-  for (const s of rev.children ?? []) {
-    if (s.id === rowId) return s.label ?? rowId;
-    for (const c of s.children ?? []) {
-      if (c.id === rowId) return c.label ?? rowId;
+export interface ValidateRevenueForecastV1Options {
+  forecastTree: ForecastRevenueNodeV1[];
+  lastHistoricYear?: string;
+  lastHistoricByRowId?: Record<string, number>;
+  /** Required for growth phases / by-year checks. */
+  projectionYears?: string[];
+}
+
+function subtreeContributes(node: ForecastRevenueNodeV1, rows: Record<string, RevenueForecastRowConfigV1>): boolean {
+  const cfg = rows[node.id];
+  if (!cfg) return false;
+  if (cfg.forecastRole === "independent_driver" && cfg.forecastMethod) return true;
+  if (cfg.forecastRole === "derived_sum") {
+    return (node.children ?? []).some((c) => subtreeContributes(c, rows));
+  }
+  return false;
+}
+
+function validateIndependentLeafOrParent(
+  node: ForecastRevenueNodeV1,
+  cfg: RevenueForecastRowConfigV1,
+  rows: Record<string, RevenueForecastRowConfigV1>,
+  lastHistoricByRowId: Record<string, number> | undefined,
+  errors: RevenueForecastValidationResult["errors"],
+  projectionYears: string[]
+): void {
+  if (!cfg.forecastMethod) {
+    errors.push({
+      rowId: node.id,
+      message: `"${node.label}": Forecast this line directly requires a construction method.`,
+      code: "INDEPENDENT_NO_METHOD",
+    });
+    return;
+  }
+  if (cfg.forecastMethod !== "growth_rate" && cfg.forecastMethod !== "fixed_value") {
+    errors.push({ rowId: node.id, message: "Only growth or fixed-value constructions are supported.", code: "INVALID_METHOD" });
+    return;
+  }
+  const params = cfg.forecastParameters as Record<string, unknown> | undefined;
+  const hasCh = (node.children?.length ?? 0) > 0;
+
+  if (cfg.forecastMethod === "growth_rate") {
+    const rawBasis = params?.startingBasis as string | undefined;
+    if (rawBasis === "parent_share" || params?.parentSharePercentForBase != null) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Use "Allocate from parent" for percentage splits—not as a growth starting basis.`,
+        code: "OBSOLETE_PARENT_SHARE",
+      });
+      return;
+    }
+    const basis = params?.startingBasis as GrowthStartingBasisV1 | undefined;
+    const growthPatternType = params?.growthPatternType as string | undefined;
+    const rby = params?.ratesByYear as Record<string, number> | undefined;
+    const hasRby = rby && typeof rby === "object" && Object.keys(rby).length > 0;
+    const proj = projectionYears.length ? projectionYears : Object.keys(rby ?? {});
+    const legacyHistByYear =
+      basis === "last_historical" && hasRby && growthPatternType !== "phases";
+    const byYearStored = growthPatternType === "by_year" && hasRby;
+
+    if (growthPatternType === "phases") {
+      const raw = params?.growthPhases;
+      const phases: GrowthPhaseV1[] = Array.isArray(raw)
+        ? raw.map((x: unknown) => {
+            const o = x as Record<string, unknown>;
+            return {
+              startYear: String(o.startYear ?? ""),
+              endYear: String(o.endYear ?? ""),
+              ratePercent: Number(o.ratePercent),
+            };
+          })
+        : [];
+      const { ok, errors: phaseErrs } = validateGrowthPhases(phases, proj);
+      if (!ok) {
+        for (const msg of phaseErrs) {
+          errors.push({ rowId: node.id, message: `"${node.label}": ${msg}`, code: "GROWTH_PHASES_INVALID" });
+        }
+      }
+      const rp = params?.ratePercent;
+      if (rp == null || !Number.isFinite(Number(rp))) {
+        errors.push({
+          rowId: node.id,
+          message: `"${node.label}": Growth % is required.`,
+          code: "GROWTH_RATE_PCT_REQUIRED",
+        });
+      }
+    } else if (byYearStored || legacyHistByYear) {
+      const years = proj.length ? proj : Object.keys(rby ?? {});
+      for (const y of years) {
+        const v = rby?.[y];
+        if (v == null || !Number.isFinite(Number(v))) {
+          errors.push({
+            rowId: node.id,
+            message: `"${node.label}": By-year growth needs a rate for each projection year (${y}).`,
+            code: "GROWTH_BY_YEAR_INCOMPLETE",
+          });
+          break;
+        }
+      }
+      const rp = params?.ratePercent;
+      if (rp == null || !Number.isFinite(Number(rp))) {
+        errors.push({
+          rowId: node.id,
+          message: `"${node.label}": Growth % is required.`,
+          code: "GROWTH_RATE_PCT_REQUIRED",
+        });
+      }
+    } else {
+      const rp = params?.ratePercent;
+      if (rp == null || !Number.isFinite(Number(rp))) {
+        errors.push({
+          rowId: node.id,
+          message: `"${node.label}": Growth % is required.`,
+          code: "GROWTH_RATE_PCT_REQUIRED",
+        });
+      }
+    }
+    const lastVal = lastHistoricByRowId?.[node.id];
+    const hasHistoric = typeof lastVal === "number" && !Number.isNaN(lastVal);
+    const hasStarting = params?.startingAmount != null && Number.isFinite(Number(params.startingAmount));
+    if (basis !== "last_historical" && basis !== "starting_amount") {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Choose growth from last historical actual or from manual starting amount.`,
+        code: "GROWTH_BASIS_REQUIRED",
+      });
+    } else if (basis === "last_historical" && node.isForecastOnly) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Forecast-only lines cannot use growth from historical actual. Use manual starting amount, flat value, or manual by year.`,
+        code: "FORECAST_ONLY_NO_HISTORICAL_GROWTH",
+      });
+    } else if (basis === "last_historical" && !hasHistoric) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Growth from historical requires last historical actual for this line.`,
+        code: "GROWTH_HIST_NEEDS_ACTUAL",
+      });
+    } else if (basis === "starting_amount" && !hasStarting) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Growth from manual start requires a starting amount.`,
+        code: "GROWTH_START_NEEDS_AMOUNT",
+      });
     }
   }
-  return rowId;
+
+  if (cfg.forecastMethod === "fixed_value") {
+    const vByY = params?.valuesByYear as Record<string, number> | undefined;
+    if (vByY && typeof vByY === "object" && Object.keys(vByY).length > 0) {
+      const hasAny = Object.values(vByY).some((v) => v != null && Number.isFinite(Number(v)));
+      if (!hasAny) {
+        errors.push({
+          rowId: node.id,
+          message: `"${node.label}": Manual by year requires at least one projected year value.`,
+          code: "MANUAL_BY_YEAR_NEEDS_VALUES",
+        });
+      }
+    } else {
+      const v = params?.value;
+      if (v == null || !Number.isFinite(Number(v))) {
+        errors.push({
+          rowId: node.id,
+          message: `"${node.label}": Flat value requires a numeric value.`,
+          code: "FLAT_VALUE_REQUIRED",
+        });
+      }
+    }
+  }
+
+  if (hasCh) {
+    let sum = 0;
+    for (const child of node.children) {
+      const cCfg = rows[child.id];
+      if (!cCfg) {
+        errors.push({
+          rowId: child.id,
+          message: `Child "${child.label}" must be "Allocate from parent" under a direct-forecast row.`,
+          code: "CHILD_NO_CONFIG",
+        });
+        continue;
+      }
+      if (cCfg.forecastRole !== "allocation_of_parent") {
+        errors.push({
+          rowId: child.id,
+          message: `Under a direct-forecast row, children must be "Allocate from parent".`,
+          code: "DIRECT_PARENT_NON_ALLOC_CHILD",
+        });
+      }
+      if (cCfg.forecastMethod) {
+        errors.push({ rowId: child.id, message: "Allocate-from-parent rows cannot have a forecast method.", code: "ALLOC_HAS_METHOD" });
+      }
+      if ((child.children?.length ?? 0) > 0) {
+        errors.push({
+          rowId: child.id,
+          message: "Allocate-from-parent lines cannot have sub-lines.",
+          code: "ALLOC_HAS_CHILDREN",
+        });
+      }
+      const pct = cCfg.forecastParameters?.allocationPercent;
+      sum += typeof pct === "number" ? pct : 0;
+    }
+    if (sum > 100 + REVENUE_ALLOC_SUM_TOLERANCE) {
+      errors.push({
+        rowId: node.id,
+        message: `Split by % under "${node.label}" exceeds 100% (currently ${sum.toFixed(2)}%; reduce by ${(sum - 100).toFixed(2)}%).`,
+        code: "ALLOC_SUM_OVER_100",
+      });
+    } else if (sum < 100 - REVENUE_ALLOC_SUM_TOLERANCE) {
+      errors.push({
+        rowId: node.id,
+        message: `Split by % under "${node.label}" must total exactly 100% (currently ${sum.toFixed(2)}%; missing ${(100 - sum).toFixed(2)}%).`,
+        code: "ALLOC_SUM_NOT_100",
+      });
+    }
+  }
 }
 
-export interface ValidateRevenueForecastV1Options {
-  /** Last historical year (e.g. "2024"). When provided with lastHistoricByRowId, growth_rate rows are checked for a base. */
-  lastHistoricYear?: string;
-  /** Map of rowId -> stored value for last historical year. If a growth_rate row has no entry or NaN and no startingAmount, validation fails. */
-  lastHistoricByRowId?: Record<string, number>;
+function validateDerivedNode(
+  node: ForecastRevenueNodeV1,
+  rows: Record<string, RevenueForecastRowConfigV1>,
+  lastHistoricByRowId: Record<string, number> | undefined,
+  errors: RevenueForecastValidationResult["errors"],
+  projectionYears: string[]
+): void {
+  const cfg = rows[node.id];
+  if (!cfg) {
+    errors.push({ rowId: node.id, message: `"${node.label}" needs forecast config.`, code: "NODE_NO_CONFIG" });
+    return;
+  }
+  if (cfg.forecastRole !== "derived_sum") return;
+  if (cfg.forecastMethod) {
+    errors.push({ rowId: node.id, message: "Build from child lines: no direct forecast method on this row.", code: "DERIVED_HAS_METHOD" });
+  }
+  if (!node.children?.length) {
+    errors.push({
+      rowId: node.id,
+      message: `"${node.label}": Build from child lines requires at least one child.`,
+      code: "DERIVED_SUM_NO_CHILDREN",
+    });
+    return;
+  }
+  for (const child of node.children) {
+    validateDriverOrDerivedChild(child, node.id, rows, lastHistoricByRowId, errors, projectionYears);
+  }
+  if (!subtreeContributes(node, rows)) {
+    errors.push({
+      rowId: node.id,
+      message: `"${node.label}": At least one descendant must forecast directly so the sum is defined.`,
+      code: "DERIVED_NO_CONTRIBUTOR",
+    });
+  }
 }
 
-/**
- * Validate revenue tree and v1 config. Returns errors; if valid, projections can run.
- * Pass options.lastHistoricByRowId to validate that growth_rate rows have a base (last historical or starting amount).
- */
+function validateDriverOrDerivedChild(
+  node: ForecastRevenueNodeV1,
+  _parentDerivedId: string,
+  rows: Record<string, RevenueForecastRowConfigV1>,
+  lastHistoricByRowId: Record<string, number> | undefined,
+  errors: RevenueForecastValidationResult["errors"],
+  projectionYears: string[]
+): void {
+  const cfg = rows[node.id];
+  if (!cfg) {
+    errors.push({ rowId: node.id, message: `"${node.label}" needs a role.`, code: "CHILD_NO_CONFIG" });
+    return;
+  }
+  if (cfg.forecastRole === "allocation_of_parent") {
+    errors.push({
+      rowId: node.id,
+      message: `Under "Build from child lines", use "Forecast this line directly" or "Build from child lines"—not allocation.`,
+      code: "DERIVED_CHILD_ALLOCATION",
+    });
+    return;
+  }
+  if (cfg.forecastRole === "independent_driver") {
+    validateIndependentLeafOrParent(node, cfg, rows, lastHistoricByRowId, errors, projectionYears);
+    return;
+  }
+  if (cfg.forecastRole === "derived_sum") {
+    validateDerivedNode(node, rows, lastHistoricByRowId, errors, projectionYears);
+  }
+}
+
 export function validateRevenueForecastV1(
   incomeStatement: Row[],
   config: RevenueForecastConfigV1,
-  options?: ValidateRevenueForecastV1Options
+  options: ValidateRevenueForecastV1Options
 ): RevenueForecastValidationResult {
   const errors: RevenueForecastValidationResult["errors"] = [];
   const rev = incomeStatement.find((r) => r.id === "rev");
@@ -56,250 +320,74 @@ export function validateRevenueForecastV1(
   }
 
   const rows = config.rows ?? {};
-  const revConfig = rows["rev"];
-  const lastHistoricByRowId = options?.lastHistoricByRowId;
+  const revCfg = rows["rev"];
+  const streams = options.forecastTree ?? [];
+  const lastHistoricByRowId = options.lastHistoricByRowId;
 
-  // Total Revenue must be derived_sum
-  if (!revConfig) {
-    errors.push({ rowId: "rev", message: "Total Revenue must have a forecast role (derived_sum).", code: "REV_NO_CONFIG" });
-  } else if (revConfig.forecastRole !== "derived_sum") {
-    errors.push({
-      rowId: "rev",
-      message: "Total Revenue must be derived_sum (sum of streams).",
-      code: "REV_NOT_DERIVED",
-    });
+  if (!revCfg) {
+    errors.push({ rowId: "rev", message: "Total Revenue needs a forecast mode.", code: "REV_NO_CONFIG" });
+    return { valid: false, errors };
   }
 
-  // derived_sum row cannot have a method
-  if (revConfig?.forecastRole === "derived_sum" && revConfig.forecastMethod) {
-    errors.push({
-      rowId: "rev",
-      message: "A derived_sum row cannot have a forecast method.",
-      code: "DERIVED_HAS_METHOD",
-    });
+  if (revCfg.forecastRole === "allocation_of_parent") {
+    errors.push({ rowId: "rev", message: "Total Revenue cannot be an allocation row.", code: "REV_ALLOC" });
   }
 
-  const children = rev.children ?? [];
-  const streamIds = new Set(children.map((r) => r.id));
-
-  for (const stream of children) {
-    const cfg = rows[stream.id];
-    const hasChildren = (stream.children?.length ?? 0) > 0;
-
-    if (!cfg) {
-      errors.push({
-        rowId: stream.id,
-        message: `Revenue stream "${stream.label}" has no forecast config. Set role: independent_driver or derived_sum.`,
-        code: "STREAM_NO_CONFIG",
-      });
-      continue;
+  if (revCfg.forecastRole === "derived_sum") {
+    if (revCfg.forecastMethod) {
+      errors.push({ rowId: "rev", message: "Build Total Revenue from lines: no method on Total Revenue.", code: "REV_DERIVED_HAS_METHOD" });
     }
-
-    if (cfg.forecastRole === "derived_sum") {
-      if (cfg.forecastMethod) {
-        errors.push({ rowId: stream.id, message: "derived_sum row cannot have a forecast method.", code: "DERIVED_HAS_METHOD" });
-      }
-      if (hasChildren) {
-        for (const child of stream.children ?? []) {
-          const childCfg = rows[child.id];
-          if (childCfg && childCfg.forecastRole === "allocation_of_parent") {
-            errors.push({
-              rowId: child.id,
-              message: "Children of a derived_sum parent must be independent_driver (forecast each child directly), not allocation_of_parent.",
-              code: "DERIVED_CHILD_ALLOCATION",
-            });
-          }
-        }
-      } else {
-        errors.push({
-          rowId: stream.id,
-          message: `"${stream.label}" is derived_sum but has no child rows. Add breakdowns and set each to independent_driver, or switch this stream to independent_driver.`,
-          code: "DERIVED_SUM_NO_CHILDREN",
-        });
-      }
-    } else if (cfg.forecastRole === "independent_driver") {
-      if (hasChildren) {
-        // Children must be allocation_of_parent only
-        for (const child of stream.children ?? []) {
-          const childCfg = rows[child.id];
-          if (!childCfg) {
-            errors.push({
-              rowId: child.id,
-              message: `Child "${child.label}" needs a forecast role (allocation_of_parent).`,
-              code: "CHILD_NO_CONFIG",
-            });
-          } else if (childCfg.forecastRole !== "allocation_of_parent") {
-            errors.push({
-              rowId: child.id,
-              message: "Children of an independent_driver parent must be allocation_of_parent only.",
-              code: "INDEPENDENT_CHILD_NOT_ALLOC",
-            });
-          }
-          if (childCfg?.forecastRole === "allocation_of_parent" && childCfg.forecastMethod) {
-            errors.push({
-              rowId: child.id,
-              message: "allocation_of_parent rows cannot have an independent forecast method.",
-              code: "ALLOC_HAS_METHOD",
-            });
-          }
-        }
-      }
-      if (!cfg.forecastMethod) {
-        errors.push({
-          rowId: stream.id,
-          message: "independent_driver must have a forecast method (growth_rate or fixed_value).",
-          code: "INDEPENDENT_NO_METHOD",
-        });
-      }
-      if (cfg.forecastMethod && cfg.forecastMethod !== "growth_rate" && cfg.forecastMethod !== "fixed_value") {
-        errors.push({
-          rowId: stream.id,
-          message: "v1 supports only growth_rate or fixed_value.",
-          code: "INVALID_METHOD",
-        });
-      }
-      // Growth rate: must have last historical value or starting amount (when options provided)
-      if (cfg.forecastMethod === "growth_rate" && lastHistoricByRowId) {
-        const params = cfg.forecastParameters as { startingAmount?: number } | undefined;
-        const lastVal = lastHistoricByRowId[stream.id];
-        const hasHistoric = typeof lastVal === "number" && !Number.isNaN(lastVal);
-        const hasStarting = params?.startingAmount != null && Number.isFinite(Number(params.startingAmount));
-        if (!hasHistoric && !hasStarting) {
-          const label = findRowLabel(incomeStatement, stream.id);
-          errors.push({
-            rowId: stream.id,
-            message: `"${label}": Growth rate requires a historical value or starting amount. Enter a starting amount or switch to fixed/manual.`,
-            code: "GROWTH_RATE_NEEDS_BASE",
-          });
-        }
-      }
-      // Fixed value manual-by-year: must have at least one projected value
-      if (cfg.forecastMethod === "fixed_value") {
-        const params = cfg.forecastParameters as { value?: number; valuesByYear?: Record<string, number> } | undefined;
-        const valuesByYear = params?.valuesByYear;
-        if (valuesByYear && typeof valuesByYear === "object" && Object.keys(valuesByYear).length > 0) {
-          const hasAny = Object.values(valuesByYear).some((v) => v != null && Number.isFinite(Number(v)));
-          if (!hasAny) {
-            const label = findRowLabel(incomeStatement, stream.id);
-            errors.push({
-              rowId: stream.id,
-              message: `"${label}": Manual-by-year requires at least one projected value.`,
-              code: "MANUAL_BY_YEAR_NEEDS_VALUES",
-            });
-          }
-        }
-      }
-    } else if (cfg.forecastRole === "allocation_of_parent") {
-      // allocation_of_parent is only valid as child of a stream (not for top-level streams)
+    if (streams.length === 0) {
       errors.push({
-        rowId: stream.id,
-        message: "allocation_of_parent is only valid for child lines under a stream, not for top-level streams.",
-        code: "ALLOC_AT_TOP",
+        message: "Add at least one top-level line, or forecast Total Revenue directly.",
+        code: "EMPTY_FORECAST_TREE",
+      });
+      return { valid: false, errors };
+    }
+    for (const stream of streams) {
+      validateDriverOrDerivedChild(stream, "rev", rows, lastHistoricByRowId, errors, options.projectionYears ?? []);
+    }
+    if (!streams.some((s) => subtreeContributes(s, rows))) {
+      errors.push({
+        rowId: "rev",
+        message: "At least one top-level line must forecast directly (or contain a valid build-from-children subtree).",
+        code: "REV_NO_CONTRIBUTOR",
       });
     }
-  }
-
-  // Allocation children: must sum to 100%
-  for (const stream of children) {
-    const cfg = rows[stream.id];
-    if (cfg?.forecastRole !== "independent_driver") continue;
-    const childList = stream.children ?? [];
-    if (childList.length === 0) continue;
-    let sum = 0;
-    for (const child of childList) {
-      const cCfg = rows[child.id];
-      const pct = cCfg?.forecastParameters?.allocationPercent ?? 0;
-      sum += typeof pct === "number" ? pct : 0;
-    }
-    if (Math.abs(sum - 100) > 0.01) {
-      errors.push({
-        rowId: stream.id,
-        message: `Allocation % for children of "${stream.label}" must sum to 100% (current: ${sum.toFixed(1)}%). Set each child's allocation so the total is 100%.`,
-        code: "ALLOC_SUM",
-      });
-    }
-  }
-
-  // derived_sum stream must have at least one child with independent_driver and a method
-  for (const stream of children) {
-    const cfg = rows[stream.id];
-    if (cfg?.forecastRole !== "derived_sum") continue;
-    const childList = stream.children ?? [];
-    const validDrivers = childList.filter((c) => {
-      const cCfg = rows[c.id];
-      return cCfg?.forecastRole === "independent_driver" && cCfg.forecastMethod;
-    });
-    if (childList.length > 0 && validDrivers.length === 0) {
-      errors.push({
-        rowId: stream.id,
-        message: `"${stream.label}" is built from breakdowns but no child has role "Forecast this breakdown directly" with a method. Set each breakdown to that role and choose growth rate or fixed value.`,
-        code: "DERIVED_NO_VALID_DRIVERS",
-      });
-    }
-    // Growth rate / fixed_value validation for children of derived_sum
-    for (const child of childList) {
-      const cCfg = rows[child.id];
-      if (cCfg?.forecastRole !== "independent_driver" || !cCfg.forecastMethod) continue;
-      if (cCfg.forecastMethod === "growth_rate" && lastHistoricByRowId) {
-        const params = cCfg.forecastParameters as { startingAmount?: number } | undefined;
-        const lastVal = lastHistoricByRowId[child.id];
-        const hasHistoric = typeof lastVal === "number" && !Number.isNaN(lastVal);
-        const hasStarting = params?.startingAmount != null && Number.isFinite(Number(params.startingAmount));
-        if (!hasHistoric && !hasStarting) {
-          errors.push({
-            rowId: child.id,
-            message: `"${child.label}": Growth rate requires a historical value or starting amount. Enter a starting amount or switch to fixed/manual.`,
-            code: "GROWTH_RATE_NEEDS_BASE",
-          });
-        }
-      }
-      if (cCfg.forecastMethod === "fixed_value") {
-        const params = cCfg.forecastParameters as { value?: number; valuesByYear?: Record<string, number> } | undefined;
-        const valuesByYear = params?.valuesByYear;
-        if (valuesByYear && typeof valuesByYear === "object" && Object.keys(valuesByYear).length > 0) {
-          const hasAny = Object.values(valuesByYear).some((v) => v != null && Number.isFinite(Number(v)));
-          if (!hasAny) {
-            errors.push({
-              rowId: child.id,
-              message: `"${child.label}": Manual-by-year requires at least one projected value.`,
-              code: "MANUAL_BY_YEAR_NEEDS_VALUES",
-            });
-          }
-        }
-      }
-    }
+  } else if (revCfg.forecastRole === "independent_driver") {
+    validateIndependentLeafOrParent(
+      { id: "rev", label: "Total Revenue", children: streams, isForecastOnly: false },
+      revCfg,
+      rows,
+      lastHistoricByRowId,
+      errors,
+      options.projectionYears ?? []
+    );
+  } else {
+    errors.push({ rowId: "rev", message: "Total Revenue must be forecast directly or built from child lines.", code: "REV_BAD_ROLE" });
   }
 
   return errors.length > 0 ? { valid: false, errors } : ok();
 }
 
-/**
- * Get allowed forecast roles for a row given its position in the tree.
- */
-export function getAllowedRolesV1(
-  rowId: string,
-  isTotalRev: boolean,
-  isTopLevelStream: boolean,
-  hasChildren: boolean
-): RevenueForecastRoleV1[] {
-  if (isTotalRev) return ["derived_sum"];
-  if (isTopLevelStream) return ["independent_driver", "derived_sum"];
-  return ["allocation_of_parent"];
+export function getAllocationPercentSum(
+  children: ForecastRevenueNodeV1[],
+  rows: Record<string, RevenueForecastRowConfigV1>
+): number {
+  let sum = 0;
+  for (const c of children) {
+    const pct = rows[c.id]?.forecastParameters?.allocationPercent;
+    sum += typeof pct === "number" ? pct : 0;
+  }
+  return sum;
 }
 
-/**
- * Allowed role(s) for a child row given the parent stream's role.
- * v1: parent independent_driver => child allocation_of_parent only; parent derived_sum => child independent_driver only.
- */
 export function getAllowedRolesForChild(parentRole: RevenueForecastRoleV1 | undefined): RevenueForecastRoleV1[] {
   if (parentRole === "independent_driver") return ["allocation_of_parent"];
-  if (parentRole === "derived_sum") return ["independent_driver"];
+  if (parentRole === "derived_sum") return ["independent_driver", "derived_sum"];
   return ["allocation_of_parent", "independent_driver"];
 }
 
-/**
- * Get allowed methods for a row (only when role is independent_driver).
- */
 export function getAllowedMethodsV1(): ("growth_rate" | "fixed_value")[] {
   return ["growth_rate", "fixed_value"];
 }

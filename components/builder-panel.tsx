@@ -11,6 +11,10 @@ import { checkBalanceSheetBalance } from "@/lib/calculations";
 import { getUnclassifiedNonCoreBsRows } from "@/lib/bs-core-rows";
 import { getIsRowsMissingClassification } from "@/lib/is-classification";
 import { getFullClassificationReport, getReviewItemsForHistoricals } from "@/lib/classification-completeness";
+import {
+  sanitizeHistoricalRevenueInIncomeStatement,
+  collectForecastOnlyIdsFromTree,
+} from "@/lib/historical-revenue-cleanup";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 import HistoricalsHelpModal from "@/components/historicals-help-modal";
 import CompanyContextTab from "@/components/company-context-tab";
@@ -62,10 +66,27 @@ export default function BuilderPanel() {
   }, [currentStepId, balanceSheet]);
 
   const incomeStatement = useModelStore((s) => s.incomeStatement);
+  const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
+  /** Historicals / review: real IS only — no forecast-polluted revenue subtree. */
+  const incomeStatementForHistoricals = useMemo(
+    () =>
+      sanitizeHistoricalRevenueInIncomeStatement(
+        incomeStatement ?? [],
+        revenueForecastTreeV1,
+        meta?.years?.historical ?? []
+      ),
+    [incomeStatement, revenueForecastTreeV1, meta?.years?.historical]
+  );
+  const forecastOnlyRevenueIds = useMemo(
+    () => collectForecastOnlyIdsFromTree(revenueForecastTreeV1),
+    [revenueForecastTreeV1]
+  );
   const rowsMissingIsClassification = useMemo(() => {
-    if (currentStepId !== "historicals" || !incomeStatement?.length) return [];
-    return getIsRowsMissingClassification(incomeStatement);
-  }, [currentStepId, incomeStatement]);
+    if (currentStepId !== "historicals" || !incomeStatementForHistoricals?.length) return [];
+    return getIsRowsMissingClassification(incomeStatementForHistoricals, {
+      excludeRowIds: forecastOnlyRevenueIds,
+    });
+  }, [currentStepId, incomeStatementForHistoricals, forecastOnlyRevenueIds]);
 
   const cashFlow = useModelStore((s) => s.cashFlow);
 
@@ -74,7 +95,7 @@ export default function BuilderPanel() {
   const classificationReport =
     currentStepId === "historicals"
       ? getFullClassificationReport({
-          incomeStatement: incomeStatement ?? [],
+          incomeStatement: incomeStatementForHistoricals ?? [],
           balanceSheet: balanceSheet ?? [],
           cashFlow: cashFlow ?? [],
         })
@@ -83,7 +104,7 @@ export default function BuilderPanel() {
   const reviewItems =
     currentStepId === "historicals" && classificationReport
       ? getReviewItemsForHistoricals(classificationReport, {
-          incomeStatement: incomeStatement ?? [],
+          incomeStatement: incomeStatementForHistoricals ?? [],
           balanceSheet: balanceSheet ?? [],
           cashFlow: cashFlow ?? [],
         })

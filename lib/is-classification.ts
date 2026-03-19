@@ -22,13 +22,23 @@ function flattenIsRows(rows: Row[]): Row[] {
   return out;
 }
 
+export type IsClassificationOptions = {
+  /** Row ids that are forecast-layer only (never require historical IS classification). */
+  excludeRowIds?: Set<string>;
+};
+
 /**
  * Returns IS rows that are missing sectionOwner or isOperating (custom rows only).
  * Template rows (isTemplateRow === true) and known template IDs are never included.
  */
-export function getIsRowsMissingClassification(incomeStatement: Row[]): Row[] {
+export function getIsRowsMissingClassification(
+  incomeStatement: Row[],
+  options?: IsClassificationOptions
+): Row[] {
+  const ex = options?.excludeRowIds;
   const flat = flattenIsRows(incomeStatement ?? []);
   return flat.filter((r) => {
+    if (ex?.has(r.id)) return false;
     if (r.isTemplateRow === true) return false;
     if (TEMPLATE_IS_ROW_IDS.has(r.id)) return false;
     const missingSection = r.sectionOwner == null || r.sectionOwner === undefined;

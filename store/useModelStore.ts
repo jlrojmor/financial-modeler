@@ -30,8 +30,28 @@ import type {
   RevenueBreakdownItem,
 } from "@/types/revenue-projection";
 import { DEFAULT_REVENUE_PROJECTION_CONFIG } from "@/types/revenue-projection";
-import type { RevenueForecastConfigV1, RevenueForecastRowConfigV1, RevenueForecastRoleV1 } from "@/types/revenue-forecast-v1";
+import type {
+  RevenueForecastConfigV1,
+  RevenueForecastRowConfigV1,
+  RevenueForecastRoleV1,
+  ForecastRevenueNodeV1,
+} from "@/types/revenue-forecast-v1";
 import { DEFAULT_REVENUE_FORECAST_CONFIG_V1 } from "@/types/revenue-forecast-v1";
+import {
+  cloneRevChildrenToForecastTree,
+  addChildToForecastTree,
+  collectSubtreeIdsFromForecastTree,
+  pruneForecastTreeByIds,
+  findForecastNode,
+  promoteAllocationRowToForecastSibling,
+  updateForecastTreeNodeLabel,
+} from "@/lib/revenue-forecast-tree-v1";
+import {
+  sanitizeHistoricalRevenueInIncomeStatement,
+  pruneForecastTreeToMatchSanitizedIs,
+  collectAllForecastTreeIds,
+  removeRevenueRowIdsUnderRev,
+} from "@/lib/historical-revenue-cleanup";
 import { recomputeCalculations, computeRowValue } from "@/lib/calculations";
 import {
   createIncomeStatementTemplate,
@@ -524,6 +544,8 @@ export type ProjectSnapshot = {
   revenueProjectionConfig: RevenueProjectionConfig;
   /** Revenue forecast v1 (roles, methods, parameters). */
   revenueForecastConfigV1: RevenueForecastConfigV1;
+  /** Forecast Drivers revenue hierarchy only; omitted in legacy saves → migrate from rev.children. */
+  revenueForecastTreeV1?: ForecastRevenueNodeV1[];
   /** IS Build: COGS as % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' = one % for all years, 'custom' = per-year %. */
@@ -651,6 +673,8 @@ export type ModelState = {
   revenueProjectionConfig: RevenueProjectionConfig;
   /** Revenue forecast v1: structured roles/methods (Forecast Drivers → Revenue). When valid, used for projected revenue. */
   revenueForecastConfigV1: RevenueForecastConfigV1;
+  /** Forecast Drivers revenue tree only (never mutates IS rev.children). */
+  revenueForecastTreeV1: ForecastRevenueNodeV1[];
   /** IS Build: COGS % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' | 'custom' per COGS line. */
@@ -849,7 +873,18 @@ export type ModelActions = {
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => string | undefined;
   /** Add a child breakdown under a revenue stream (v1 hierarchy). */
-  addRevenueStreamChild: (parentStreamId: string, label: string) => void;
+  addRevenueStreamChild: (parentStreamId: string, label: string) => string | undefined;
+  /** Rename a node in the revenue forecast tree (and matching Income Statement row label). */
+  renameRevenueForecastTreeNodeV1: (rowId: string, label: string) => void;
+  /** Remove a stream or breakdown from the forecast tree only (does not mutate Historicals IS). */
+  removeForecastRevenueRowV1: (rowId: string) => void;
+  /** Nested allocation only: move row beside parent as direct or derived forecast line. */
+  promoteAllocationRowToForecastLine: (
+    rowId: string,
+    asDerived: boolean
+  ) => "ok" | "top_level_parent" | "not_found";
+  /** If forecast tree is empty but Historicals has revenue children, clone once into forecast tree. */
+  syncRevenueForecastTreeFromHistoricalIfEmpty: () => void;
   updateIncomeStatementValue: (rowId: string, year: string, value: number) => void;
 
   // IS Build: revenue projection config (method + inputs per stream/sub-item)
@@ -1031,6 +1066,7 @@ const defaultState: ModelState = {
   wcExcludedIds: [],
   revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
   revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
+  revenueForecastTreeV1: [],
   cogsPctByRevenueLine: {},
   cogsPctModeByRevenueLine: {},
   cogsPctByRevenueLineByYear: {},
@@ -1102,6 +1138,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     wcExcludedIds: state.wcExcludedIds,
     revenueProjectionConfig: state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
     revenueForecastConfigV1: state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1,
+    revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
     cogsPctByRevenueLine: state.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: state.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: state.cogsPctByRevenueLineByYear ?? {},
@@ -1156,13 +1193,36 @@ function applyProjectSnapshot(
   snapshot: ProjectSnapshot
 ) {
   const normalizedIS = normalizeIncomeStatementOperatingExpenses(snapshot.incomeStatement ?? []);
+  const revForTree = normalizedIS.find((r) => r.id === "rev");
+  const snapTree = snapshot.revenueForecastTreeV1;
+  const revenueForecastTreeV1Raw =
+    Array.isArray(snapTree) && snapTree.length > 0
+      ? snapTree
+      : cloneRevChildrenToForecastTree(revForTree?.children ?? []);
   const safeMeta = snapshot.meta && typeof snapshot.meta === "object" && snapshot.meta.years
     ? snapshot.meta
     : { companyName: "", companyType: "public" as const, currency: "USD", currencyUnit: "millions" as const, modelType: "dcf" as const, years: { historical: [] as string[], projection: [] as string[] } };
+  const histYearsLoad = safeMeta.years?.historical ?? [];
+  const incomeStatementSanitized = sanitizeHistoricalRevenueInIncomeStatement(
+    normalizedIS,
+    revenueForecastTreeV1Raw,
+    histYearsLoad
+  );
+  const revenueForecastTreeV1 = pruneForecastTreeToMatchSanitizedIs(
+    revenueForecastTreeV1Raw,
+    incomeStatementSanitized
+  );
+  const cfgSnap = snapshot.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+  const treeIdsBeforePrune = collectAllForecastTreeIds(revenueForecastTreeV1Raw);
+  const treeIdsAfterPrune = collectAllForecastTreeIds(revenueForecastTreeV1);
+  const rowsSnap = { ...cfgSnap.rows };
+  treeIdsBeforePrune.forEach((id) => {
+    if (!treeIdsAfterPrune.has(id)) delete rowsSnap[id];
+  });
   set(() => ({
     meta: safeMeta,
     isInitialized: true, // Always true when loading a snapshot (if snapshot exists, project is initialized)
-    incomeStatement: normalizedIS,
+    incomeStatement: incomeStatementSanitized,
     balanceSheet: Array.isArray(snapshot.balanceSheet) ? snapshot.balanceSheet : [],
     cashFlow: Array.isArray(snapshot.cashFlow) ? normalizeWcStructure(snapshot.cashFlow) : [],
     schedules: snapshot.schedules && typeof snapshot.schedules === "object"
@@ -1185,7 +1245,8 @@ function applyProjectSnapshot(
     confirmedRowIds: snapshot.confirmedRowIds ?? {},
     wcExcludedIds: snapshot.wcExcludedIds ?? [],
     revenueProjectionConfig: snapshot.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
-    revenueForecastConfigV1: snapshot.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1,
+    revenueForecastConfigV1: { ...cfgSnap, rows: rowsSnap },
+    revenueForecastTreeV1,
     cogsPctByRevenueLine: snapshot.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: snapshot.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: snapshot.cogsPctByRevenueLineByYear ?? {},
@@ -1799,6 +1860,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
             wcExcludedIds: [] as string[],
             revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
             revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
+            revenueForecastTreeV1: [] as ForecastRevenueNodeV1[],
             cogsPctByRevenueLine: {},
             cogsPctModeByRevenueLine: {},
             cogsPctByRevenueLineByYear: {},
@@ -3127,16 +3189,20 @@ export const useModelStore = create<ModelState & ModelActions>()(
       let updated = removeRowDeep(currentRows, rowId);
       if (statement === "cashFlow") updated = normalizeWcStructure(updated);
 
-      // When removing an IS row, clear that row (and descendants) from revenue forecast v1 config
+      // When removing an IS row, clear that row (and descendants) from revenue forecast v1 config and forecast tree
       let nextRevenueForecastConfigV1 = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+      let nextRevenueForecastTreeV1 = state.revenueForecastTreeV1 ?? [];
       if (statement === "incomeStatement") {
         const rowToRemove = findRowDeep(currentRows, rowId);
         if (rowToRemove) {
           const idsToRemove = new Set(collectSubtreeIds(rowToRemove));
-          if (idsToRemove.size > 0 && nextRevenueForecastConfigV1.rows) {
-            const nextRows = { ...nextRevenueForecastConfigV1.rows };
-            idsToRemove.forEach((id) => delete nextRows[id]);
-            nextRevenueForecastConfigV1 = { ...nextRevenueForecastConfigV1, rows: nextRows };
+          if (idsToRemove.size > 0) {
+            nextRevenueForecastTreeV1 = pruneForecastTreeByIds(nextRevenueForecastTreeV1, idsToRemove);
+            if (nextRevenueForecastConfigV1.rows) {
+              const nextRows = { ...nextRevenueForecastConfigV1.rows };
+              idsToRemove.forEach((id) => delete nextRows[id]);
+              nextRevenueForecastConfigV1 = { ...nextRevenueForecastConfigV1, rows: nextRows };
+            }
           }
         }
       }
@@ -3197,7 +3263,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
         if (statement === "cashFlow" && wcExcludedIds !== (state.wcExcludedIds ?? [])) {
           out.wcExcludedIds = wcExcludedIds;
         }
-        if (statement === "incomeStatement") out.revenueForecastConfigV1 = nextRevenueForecastConfigV1;
+        if (statement === "incomeStatement") {
+          out.revenueForecastConfigV1 = nextRevenueForecastConfigV1;
+          out.revenueForecastTreeV1 = nextRevenueForecastTreeV1;
+        }
         return out;
       }
       
@@ -3205,7 +3274,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
       if (statement === "cashFlow" && wcExcludedIds !== (state.wcExcludedIds ?? [])) {
         out.wcExcludedIds = wcExcludedIds;
       }
-      if (statement === "incomeStatement") out.revenueForecastConfigV1 = nextRevenueForecastConfigV1;
+      if (statement === "incomeStatement") {
+        out.revenueForecastConfigV1 = nextRevenueForecastConfigV1;
+        out.revenueForecastTreeV1 = nextRevenueForecastTreeV1;
+      }
       return out;
     });
   },
@@ -3993,10 +4065,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
   },
 
   resetIncomeStatementInputs: () => {
+    const tmpl = createIncomeStatementTemplate();
+    const revT = tmpl.find((r) => r.id === "rev");
     set((state) => ({
-      incomeStatement: createIncomeStatementTemplate(),
+      incomeStatement: tmpl,
       revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
       revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
+      revenueForecastTreeV1: cloneRevChildrenToForecastTree(revT?.children ?? []),
       cogsPctByRevenueLine: {},
       cogsPctModeByRevenueLine: {},
       cogsPctByRevenueLineByYear: {},
@@ -4118,63 +4193,161 @@ export const useModelStore = create<ModelState & ModelActions>()(
     }));
   },
 
-  // Legacy/backward compatibility actions
   addRevenueStream: (label) => {
     const trimmed = (label ?? "").trim();
     if (!trimmed) return undefined;
     const id = uuid();
-    const child: Row = {
+    const node: ForecastRevenueNodeV1 = {
       id,
       label: trimmed,
-      kind: "input",
-      valueType: "currency",
-      values: {},
+      isForecastOnly: true,
       children: [],
     };
     set((state) => ({
-      incomeStatement: addChildRow(state.incomeStatement, "rev", child),
+      revenueForecastTreeV1: [...(state.revenueForecastTreeV1 ?? []), node],
     }));
     return id;
   },
 
-  /** Add a child breakdown row under a revenue stream (Forecast Drivers → Revenue v1). Tree child with sectionOwner revenue. */
   addRevenueStreamChild: (parentStreamId, label) => {
     const trimmed = (label ?? "").trim();
-    if (!trimmed) return;
-
-    const child: Row = {
-      id: uuid(),
+    if (!trimmed) return undefined;
+    const id = uuid();
+    const child: ForecastRevenueNodeV1 = {
+      id,
       label: trimmed,
-      kind: "input",
-      valueType: "currency",
-      values: {},
+      isForecastOnly: true,
       children: [],
-      sectionOwner: "revenue",
-      isOperating: true,
-      classificationSource: "user",
-      forecastMetadataStatus: "needs_review",
     };
-
+    let created: string | undefined;
     set((state) => {
-      const rev = findRowDeep(state.incomeStatement, "rev");
-      const stream = rev?.children?.find((s) => s.id === parentStreamId);
-      if (!stream) return state;
-      const updated = addChildRow(JSON.parse(JSON.stringify(state.incomeStatement)), parentStreamId, child);
+      const tree = state.revenueForecastTreeV1 ?? [];
+      const parentNode = findForecastNode(tree, parentStreamId);
+      if (!parentNode) return state;
       const config = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
       const streamCfg = config.rows?.[parentStreamId];
-      const childRole: RevenueForecastRoleV1 = streamCfg?.forecastRole === "independent_driver" ? "allocation_of_parent" : "independent_driver";
+      let parentRole = streamCfg?.forecastRole;
+      if (parentRole === undefined) {
+        const kids = parentNode.children;
+        if (kids.some((c) => config.rows?.[c.id]?.forecastRole === "allocation_of_parent")) {
+          parentRole = "independent_driver";
+        } else {
+          parentRole = "derived_sum";
+        }
+      }
+      const childRole: RevenueForecastRoleV1 =
+        parentRole === "independent_driver" ? "allocation_of_parent" : "independent_driver";
+      const childRow: RevenueForecastRowConfigV1 =
+        childRole === "allocation_of_parent"
+          ? {
+              rowId: child.id,
+              forecastRole: "allocation_of_parent",
+              forecastParameters: {},
+            }
+          : {
+              rowId: child.id,
+              forecastRole: "independent_driver",
+              forecastMethod: "growth_rate",
+              forecastParameters: {
+                ratePercent: 0,
+                startingBasis: "starting_amount",
+                startingAmount: 0,
+              },
+            };
       const nextRows: Record<string, RevenueForecastRowConfigV1> = {
         ...config.rows,
-        [child.id]: {
-          rowId: child.id,
-          forecastRole: childRole,
-          forecastParameters: childRole === "allocation_of_parent" ? { allocationPercent: 0 } : { ratePercent: 0 },
-        },
+        [child.id]: childRow,
       };
+      created = child.id;
       return {
-        incomeStatement: updated,
+        revenueForecastTreeV1: addChildToForecastTree(tree, parentStreamId, child),
         revenueForecastConfigV1: { ...config, rows: nextRows },
       };
+    });
+    return created;
+  },
+
+  renameRevenueForecastTreeNodeV1: (rowId, label) => {
+    const t = (label ?? "").trim();
+    if (!t || rowId === "rev") return;
+    set((state) => ({
+      revenueForecastTreeV1: updateForecastTreeNodeLabel(state.revenueForecastTreeV1 ?? [], rowId, t),
+      incomeStatement: renameRowDeep(state.incomeStatement, rowId, t),
+    }));
+  },
+
+  promoteAllocationRowToForecastLine: (rowId, asDerived) => {
+    let result: "ok" | "top_level_parent" | "not_found" = "not_found";
+    set((state) => {
+      const tree = state.revenueForecastTreeV1 ?? [];
+      const pr = promoteAllocationRowToForecastSibling(tree, rowId);
+      if ("error" in pr) {
+        result = pr.error;
+        return state;
+      }
+      result = "ok";
+      const config = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+      const nextRows = { ...config.rows };
+      if (asDerived) {
+        nextRows[rowId] = {
+          rowId,
+          forecastRole: "derived_sum",
+          forecastMethod: undefined,
+          forecastParameters: {},
+        };
+      } else {
+        nextRows[rowId] = {
+          rowId,
+          forecastRole: "independent_driver",
+          forecastMethod: "growth_rate",
+          forecastParameters: {
+            ratePercent: 0,
+            startingBasis: "starting_amount",
+            startingAmount: 0,
+          },
+        };
+      }
+      return {
+        revenueForecastTreeV1: pr.tree,
+        revenueForecastConfigV1: { ...config, rows: nextRows },
+      };
+    });
+    return result;
+  },
+
+  removeForecastRevenueRowV1: (rowId) => {
+    if (rowId === "rev") return;
+    set((state) => {
+      const tree = state.revenueForecastTreeV1 ?? [];
+      const ids = collectSubtreeIdsFromForecastTree(tree, rowId);
+      const removeDeep = (nodes: ForecastRevenueNodeV1[]): ForecastRevenueNodeV1[] => {
+        const out: ForecastRevenueNodeV1[] = [];
+        for (const n of nodes) {
+          if (n.id === rowId) continue;
+          out.push({ ...n, children: removeDeep(n.children) });
+        }
+        return out;
+      };
+      const cleanedTree = removeDeep(tree);
+      const config = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+      const nextRows = { ...config.rows };
+      ids.forEach((id) => delete nextRows[id]);
+      const nextIS = removeRevenueRowIdsUnderRev(state.incomeStatement, new Set(ids));
+      return {
+        incomeStatement: nextIS,
+        revenueForecastTreeV1: cleanedTree,
+        revenueForecastConfigV1: { ...config, rows: nextRows },
+      };
+    });
+  },
+
+  syncRevenueForecastTreeFromHistoricalIfEmpty: () => {
+    set((state) => {
+      if ((state.revenueForecastTreeV1?.length ?? 0) > 0) return state;
+      const rev = findRowDeep(state.incomeStatement, "rev");
+      const ch = rev?.children ?? [];
+      if (ch.length === 0) return state;
+      return { revenueForecastTreeV1: cloneRevChildrenToForecastTree(ch) };
     });
   },
 
@@ -4913,6 +5086,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
             ...(state.meta.years.projection || []),
           ];
 
+          if (!Array.isArray((state as ModelState).revenueForecastTreeV1)) {
+            const revM = state.incomeStatement?.find((r) => r.id === "rev");
+            (state as ModelState).revenueForecastTreeV1 =
+              revM?.children?.length ? cloneRevChildrenToForecastTree(revM.children) : [];
+          }
+
           let incomeStatement = [...state.incomeStatement];
           let balanceSheet = [...state.balanceSheet];
           let cashFlow = [...state.cashFlow];
@@ -5374,6 +5553,18 @@ export const useModelStore = create<ModelState & ModelActions>()(
           const revBreakdownIds = new Set(Object.keys(state.revenueProjectionConfig?.breakdowns ?? {}));
           const parentIdsWithProjectionBreakdowns = new Set([...revBreakdownIds, ...sgaParentIdsWithBreakdowns]);
 
+          const histYearsRehydrate = state.meta?.years?.historical ?? [];
+          const ftRehydrate = Array.isArray(state.revenueForecastTreeV1) ? state.revenueForecastTreeV1 : [];
+          incomeStatement = sanitizeHistoricalRevenueInIncomeStatement(incomeStatement, ftRehydrate, histYearsRehydrate);
+          const prunedTreeRehydrate = pruneForecastTreeToMatchSanitizedIs(ftRehydrate, incomeStatement);
+          const cfgRehydrate = state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1;
+          const treeIdsBeforeRehydrate = collectAllForecastTreeIds(ftRehydrate);
+          const treeIdsAfterRehydrate = collectAllForecastTreeIds(prunedTreeRehydrate);
+          const rowsRehydrate = { ...cfgRehydrate.rows };
+          treeIdsBeforeRehydrate.forEach((id) => {
+            if (!treeIdsAfterRehydrate.has(id)) delete rowsRehydrate[id];
+          });
+
           allYears.forEach((year) => {
             const allStatements = { incomeStatement, balanceSheet, cashFlow };
             const sbcBreakdowns = state.sbcBreakdowns;
@@ -5395,6 +5586,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
             incomeStatement,
             balanceSheet,
             cashFlow,
+            revenueForecastTreeV1: prunedTreeRehydrate,
+            revenueForecastConfigV1: { ...cfgRehydrate, rows: rowsRehydrate },
           });
         }
         return state;

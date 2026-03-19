@@ -11,8 +11,8 @@ import {
 import { computeRowValue } from "@/lib/calculations";
 import { findRowInTree } from "@/lib/row-utils";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
-import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
 import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
+import type { ForecastRevenueNodeV1 } from "@/types/revenue-forecast-v1";
 import { getSbcDisclosures, getTotalSbcByYearFromEmbedded } from "@/lib/embedded-disclosure-sbc";
 import { getAmortizationDisclosures, getTotalAmortizationByYearFromEmbedded } from "@/lib/embedded-disclosure-amortization";
 import { getDepreciationDisclosures, getTotalDepreciationByYearFromEmbedded } from "@/lib/embedded-disclosure-depreciation";
@@ -67,6 +67,7 @@ export default function ISBuildPreview() {
 
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
+  const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
   const cogsPctByRevenueLineByYear = useModelStore((s) => s.cogsPctByRevenueLineByYear ?? {});
@@ -81,6 +82,38 @@ export default function ISBuildPreview() {
     const rev = incomeStatement?.find((r) => r.id === "rev");
     if (!rev) return [];
     const list: Array<{ row: Row; depth: number }> = [{ row: rev, depth: 0 }];
+    if (revenueForecastTreeV1.length > 0) {
+      const findSrc = (rows: Row[], id: string): Row | null => {
+        for (const r of rows) {
+          if (r.id === id) return r;
+          if (r.children?.length) {
+            const f = findSrc(r.children, id);
+            if (f) return f;
+          }
+        }
+        return null;
+      };
+      /** Preview depth = DFS position in revenueForecastTreeV1 only: rev = 0, forest roots = 1, then +1 per tree level. */
+      const walkTree = (nodes: ForecastRevenueNodeV1[], treeDepth: number) => {
+        for (const n of nodes) {
+          const src = findSrc(incomeStatement ?? [], n.id);
+          list.push({
+            row: {
+              id: n.id,
+              label: n.label,
+              kind: (src?.kind as Row["kind"]) ?? "input",
+              valueType: "currency",
+              values: src?.values ? { ...src.values } : {},
+              children: [],
+            },
+            depth: treeDepth,
+          });
+          walkTree(n.children, treeDepth + 1);
+        }
+      };
+      walkTree(revenueForecastTreeV1, 1);
+      return list;
+    }
     const items = revenueProjectionConfig?.items ?? {};
     (rev.children ?? []).forEach((stream) => {
       list.push({ row: stream, depth: 1 });
@@ -135,7 +168,7 @@ export default function ISBuildPreview() {
       }
     });
     return list;
-  }, [incomeStatement, revenueProjectionConfig]);
+  }, [incomeStatement, revenueProjectionConfig, revenueForecastTreeV1]);
 
   // UI state: section and row expansion (visual only, does not affect calculations or Excel export)
   const [revenueSectionOpen, setRevenueSectionOpen] = useState(true);
@@ -152,14 +185,17 @@ export default function ISBuildPreview() {
     () => historicalYears[historicalYears.length - 1] ?? "",
     [historicalYears]
   );
+  /** Forecast years in the same order as preview columns (must match `years` E-columns for methodology YoY). */
+  const methodologyProjectionYears = useMemo(() => years.filter((y) => y.endsWith("E")), [years]);
 
   const projectedValues = useMemo(() => {
     if (!incomeStatement?.length || projectionYears.length === 0) return {};
     const v1Config = revenueForecastConfigV1 ?? { rows: {} };
     const v1HasRows = Object.keys(v1Config.rows ?? {}).length > 0;
-    if (v1HasRows && validateRevenueForecastV1(incomeStatement, v1Config).valid) {
+    if (v1HasRows) {
       const { result, valid } = computeRevenueProjectionsV1(
         incomeStatement,
+        revenueForecastTreeV1,
         v1Config,
         projectionYears,
         lastHistoricYear,
@@ -183,6 +219,7 @@ export default function ISBuildPreview() {
   }, [
     incomeStatement,
     revenueForecastConfigV1,
+    revenueForecastTreeV1,
     revenueProjectionConfig,
     projectionYears,
     lastHistoricYear,
@@ -260,95 +297,76 @@ export default function ISBuildPreview() {
     return out;
   }, [years, incomeStatement, projectedValues, allStatements, sbcBreakdowns, danaBreakdowns]);
 
-  /** Get value for a row in a given year (historic from statements, projection from engine). */
+  /**
+   * Revenue preview: historic = always from Income Statement via computeRowValue (canonical row in tree when present).
+   * Forecast = projectedValues only. No special-casing by row type for actuals.
+   */
   const getRowValueForYear = useMemo(() => {
     const rev = incomeStatement?.find((r) => r.id === "rev");
+    const is = incomeStatement ?? [];
     return (rowId: string, year: string, row: Row) => {
       const isHistoric = year.endsWith("A");
       if (isHistoric) {
-        if (rowId === "rev") return computeRowValue(rev!, year, incomeStatement ?? [], incomeStatement ?? [], allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
-        const isBreakdown = rev?.children?.some((s) => (revenueProjectionConfig?.breakdowns?.[s.id] ?? []).some((b: { id: string }) => b.id === rowId));
-        const isSubRow = String(rowId).includes("::");
-        if (isBreakdown || isSubRow) return 0;
-        return computeRowValue(row, year, incomeStatement ?? [], incomeStatement ?? [], allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+        if (rowId === "rev") {
+          return computeRowValue(rev!, year, is, is, allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
+        }
+        const canonical = findRowInTree(is, rowId) ?? row;
+        return computeRowValue(canonical, year, is, is, allStatements, sbcBreakdowns, danaBreakdowns) ?? 0;
       }
       return projectedValues[rowId]?.[year] ?? 0;
     };
-  }, [incomeStatement, revenueProjectionConfig?.breakdowns, projectedValues, allStatements, sbcBreakdowns, danaBreakdowns]);
+  }, [incomeStatement, projectedValues, allStatements, sbcBreakdowns, danaBreakdowns]);
 
   /**
-   * Methodology: YoY% per year for each line.
-   * - Product_line/channel sub-rows (X, Y): show configured growth % every year.
-   * - Breakdowns with product_line/channel (e.g. Fixed Price): YoY from sum of children so it matches displayed category growth.
-   * - All other rows: YoY from row values.
+   * Methodology YoY%: unified for every revenue row (preview only).
+   * - Iteration order = `methodologyProjectionYears` from full `years` list so the first E column (e.g. 2026E) always
+   *   bridges to `lastHistoricYear`, regardless of order inside `meta.years.projection`.
+   * - curr: projected value for that column (coerced with Number(); not gated on typeof === "number").
+   * - first E column: prev = last historical actual via getRowValueForYear (never projectedValues).
+   * - later E columns: prev = projected value for the immediately prior E column in this same order.
    */
   const methodologyYoY = useMemo(() => {
     const rows = revenueRows.map(({ row, depth }) => ({ row, depth }));
-    const items = revenueProjectionConfig?.items ?? {};
-    if (rows.length === 0 || projectionYears.length === 0) return [];
-    const orderedYears = [lastHistoricYear, ...projectionYears].filter(Boolean);
-    return rows
-      .filter(({ row }) => row.id !== "rev")
-      .map(({ row, depth }) => {
-        const yoyByYear: Record<string, number | null> = {};
-        const isSubRow = String(row.id).includes("::");
-        let configuredGrowth: number | null = null;
-        if (isSubRow) {
-          const [parentId, lineKey] = row.id.split("::");
-          const cfg = items[parentId];
-          const pl = cfg?.inputs as { items?: Array<{ id?: string; label?: string; growthPercent?: number }> } | undefined;
-          if (pl?.items?.length && lineKey != null) {
-            for (let i = 0; i < pl.items.length; i++) {
-              const it = pl.items[i];
-              const raw = it.id ?? it.label;
-              const key = (raw != null && String(raw).trim() !== "") ? String(raw) : `line-${i}`;
-              if (key === lineKey && it.growthPercent != null) {
-                configuredGrowth = Number(it.growthPercent);
-                break;
-              }
-            }
+    if (rows.length === 0 || methodologyProjectionYears.length === 0) return [];
+
+    const readProjected = (rowId: string, yKey: string): number | null => {
+      const raw = projectedValues[rowId]?.[yKey];
+      if (raw === undefined || raw === null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    return rows.map(({ row, depth }) => {
+      const yoyByYear: Record<string, number | null> = {};
+      for (let i = 0; i < methodologyProjectionYears.length; i++) {
+        const y = methodologyProjectionYears[i]!;
+        const currVal = readProjected(row.id, y);
+        let prevVal: number | null;
+        if (i === 0) {
+          const ly = lastHistoricYear;
+          if (!ly) prevVal = null;
+          else {
+            const p = getRowValueForYear(row.id, ly, row);
+            prevVal = Number.isFinite(p) ? p : null;
           }
-        }
-        if (configuredGrowth != null) {
-          projectionYears.forEach((y) => {
-            yoyByYear[y] = Math.round(10 * configuredGrowth!) / 10;
-          });
         } else {
-          // For breakdowns with product_line/channel, use sum of children so Fixed Price YoY = real growth of (X+Y)
-          const cfg = items[row.id];
-          const method = cfg?.method;
-          const pl = cfg?.inputs as { items?: Array<{ id?: string; label?: string }> } | undefined;
-          const useSumOfChildren =
-            (method === "product_line" || method === "channel") &&
-            pl?.items?.length &&
-            projectedValues;
-          const getVal = (year: string): number => {
-            if (useSumOfChildren) {
-              let sum = 0;
-              pl!.items!.forEach((line, lineIdx) => {
-                const raw = line.id ?? line.label;
-                const lineKey = (raw != null && String(raw).trim() !== "") ? String(raw) : `line-${lineIdx}`;
-                sum += projectedValues[`${row.id}::${lineKey}`]?.[year] ?? 0;
-              });
-              return sum;
-            }
-            return getRowValueForYear(row.id, year, row);
-          };
-          for (let i = 0; i < projectionYears.length; i++) {
-            const y = projectionYears[i];
-            const prevYear = orderedYears[i];
-            const currVal = getVal(y);
-            const prevVal = prevYear ? getVal(prevYear) : 0;
-            if (prevVal > 0) {
-              yoyByYear[y] = Math.round(10 * ((currVal - prevVal) / prevVal) * 100) / 10;
-            } else {
-              yoyByYear[y] = null;
-            }
-          }
+          const py = methodologyProjectionYears[i - 1]!;
+          prevVal = readProjected(row.id, py);
         }
-        return { rowId: row.id, label: row.label, depth, yoyByYear };
-      });
-  }, [revenueRows, projectionYears, lastHistoricYear, getRowValueForYear, revenueProjectionConfig?.items, projectedValues]);
+        if (
+          prevVal != null &&
+          prevVal !== 0 &&
+          currVal != null &&
+          Number.isFinite(currVal)
+        ) {
+          yoyByYear[y] = Math.round(10 * ((currVal / prevVal - 1) * 100)) / 10;
+        } else {
+          yoyByYear[y] = null;
+        }
+      }
+      return { rowId: row.id, label: row.label, depth, yoyByYear };
+    });
+  }, [revenueRows, methodologyProjectionYears, lastHistoricYear, getRowValueForYear, projectedValues]);
 
   /** SG&A: flattened rows under sga (with depth); leaves have no children */
   const sgaRowsFlat = useMemo(() => {
@@ -736,11 +754,11 @@ export default function ISBuildPreview() {
                     >
                       <td
                         className={`px-3 py-2 ${labelClass}`}
-                        style={{ paddingLeft: 12 + depth * 14 }}
+                        style={{ paddingLeft: 12 + depth * 18 }}
                       >
                         <button
                           type="button"
-                          className="flex items-center gap-2 text-left w-full"
+                          className="flex items-center gap-2 text-left w-full min-h-[1.5rem]"
                           onClick={() => {
                             if (!hasDescendants) return;
                             setCollapsedRowIds((prev) => {
@@ -751,41 +769,15 @@ export default function ISBuildPreview() {
                             });
                           }}
                         >
-                          {hasDescendants && (
-                            <span className="text-slate-500 text-[10px]">
-                              {isCollapsed ? "▸" : "▾"}
-                            </span>
-                          )}
+                          <span className="inline-flex w-4 shrink-0 justify-center text-slate-500 text-[10px]">
+                            {hasDescendants ? (isCollapsed ? "▸" : "▾") : ""}
+                          </span>
                           <span>{row.label}</span>
                         </button>
                       </td>
                       {years.map((y) => {
                       const isHistoric = y.endsWith("A");
-                      let stored = 0;
-                      
-                      if (isHistoric) {
-                        // Breakdown rows and product_line/channel sub-rows exist only in config; no historic split
-                        const rev = incomeStatement?.find((r) => r.id === "rev");
-                        const isBreakdown = rev?.children?.some((stream) =>
-                          (revenueProjectionConfig?.breakdowns?.[stream.id] ?? []).some((b) => b.id === row.id)
-                        );
-                        const isSubRow = String(row.id).includes("::");
-                        if (isBreakdown || isSubRow) {
-                          stored = 0; // show — for breakdowns and sub-rows in historic years
-                        } else {
-                          stored = computeRowValue(
-                            row,
-                            y,
-                            incomeStatement ?? [],
-                            incomeStatement ?? [],
-                            allStatements,
-                            sbcBreakdowns,
-                            danaBreakdowns
-                          );
-                        }
-                      } else {
-                        stored = projectedValues[row.id]?.[y] ?? 0;
-                      }
+                      const stored = getRowValueForYear(row.id, y, row);
                       
                       const display =
                         stored === 0 && !isHistoric
@@ -903,11 +895,11 @@ export default function ISBuildPreview() {
                     >
                       <td
                         className="px-3 py-2 text-slate-300"
-                        style={{ paddingLeft: 12 + depth * 14 }}
+                        style={{ paddingLeft: 12 + depth * 18 }}
                       >
                         <button
                           type="button"
-                          className="flex items-center gap-2 text-left w-full"
+                          className="flex items-center gap-2 text-left w-full min-h-[1.5rem]"
                           onClick={() => {
                             if (!hasDescendants) return;
                             setCollapsedRowIds((prev) => {
@@ -918,11 +910,9 @@ export default function ISBuildPreview() {
                             });
                           }}
                         >
-                          {hasDescendants && (
-                            <span className="text-slate-500 text-[10px]">
-                              {isCollapsed ? "▸" : "▾"}
-                            </span>
-                          )}
+                          <span className="inline-flex w-4 shrink-0 justify-center text-slate-500 text-[10px]">
+                            {hasDescendants ? (isCollapsed ? "▸" : "▾") : ""}
+                          </span>
                           <span>{label} — COGS</span>
                         </button>
                       </td>
@@ -1027,7 +1017,7 @@ export default function ISBuildPreview() {
                             Revenue forecast methodology
                           </h3>
                           <p className="text-xs text-slate-500 mt-1">
-                            YoY % by line (projection years)
+                            YoY % vs prior period (last actual → first forecast, then vs prior forecast)
                           </p>
                         </div>
                       </div>
@@ -1050,13 +1040,13 @@ export default function ISBuildPreview() {
                       ))}
                     </tr>
                     {methodologyYoY.map(({ rowId, label, depth, yoyByYear }) => (
-                      <tr
-                        key={`method-${rowId}`}
-                        className="border-b border-slate-900"
-                      >
+                    <tr
+                      key={`method-${rowId}`}
+                      className="border-b border-slate-800/90 hover:bg-slate-900/30"
+                    >
                         <td
-                          className="px-3 py-2 text-slate-400 text-xs"
-                          style={{ paddingLeft: 12 + depth * 14 }}
+                          className="px-3 py-2.5 text-slate-400 text-xs"
+                          style={{ paddingLeft: 12 + depth * 18 }}
                         >
                           <span className="text-slate-300">{label}</span>
                         </td>

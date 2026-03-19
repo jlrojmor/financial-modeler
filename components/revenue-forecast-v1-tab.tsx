@@ -1,22 +1,35 @@
 "use client";
 
-import { useMemo, useEffect, useState } from "react";
+import { useMemo, useEffect, useState, useCallback, useRef } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
-import type {
-  RevenueForecastRoleV1,
-  RevenueForecastMethodV1,
-} from "@/types/revenue-forecast-v1";
+import type { ForecastRevenueNodeV1 } from "@/types/revenue-forecast-v1";
+import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
+import { RevenueForecastV1HierarchyEditor } from "@/components/revenue-forecast-v1-hierarchy-editor";
+import { RevenueForecastV1DirectForecastBlock } from "@/components/revenue-forecast-v1-direct-forecast-block";
+import { RevenueForecastLineNameAdd } from "@/components/revenue-forecast-v1-deferred-input";
 import {
-  validateRevenueForecastV1,
-  getAllowedRolesForChild,
-} from "@/lib/revenue-forecast-v1-validation";
+  DIRECT_FORECAST_EXPLAINER,
+  DERIVED_PARENT_EXPLAINER,
+  getDirectForecastCompactSummary,
+  getDirectForecastRowUiStatus,
+} from "@/lib/revenue-forecast-v1-methodology";
 import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
-import { buildModelingContext } from "@/lib/modeling-context";
-import { getRevenueForecastSuggestionsFromProfile } from "@/lib/modeling-context";
 import { storedToDisplay, displayToStored, getUnitLabel } from "@/lib/currency-utils";
 import { computeRowValue } from "@/lib/calculations";
 import CollapsibleSection from "@/components/collapsible-section";
+import { expandIdsForNodePath } from "@/lib/revenue-row-state-v1";
+
+function findIsRow(rows: Row[], id: string): Row | null {
+  for (const r of rows) {
+    if (r.id === id) return r;
+    if (r.children?.length) {
+      const f = findIsRow(r.children, id);
+      if (f) return f;
+    }
+  }
+  return null;
+}
 
 export default function RevenueForecastV1Tab() {
   const incomeStatement = useModelStore((s) => s.incomeStatement);
@@ -27,12 +40,40 @@ export default function RevenueForecastV1Tab() {
   const setRevenueForecastRowV1 = useModelStore((s) => s.setRevenueForecastRowV1);
   const addRevenueStream = useModelStore((s) => s.addRevenueStream);
   const addRevenueStreamChild = useModelStore((s) => s.addRevenueStreamChild);
-  const removeRow = useModelStore((s) => s.removeRow);
-  const companyContext = useModelStore((s) => s.companyContext);
+  const removeForecastRevenueRowV1 = useModelStore((s) => s.removeForecastRevenueRowV1);
+  const syncRevenueForecastTreeFromHistoricalIfEmpty = useModelStore((s) => s.syncRevenueForecastTreeFromHistoricalIfEmpty);
+  const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
 
-  const [newStreamLabel, setNewStreamLabel] = useState("");
-  const [newBreakdownByStream, setNewBreakdownByStream] = useState<Record<string, string>>({});
+  useEffect(() => {
+    syncRevenueForecastTreeFromHistoricalIfEmpty();
+  }, [syncRevenueForecastTreeFromHistoricalIfEmpty, incomeStatement]);
+
   const [expandedStreams, setExpandedStreams] = useState<Set<string>>(new Set());
+  const [revAllocControlsVisible, setRevAllocControlsVisible] = useState(false);
+  const [flashRowId, setFlashRowId] = useState<string | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flashRow = useCallback((id: string) => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    setFlashRowId(id);
+    flashTimerRef.current = setTimeout(() => {
+      setFlashRowId(null);
+      flashTimerRef.current = null;
+    }, 2400);
+  }, []);
+
+  const ensureExpandedIds = useCallback((ids: string[]) => {
+    setExpandedStreams((prev) => {
+      const next = new Set(prev);
+      ids.forEach((x) => next.add(x));
+      return next;
+    });
+  }, []);
+
+  const [pendingDirectFocusRowId, setPendingDirectFocusRowId] = useState<string | null>(null);
+  const [pendingAllocationFocusRowId, setPendingAllocationFocusRowId] = useState<string | null>(null);
+  const [revDirectCardOpen, setRevDirectCardOpen] = useState(true);
+  const [revFocusNonce, setRevFocusNonce] = useState(0);
 
   const historicalYears = useMemo(() => meta?.years?.historical ?? [], [meta?.years?.historical]);
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta?.years?.projection]);
@@ -41,19 +82,34 @@ export default function RevenueForecastV1Tab() {
   const unitLabel = getUnitLabel(unit);
 
   const revRow = useMemo(() => incomeStatement?.find((r) => r.id === "rev"), [incomeStatement]);
-  const streams = useMemo(() => revRow?.children ?? [], [revRow]);
+  const streams = revenueForecastTreeV1;
 
-  const flatRowsForTable: { row: Row; depth: number }[] = useMemo(() => {
-    if (!revRow) return [];
-    const out: { row: Row; depth: number }[] = [{ row: revRow, depth: 0 }];
-    streams.forEach((stream) => {
-      out.push({ row: stream, depth: 1 });
-      (stream.children ?? []).forEach((child) => {
-        out.push({ row: child, depth: 2 });
-      });
-    });
+  const flatRowsForTable = useMemo(() => {
+    if (!revRow) return [] as { id: string; label: string; depth: number; isForecastOnly: boolean; isRev: boolean }[];
+    const out: { id: string; label: string; depth: number; isForecastOnly: boolean; isRev: boolean }[] = [
+      {
+        id: revRow.id,
+        label: revRow.label ?? "Total Revenue",
+        depth: 0,
+        isForecastOnly: false,
+        isRev: true,
+      },
+    ];
+    const walk = (nodes: ForecastRevenueNodeV1[], depth: number) => {
+      for (const n of nodes) {
+        out.push({
+          id: n.id,
+          label: n.label,
+          depth,
+          isForecastOnly: n.isForecastOnly,
+          isRev: false,
+        });
+        walk(n.children, depth + 1);
+      }
+    };
+    walk(revenueForecastTreeV1, 1);
     return out;
-  }, [revRow, streams]);
+  }, [revRow, revenueForecastTreeV1]);
 
   const allStatements = useMemo(
     () => ({
@@ -67,25 +123,34 @@ export default function RevenueForecastV1Tab() {
   const lastHistoricByRowId = useMemo(() => {
     if (!incomeStatement?.length || !lastHistoricYear || !revRow) return undefined;
     const out: Record<string, number> = {};
-    const add = (row: Row) => {
+    const addForId = (rowId: string, row: Row | null) => {
+      if (!row) {
+        out[rowId] = NaN;
+        return;
+      }
       const v = computeRowValue(row, lastHistoricYear, incomeStatement, incomeStatement, allStatements);
-      out[row.id] = typeof v === "number" && !Number.isNaN(v) ? v : NaN;
+      out[rowId] = typeof v === "number" && !Number.isNaN(v) ? v : NaN;
     };
-    add(revRow);
-    streams.forEach((s) => {
-      add(s);
-      (s.children ?? []).forEach(add);
-    });
+    addForId("rev", revRow);
+    const walk = (nodes: ForecastRevenueNodeV1[]) => {
+      for (const n of nodes) {
+        addForId(n.id, findIsRow(incomeStatement, n.id));
+        walk(n.children);
+      }
+    };
+    walk(revenueForecastTreeV1);
     return out;
-  }, [incomeStatement, lastHistoricYear, revRow, streams, allStatements]);
+  }, [incomeStatement, lastHistoricYear, revRow, revenueForecastTreeV1, allStatements]);
 
   const validation = useMemo(
     () =>
       validateRevenueForecastV1(incomeStatement ?? [], revenueForecastConfigV1 ?? { rows: {} }, {
+        forecastTree: revenueForecastTreeV1,
         lastHistoricYear,
         lastHistoricByRowId,
+        projectionYears,
       }),
-    [incomeStatement, revenueForecastConfigV1, lastHistoricYear, lastHistoricByRowId]
+    [incomeStatement, revenueForecastConfigV1, revenueForecastTreeV1, lastHistoricYear, lastHistoricByRowId, projectionYears]
   );
 
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns);
@@ -96,6 +161,7 @@ export default function RevenueForecastV1Tab() {
     }
     return computeRevenueProjectionsV1(
       incomeStatement,
+      revenueForecastTreeV1,
       revenueForecastConfigV1 ?? { rows: {} },
       projectionYears,
       lastHistoricYear,
@@ -106,6 +172,7 @@ export default function RevenueForecastV1Tab() {
   }, [
     validation.valid,
     incomeStatement,
+    revenueForecastTreeV1,
     revenueForecastConfigV1,
     projectionYears,
     lastHistoricYear,
@@ -114,15 +181,24 @@ export default function RevenueForecastV1Tab() {
     danaBreakdowns,
   ]);
 
-  const profile = useMemo(() => buildModelingContext(companyContext ?? null), [companyContext]);
-
   useEffect(() => {
     if (!revRow || !revenueForecastConfigV1) return;
-    const revCfg = revenueForecastConfigV1.rows?.["rev"];
-    if (!revCfg || revCfg.forecastRole !== "derived_sum") {
-      setRevenueForecastRowV1("rev", { forecastRole: "derived_sum" });
+    if (revenueForecastConfigV1.rows?.["rev"]) return;
+    const hasTree = (revenueForecastTreeV1?.length ?? 0) > 0;
+    if (hasTree) {
+      setRevenueForecastRowV1("rev", { forecastRole: "derived_sum", forecastMethod: undefined, forecastParameters: {} });
+    } else {
+      const v = lastHistoricByRowId?.["rev"];
+      const hasRevHist = typeof v === "number" && !Number.isNaN(v);
+      setRevenueForecastRowV1("rev", {
+        forecastRole: "independent_driver",
+        forecastMethod: "growth_rate",
+        forecastParameters: hasRevHist
+          ? { startingBasis: "last_historical" }
+          : { startingBasis: "starting_amount" },
+      });
     }
-  }, [revRow, revenueForecastConfigV1, setRevenueForecastRowV1]);
+  }, [revRow, revenueForecastConfigV1, revenueForecastTreeV1, lastHistoricByRowId, setRevenueForecastRowV1]);
 
   const toggleStreamExpanded = (streamId: string) => {
     setExpandedStreams((prev) => {
@@ -133,26 +209,94 @@ export default function RevenueForecastV1Tab() {
     });
   };
 
-  const handleAddStream = () => {
-    const trimmed = newStreamLabel.trim();
+  const revCfg = revenueForecastConfigV1?.rows?.["rev"];
+  const revIsDerived = revCfg?.forecastRole === "derived_sum";
+
+  const revAllowGrowthFromHistorical = useMemo(() => {
+    const v = lastHistoricByRowId?.["rev"];
+    return typeof v === "number" && !Number.isNaN(v);
+  }, [lastHistoricByRowId]);
+
+  const handleAddStreamNamed = (trimmed: string) => {
     if (!trimmed) return;
     const newId = addRevenueStream(trimmed);
-    if (newId) {
-      setRevenueForecastRowV1(newId, { forecastRole: "independent_driver", forecastMethod: "growth_rate", forecastParameters: { ratePercent: 0 } });
+    if (!newId) return;
+    if (revCfg?.forecastRole === "independent_driver") {
+      setRevAllocControlsVisible(true);
+      setRevenueForecastRowV1(newId, {
+        forecastRole: "allocation_of_parent",
+        forecastMethod: undefined,
+        forecastParameters: {},
+      });
+    } else {
+      setRevenueForecastRowV1(newId, {
+        forecastRole: "independent_driver",
+        forecastMethod: "growth_rate",
+        forecastParameters: { startingBasis: "starting_amount" },
+      });
     }
-    setNewStreamLabel("");
+    queueMicrotask(() => {
+      const tree = useModelStore.getState().revenueForecastTreeV1 ?? [];
+      const path = expandIdsForNodePath(tree, newId);
+      if (path?.length) ensureExpandedIds(path);
+      flashRow(newId);
+      if (revCfg?.forecastRole === "derived_sum") {
+        setTimeout(() => setPendingDirectFocusRowId(newId), 0);
+      } else if (revCfg?.forecastRole === "independent_driver") {
+        setTimeout(() => setPendingAllocationFocusRowId(newId), 0);
+      }
+    });
   };
 
-  const handleAddBreakdown = (parentStreamId: string) => {
-    const label = (newBreakdownByStream[parentStreamId] ?? "").trim();
-    if (!label) return;
-    addRevenueStreamChild(parentStreamId, label);
-    setNewBreakdownByStream((prev) => ({ ...prev, [parentStreamId]: "" }));
+  const switchRevToDirectForecast = () => {
+    for (const s of streams) {
+      if ((s.children?.length ?? 0) > 0) {
+        window.alert(
+          "To forecast Total Revenue directly, each line under it must be a simple % split (no sub-groups). Remove nested lines under top-level rows first, then switch."
+        );
+        return;
+      }
+    }
+    setRevenueForecastRowV1("rev", {
+      forecastRole: "independent_driver",
+      forecastMethod: "growth_rate",
+      forecastParameters: revAllowGrowthFromHistorical
+        ? { startingBasis: "last_historical" }
+        : { startingBasis: "starting_amount" },
+    });
+    streams.forEach((s) => {
+      setRevenueForecastRowV1(s.id, {
+        forecastRole: "allocation_of_parent",
+        forecastMethod: undefined,
+        forecastParameters: { allocationPercent: streams.length > 0 ? 100 / streams.length : 0 },
+      });
+    });
+    setRevAllocControlsVisible(streams.length > 0);
+    setRevDirectCardOpen(true);
+    queueMicrotask(() => setRevFocusNonce((n) => n + 1));
+  };
+
+  const switchRevToBuildFromLines = () => {
+    setRevenueForecastRowV1("rev", { forecastRole: "derived_sum", forecastMethod: undefined, forecastParameters: {} });
+    streams.forEach((s) => {
+      setRevenueForecastRowV1(s.id, {
+        forecastRole: "independent_driver",
+        forecastMethod: "growth_rate",
+        forecastParameters: { startingBasis: "starting_amount" },
+      });
+    });
+    setRevAllocControlsVisible(false);
   };
 
   const handleRemoveRow = (rowId: string) => {
     if (rowId === "rev") return;
-    removeRow("incomeStatement", rowId);
+    removeForecastRevenueRowV1(rowId);
+    if (revCfg?.forecastRole === "independent_driver") {
+      queueMicrotask(() => {
+        const top = useModelStore.getState().revenueForecastTreeV1 ?? [];
+        if (top.length === 0) setRevAllocControlsVisible(false);
+      });
+    }
   };
 
   if (!revRow) {
@@ -182,10 +326,13 @@ export default function RevenueForecastV1Tab() {
       <CollapsibleSection
         sectionId="revenue_v1_historic"
         title="Historic & projected revenue"
-        description="From Historicals. Projection years use v1 forecast when valid."
+        description="Historical columns come only from Historicals (read-only here). Projection columns come only from Revenue Forecast v1. Forecast Drivers never overwrite historical data."
         colorClass="blue"
         defaultExpanded={true}
       >
+        <p className="text-[11px] text-slate-500 mb-2">
+          Historical values are display-only in Forecast Drivers and come from Historicals.
+        </p>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
@@ -206,15 +353,30 @@ export default function RevenueForecastV1Tab() {
               </tr>
             </thead>
             <tbody>
-              {flatRowsForTable.map(({ row, depth }) => {
-                const projVal = projectionValid ? projectedV1[row.id] : null;
+              {flatRowsForTable.map(({ id, label, depth, isForecastOnly: foBadge, isRev }) => {
+                const projVal = projectionValid ? projectedV1[id] : null;
+                const isRow = isRev ? revRow! : findIsRow(incomeStatement ?? [], id);
                 return (
-                  <tr key={row.id} className={`border-b border-slate-800/60 ${depth === 0 ? "bg-slate-900/40" : ""}`}>
+                  <tr key={id} className={`border-b border-slate-800/60 ${depth === 0 ? "bg-slate-900/40" : ""}`}>
                     <td className="py-2 pr-4 text-xs text-slate-200" style={{ paddingLeft: depth * 20 }}>
-                      {row.label}
+                      <span className="inline-flex items-center gap-1.5">
+                        {label}
+                        {foBadge && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-600/60 text-slate-400" title="Forecast-only line: not on Historicals IS; historical columns may be blank.">
+                            Forecast-only
+                          </span>
+                        )}
+                      </span>
                     </td>
                     {historicalYears.map((y) => {
-                      const stored = computeRowValue(row, y, incomeStatement!, incomeStatement!, allStatements);
+                      if (!isRow) {
+                        return (
+                          <td key={y} className="py-2 px-2 text-xs text-slate-500 text-right tabular-nums">
+                            —
+                          </td>
+                        );
+                      }
+                      const stored = computeRowValue(isRow, y, incomeStatement!, incomeStatement!, allStatements);
                       const display = storedToDisplay(stored, unit);
                       const str = display === 0 ? "—" : display.toLocaleString(undefined, { maximumFractionDigits: 0, minimumFractionDigits: 0 });
                       return (
@@ -251,455 +413,149 @@ export default function RevenueForecastV1Tab() {
         defaultExpanded={true}
       >
         <div className="space-y-4">
-          {/* Total Revenue: derived_sum only */}
-          <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3">
-            <div className="text-xs font-medium text-slate-200">Total Revenue</div>
-            <div className="text-[11px] text-slate-500 mt-0.5">Role: derived_sum (sum of streams). No method.</div>
+          <div
+            className={`rounded-lg border border-slate-700 bg-slate-900/40 p-4 space-y-3 transition-shadow ${
+              flashRowId === "rev" ? "ring-2 ring-amber-500/40" : ""
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-2 border-b border-slate-700/60 pb-2">
+              <span className="text-sm font-semibold text-slate-100">Total Revenue</span>
+              <span className="rounded bg-slate-700/80 px-1.5 py-0.5 text-[10px] font-medium text-cyan-200/90">
+                {revIsDerived ? "Built from child lines" : streams.length > 0 ? "Direct + allocation children" : "Direct"}
+              </span>
+              <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">
+                {revAllowGrowthFromHistorical ? "Historical actual available" : "Forecast-only (rev)"}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-400 leading-relaxed space-y-2">
+              <p className="font-medium text-slate-300">How do you want to forecast Total Revenue?</p>
+              <ul className="list-none space-y-1.5 pl-0">
+                <li>
+                  <span className="text-slate-200">• Forecast it as one line</span>
+                  <span className="text-slate-500"> → Use a growth rate or manual inputs</span>
+                </li>
+                <li>
+                  <span className="text-slate-200">• Break it into components</span>
+                  <span className="text-slate-500"> → Example: Product A, Product B, Subscription</span>
+                </li>
+              </ul>
+            </div>
+            <div className="flex flex-wrap gap-4 items-center">
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="radio"
+                  name="revModeV1"
+                  checked={!revIsDerived}
+                  onChange={() => {
+                    if (revIsDerived) switchRevToDirectForecast();
+                  }}
+                  className="accent-emerald-600"
+                />
+                Forecast this row directly
+              </label>
+              <p className="text-[10px] text-slate-500 w-full basis-full pl-6 max-w-xl leading-snug">
+                {!revIsDerived ? DIRECT_FORECAST_EXPLAINER : DERIVED_PARENT_EXPLAINER}
+              </p>
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="radio"
+                  name="revModeV1"
+                  checked={revIsDerived}
+                  onChange={() => {
+                    if (!revIsDerived) switchRevToBuildFromLines();
+                  }}
+                  className="accent-emerald-600"
+                />
+                Build this row from child lines
+              </label>
+            </div>
+            {!revIsDerived && (
+              <div className="border-t border-slate-700/60 pt-3 space-y-2">
+                <button
+                  type="button"
+                  onClick={() => setRevDirectCardOpen((o) => !o)}
+                  className="flex w-full items-center gap-2 text-left text-[11px] text-slate-400 hover:text-slate-200"
+                >
+                  <span>{revDirectCardOpen ? "▼" : "▶"}</span>
+                  <span className="text-slate-300 font-medium">Direct forecast setup</span>
+                  {!revDirectCardOpen ? (
+                    <span className="text-[10px] text-slate-500 truncate">
+                      {getDirectForecastCompactSummary(
+                            revCfg,
+                            "rev",
+                            unit,
+                            revAllowGrowthFromHistorical,
+                            lastHistoricByRowId,
+                            projectionYears
+                          )}
+                      {(() => {
+                        const st = getDirectForecastRowUiStatus(
+                          revCfg,
+                          "rev",
+                          lastHistoricByRowId,
+                          revAllowGrowthFromHistorical,
+                          projectionYears
+                        );
+                        if (st === "ready") return <span className="text-emerald-500/80"> · Ready</span>;
+                        if (st === "invalid") return <span className="text-red-400/80"> · Invalid</span>;
+                        return <span className="text-amber-400/80"> · Incomplete</span>;
+                      })()}
+                    </span>
+                  ) : null}
+                </button>
+                {revDirectCardOpen ? (
+                  <RevenueForecastV1DirectForecastBlock
+                    rowId="rev"
+                    cfg={revCfg}
+                    setRevenueForecastRowV1={setRevenueForecastRowV1}
+                    lastHistoricByRowId={lastHistoricByRowId}
+                    projectionYears={projectionYears}
+                    unit={unit}
+                    allowGrowthFromHistorical={revAllowGrowthFromHistorical}
+                    focusNonce={revFocusNonce}
+                  />
+                ) : null}
+              </div>
+            )}
           </div>
 
-          {/* Add stream */}
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="text"
-              value={newStreamLabel}
-              onChange={(e) => setNewStreamLabel(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddStream()}
-              placeholder="e.g. Product sales, Service revenue"
-              className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-3 py-1.5 w-56 placeholder:text-slate-500"
-            />
+          {!revIsDerived && streams.length === 0 && !revAllocControlsVisible ? (
             <button
               type="button"
-              onClick={handleAddStream}
-              className="rounded border border-slate-600 bg-slate-700 text-xs text-slate-200 px-3 py-1.5 hover:bg-slate-600"
+              onClick={() => setRevAllocControlsVisible(true)}
+              className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-300 px-3 py-2 hover:bg-slate-700"
             >
-              Add stream
+              Add allocation line (optional — split Total Revenue by %)
             </button>
-          </div>
+          ) : null}
+          {(!revIsDerived && (revAllocControlsVisible || streams.length > 0)) || revIsDerived ? (
+            <RevenueForecastLineNameAdd
+              placeholder={revIsDerived ? "Top-level line (e.g. Subscription, Clothing)" : "Allocation line name"}
+              buttonLabel={revIsDerived ? "Add top-level line" : "Add allocation line"}
+              onAdd={handleAddStreamNamed}
+            />
+          ) : null}
 
-          {/* Streams with expand/collapse and children */}
-          {streams.map((stream) => {
-            const streamCfg = revenueForecastConfigV1?.rows?.[stream.id];
-            const parentRole = streamCfg?.forecastRole;
-            const hasChildren = (stream.children?.length ?? 0) > 0;
-            const isExpanded = expandedStreams.has(stream.id);
-            const suggestion = getRevenueForecastSuggestionsFromProfile(profile, stream.id, false, true, hasChildren);
-            const role = streamCfg?.forecastRole ?? suggestion?.role ?? "independent_driver";
-            const method = streamCfg?.forecastMethod ?? suggestion?.method ?? "growth_rate";
-            const params = streamCfg?.forecastParameters ?? {};
-            const allowedChildRoles = getAllowedRolesForChild(parentRole);
-            const childRole = allowedChildRoles[0];
-
-            return (
-              <div key={stream.id} className="rounded-lg border border-slate-700 bg-slate-900/40 overflow-hidden">
-                {/* Stream row */}
-                <div className="p-3 flex flex-wrap items-start gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    {hasChildren && (
-                      <button
-                        type="button"
-                        onClick={() => toggleStreamExpanded(stream.id)}
-                        className="text-slate-400 hover:text-slate-200 p-0.5"
-                        aria-label={isExpanded ? "Collapse" : "Expand"}
-                      >
-                        {isExpanded ? "▼" : "▶"}
-                      </button>
-                    )}
-                    <span className="text-xs font-medium text-slate-200">{stream.label}</span>
-                    {stream.id !== "rev" && (
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveRow(stream.id)}
-                        className="text-[11px] text-red-400 hover:text-red-300"
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div>
-                      <label className="text-[11px] text-slate-500 block mb-0.5">Role</label>
-                      <select
-                        value={role}
-                        onChange={(e) => {
-                          const newRole = e.target.value as RevenueForecastRoleV1;
-                          setRevenueForecastRowV1(stream.id, {
-                            forecastRole: newRole,
-                            forecastMethod: newRole === "independent_driver" ? (streamCfg?.forecastMethod ?? "growth_rate") : undefined,
-                            forecastParameters: newRole === "independent_driver" ? { ratePercent: params.ratePercent ?? 0 } : undefined,
-                            forecastReason: suggestion?.reason,
-                          });
-                          (stream.children ?? []).forEach((c) => {
-                            const childAllowed = getAllowedRolesForChild(newRole)[0];
-                            setRevenueForecastRowV1(c.id, {
-                              forecastRole: childAllowed,
-                              forecastMethod: childAllowed === "independent_driver" ? "growth_rate" : undefined,
-                              forecastParameters: childAllowed === "allocation_of_parent" ? { allocationPercent: 0 } : { ratePercent: 0 },
-                            });
-                          });
-                        }}
-                        className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                      >
-                        <option value="independent_driver">Forecast this stream directly</option>
-                        <option value="derived_sum">Build this stream from breakdowns</option>
-                      </select>
-                      <p className="text-[10px] text-slate-500 mt-1 max-w-xs">
-                        {role === "independent_driver"
-                          ? "The stream is projected directly; any child breakdowns are only % allocations of the stream."
-                          : "Each child breakdown is forecast individually; the parent is the sum of the breakdowns."}
-                      </p>
-                    </div>
-                    {role === "independent_driver" && (
-                      <>
-                        <div>
-                          <label className="text-[11px] text-slate-500 block mb-0.5">Method</label>
-                          <select
-                            value={method}
-                            onChange={(e) => {
-                              const newMethod = e.target.value as RevenueForecastMethodV1;
-                              setRevenueForecastRowV1(stream.id, {
-                                forecastMethod: newMethod,
-                                forecastParameters: newMethod === "growth_rate" ? { ratePercent: params.ratePercent ?? 0 } : { value: params.value ?? 0 },
-                                forecastReason: suggestion?.reason,
-                              });
-                            }}
-                            className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                          >
-                            <option value="growth_rate">Growth rate %</option>
-                            <option value="fixed_value">Fixed value</option>
-                          </select>
-                        </div>
-                        {method === "growth_rate" && (
-                          <>
-                            <div>
-                              <label className="text-[11px] text-slate-500 block mb-0.5">Growth %</label>
-                              <input
-                                type="number"
-                                step={0.1}
-                                value={typeof params.ratePercent === "number" ? params.ratePercent : ""}
-                                onChange={(e) => {
-                                  const v = parseFloat(e.target.value);
-                                  setRevenueForecastRowV1(stream.id, { forecastParameters: { ...params, ratePercent: isNaN(v) ? 0 : v } });
-                                }}
-                                className="w-20 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                placeholder="0"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[11px] text-slate-500 block mb-0.5">Starting amount (optional)</label>
-                              <input
-                                type="number"
-                                step={0.01}
-                                value={params.startingAmount != null ? storedToDisplay(Number(params.startingAmount), unit) : ""}
-                                onChange={(e) => {
-                                  const raw = parseFloat(e.target.value);
-                                  const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : undefined;
-                                  setRevenueForecastRowV1(stream.id, {
-                                    forecastParameters: { ...params, startingAmount: stored as number | undefined },
-                                  });
-                                }}
-                                className="w-24 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                placeholder={lastHistoricYear ? "Use last year" : "Required if no history"}
-                              />
-                              {unitLabel && <span className="text-[10px] text-slate-500 ml-0.5">{unitLabel}</span>}
-                            </div>
-                          </>
-                        )}
-                        {method === "fixed_value" && (
-                          <>
-                            <div className="flex items-center gap-2">
-                              <label className="text-[11px] text-slate-500">Mode:</label>
-                              <select
-                                value={params.valuesByYear && typeof params.valuesByYear === "object" && Object.keys(params.valuesByYear).length > 0 ? "manual_by_year" : "flat"}
-                                onChange={(e) => {
-                                  const mode = e.target.value as "flat" | "manual_by_year";
-                                  const vByY = (params.valuesByYear ?? {}) as Record<string, number>;
-                                  const flatVal = params.value ?? (Object.values(vByY)[0] as number | undefined) ?? 0;
-                                  if (mode === "flat") {
-                                    setRevenueForecastRowV1(stream.id, {
-                                      forecastParameters: { value: flatVal },
-                                    });
-                                  } else {
-                                    setRevenueForecastRowV1(stream.id, {
-                                      forecastParameters: {
-                                        valuesByYear: projectionYears.reduce<Record<string, number>>((acc, y) => {
-                                          acc[y] = vByY[y] ?? flatVal;
-                                          return acc;
-                                        }, {}),
-                                      },
-                                    });
-                                  }
-                                }}
-                                className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                              >
-                                <option value="flat">Flat value</option>
-                                <option value="manual_by_year">Manual by year</option>
-                              </select>
-                            </div>
-                            {(!params.valuesByYear || Object.keys(params.valuesByYear).length === 0) ? (
-                              <div>
-                                <label className="text-[11px] text-slate-500 block mb-0.5">Value (same each year)</label>
-                                <input
-                                  type="number"
-                                  step={0.01}
-                                  value={params.value != null ? storedToDisplay(Number(params.value), unit) : ""}
-                                  onChange={(e) => {
-                                    const raw = parseFloat(e.target.value);
-                                    const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
-                                    setRevenueForecastRowV1(stream.id, { forecastParameters: { ...params, value: stored } });
-                                  }}
-                                  className="w-24 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                  placeholder="0"
-                                />
-                                {unitLabel && <span className="text-[10px] text-slate-500 ml-0.5">{unitLabel}</span>}
-                              </div>
-                            ) : (
-                              <div className="flex flex-wrap gap-2">
-                                {projectionYears.map((y) => (
-                                  <div key={y}>
-                                    <label className="text-[10px] text-slate-500 block">{y}</label>
-                                    <input
-                                      type="number"
-                                      step={0.01}
-                                      value={typeof params.valuesByYear === "object" && params.valuesByYear != null && (params.valuesByYear as Record<string, number>)[y] != null ? storedToDisplay(Number((params.valuesByYear as Record<string, number>)[y]), unit) : ""}
-                                      onChange={(e) => {
-                                        const raw = parseFloat(e.target.value);
-                                        const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
-                                        setRevenueForecastRowV1(stream.id, {
-                                          forecastParameters: {
-                                            ...params,
-                                            valuesByYear: { ...((params.valuesByYear as Record<string, number> | undefined) ?? {}), [y]: stored },
-                                          },
-                                        });
-                                      }}
-                                      className="w-20 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                    />
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </>
-                    )}
-                  </div>
-                  <div className="w-full flex flex-wrap items-center gap-2 mt-1 border-t border-slate-700/60 pt-2">
-                    <input
-                      type="text"
-                      value={newBreakdownByStream[stream.id] ?? ""}
-                      onChange={(e) => setNewBreakdownByStream((p) => ({ ...p, [stream.id]: e.target.value }))}
-                      onKeyDown={(e) => e.key === "Enter" && handleAddBreakdown(stream.id)}
-                      placeholder="e.g. US, Enterprise, Product A"
-                      className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1 w-40 placeholder:text-slate-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => handleAddBreakdown(stream.id)}
-                      className="rounded border border-slate-600 bg-slate-700 text-xs text-slate-200 px-2 py-1 hover:bg-slate-600"
-                    >
-                      Add breakdown
-                    </button>
-                  </div>
-                </div>
-
-                {/* Children (indented) */}
-                {hasChildren && isExpanded && (
-                  <div className="border-t border-slate-700/60 bg-slate-950/50 pl-6 pr-3 pb-3 space-y-2">
-                    {(stream.children ?? []).map((child) => {
-                      const childCfg = revenueForecastConfigV1?.rows?.[child.id];
-                      const cRole = childCfg?.forecastRole ?? childRole;
-                      const cMethod = childCfg?.forecastMethod ?? "growth_rate";
-                      const cParams = childCfg?.forecastParameters ?? {};
-                      return (
-                        <div key={child.id} className="rounded border border-slate-700/60 bg-slate-900/40 p-2 flex flex-wrap items-center gap-3">
-                          <span className="text-xs text-slate-300">{child.label}</span>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveRow(child.id)}
-                            className="text-[11px] text-red-400 hover:text-red-300"
-                          >
-                            Remove
-                          </button>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div>
-                              <label className="text-[11px] text-slate-500 block mb-0.5">Role</label>
-                              <select
-                                value={cRole}
-                                onChange={(e) => {
-                                  const newRole = e.target.value as RevenueForecastRoleV1;
-                                  setRevenueForecastRowV1(child.id, {
-                                    forecastRole: newRole,
-                                    forecastMethod: newRole === "independent_driver" ? "growth_rate" : undefined,
-                                    forecastParameters: newRole === "allocation_of_parent" ? { allocationPercent: cParams.allocationPercent ?? 0 } : { ratePercent: 0 },
-                                  });
-                                }}
-                                className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                              >
-                                {allowedChildRoles.map((r) => (
-                                  <option key={r} value={r}>
-                                    {r === "allocation_of_parent" ? "Allocate from parent" : "Forecast this breakdown directly"}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                            {cRole === "independent_driver" && (
-                              <>
-                                <div>
-                                  <label className="text-[11px] text-slate-500 block mb-0.5">Method</label>
-                                  <select
-                                    value={cMethod}
-                                    onChange={(e) => {
-                                      const newMethod = e.target.value as RevenueForecastMethodV1;
-                                      setRevenueForecastRowV1(child.id, {
-                                        forecastMethod: newMethod,
-                                        forecastParameters: newMethod === "growth_rate" ? { ratePercent: cParams.ratePercent ?? 0 } : { value: cParams.value ?? 0 },
-                                      });
-                                    }}
-                                    className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                  >
-                                    <option value="growth_rate">Growth rate %</option>
-                                    <option value="fixed_value">Fixed value</option>
-                                  </select>
-                                </div>
-                                {cMethod === "growth_rate" && (
-                                  <>
-                                    <div>
-                                      <label className="text-[11px] text-slate-500 block mb-0.5">Growth %</label>
-                                      <input
-                                        type="number"
-                                        step={0.1}
-                                        value={typeof cParams.ratePercent === "number" ? cParams.ratePercent : ""}
-                                        onChange={(e) => {
-                                          const v = parseFloat(e.target.value);
-                                          setRevenueForecastRowV1(child.id, { forecastParameters: { ...cParams, ratePercent: isNaN(v) ? 0 : v } });
-                                        }}
-                                        className="w-16 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                        placeholder="0"
-                                      />
-                                    </div>
-                                    <div>
-                                      <label className="text-[11px] text-slate-500 block mb-0.5">Starting amount (optional)</label>
-                                      <input
-                                        type="number"
-                                        step={0.01}
-                                        value={cParams.startingAmount != null ? storedToDisplay(Number(cParams.startingAmount), unit) : ""}
-                                        onChange={(e) => {
-                                          const raw = parseFloat(e.target.value);
-                                          const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : undefined;
-                                          setRevenueForecastRowV1(child.id, {
-                                            forecastParameters: { ...cParams, startingAmount: stored as number | undefined },
-                                          });
-                                        }}
-                                        className="w-20 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                        placeholder={lastHistoricYear ? "Use last year" : "Required if no history"}
-                                      />
-                                    </div>
-                                  </>
-                                )}
-                                {cMethod === "fixed_value" && (
-                                  <>
-                                    <div className="flex items-center gap-2">
-                                      <label className="text-[11px] text-slate-500">Mode:</label>
-                                      <select
-                                        value={cParams.valuesByYear && typeof cParams.valuesByYear === "object" && Object.keys(cParams.valuesByYear).length > 0 ? "manual_by_year" : "flat"}
-                                        onChange={(e) => {
-                                          const mode = e.target.value as "flat" | "manual_by_year";
-                                          const vByY = (cParams.valuesByYear ?? {}) as Record<string, number>;
-                                          const flatVal = cParams.value ?? (Object.values(vByY)[0] as number | undefined) ?? 0;
-                                          if (mode === "flat") {
-                                            setRevenueForecastRowV1(child.id, {
-                                              forecastParameters: { value: flatVal },
-                                            });
-                                          } else {
-                                            setRevenueForecastRowV1(child.id, {
-                                              forecastParameters: {
-                                                valuesByYear: projectionYears.reduce<Record<string, number>>((acc, y) => {
-                                                  acc[y] = vByY[y] ?? flatVal;
-                                                  return acc;
-                                                }, {}),
-                                              },
-                                            });
-                                          }
-                                        }}
-                                        className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                      >
-                                        <option value="flat">Flat value</option>
-                                        <option value="manual_by_year">Manual by year</option>
-                                      </select>
-                                    </div>
-                                    {(!cParams.valuesByYear || typeof cParams.valuesByYear !== "object" || Object.keys(cParams.valuesByYear).length === 0) ? (
-                                      <div>
-                                        <label className="text-[11px] text-slate-500 block mb-0.5">Value (same each year)</label>
-                                        <input
-                                          type="number"
-                                          step={0.01}
-                                          value={cParams.value != null ? storedToDisplay(Number(cParams.value), unit) : ""}
-                                          onChange={(e) => {
-                                            const raw = parseFloat(e.target.value);
-                                            const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
-                                            setRevenueForecastRowV1(child.id, { forecastParameters: { ...cParams, value: stored } });
-                                          }}
-                                          className="w-20 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                          placeholder="0"
-                                        />
-                                      </div>
-                                    ) : (
-                                      <div className="flex flex-wrap gap-2">
-                                        {projectionYears.map((y) => (
-                                          <div key={y}>
-                                            <label className="text-[10px] text-slate-500 block">{y}</label>
-                                            <input
-                                              type="number"
-                                              step={0.01}
-                                              value={(cParams.valuesByYear as Record<string, number>)?.[y] != null ? storedToDisplay(Number((cParams.valuesByYear as Record<string, number>)[y]), unit) : ""}
-                                              onChange={(e) => {
-                                                const raw = parseFloat(e.target.value);
-                                                const stored = !Number.isNaN(raw) ? displayToStored(raw, unit) : 0;
-                                                setRevenueForecastRowV1(child.id, {
-                                                  forecastParameters: {
-                                                    ...cParams,
-                                                    valuesByYear: { ...((cParams.valuesByYear as Record<string, number>) ?? {}), [y]: stored },
-                                                  },
-                                                });
-                                              }}
-                                              className="w-16 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                            />
-                                          </div>
-                                        ))}
-                                      </div>
-                                    )}
-                                  </>
-                                )}
-                              </>
-                            )}
-                            {cRole === "allocation_of_parent" && (
-                              <div>
-                                <label className="text-[11px] text-slate-500 block mb-0.5">Allocation %</label>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  max={100}
-                                  step={0.5}
-                                  value={typeof cParams.allocationPercent === "number" ? cParams.allocationPercent : ""}
-                                  onChange={(e) => {
-                                    const v = parseFloat(e.target.value);
-                                    setRevenueForecastRowV1(child.id, {
-                                      forecastParameters: { ...cParams, allocationPercent: isNaN(v) ? 0 : Math.max(0, Math.min(100, v)) },
-                                    });
-                                  }}
-                                  className="w-16 rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-1"
-                                  placeholder="0"
-                                />
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          <RevenueForecastV1HierarchyEditor
+            revIsDerived={revIsDerived}
+            forest={streams}
+            rows={revenueForecastConfigV1?.rows ?? {}}
+            setRevenueForecastRowV1={setRevenueForecastRowV1}
+            addRevenueStreamChild={addRevenueStreamChild}
+            removeRow={handleRemoveRow}
+            expandedStreams={expandedStreams}
+            toggleExpanded={toggleStreamExpanded}
+            ensureExpandedIds={ensureExpandedIds}
+            flashRowId={flashRowId}
+            onFlashRow={flashRow}
+            pendingDirectFocusRowId={pendingDirectFocusRowId}
+            onConsumedDirectFocus={() => setPendingDirectFocusRowId(null)}
+            pendingAllocationFocusRowId={pendingAllocationFocusRowId}
+            onConsumedAllocationFocus={() => setPendingAllocationFocusRowId(null)}
+            lastHistoricByRowId={lastHistoricByRowId}
+            projectionYears={projectionYears}
+            unit={unit}
+          />
         </div>
       </CollapsibleSection>
     </div>

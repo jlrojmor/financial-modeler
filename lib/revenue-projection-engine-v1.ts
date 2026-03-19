@@ -1,20 +1,22 @@
 /**
- * Revenue projection engine v1.
- * Roles: independent_driver, derived_sum, allocation_of_parent.
- * Methods: growth_rate, fixed_value only.
- * Uses historic values from income statement; does not overwrite historicals.
+ * Revenue projection v1: recursive hierarchy.
+ * - derived_sum: sum of children (post-order).
+ * - independent_driver: growth/fixed; if children, they are allocations of parent.
+ * - rev: derived → sum(top-level); independent → project rev then allocate to top lines.
  */
 
 import type { Row } from "@/types/finance";
 import type {
   RevenueForecastConfigV1,
-  RevenueForecastRowConfigV1,
   RevenueForecastMethodV1,
+  GrowthStartingBasisV1,
+  ForecastRevenueNodeV1,
 } from "@/types/revenue-forecast-v1";
 import { computeRowValue } from "@/lib/calculations";
 import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
+import { resolveGrowthRatesByYear } from "@/lib/revenue-growth-phases-v1";
 
-export type ProjectedRevenueResultV1 = Record<string, Record<string, number>>; // rowId -> year -> stored value
+export type ProjectedRevenueResultV1 = Record<string, Record<string, number>>;
 
 function findRow(rows: Row[], id: string): Row | null {
   for (const r of rows) {
@@ -27,9 +29,6 @@ function findRow(rows: Row[], id: string): Row | null {
   return null;
 }
 
-/**
- * Get historic value for a revenue row in a given year (from IS / computed).
- */
 function getHistoricValue(
   row: Row,
   year: string,
@@ -38,23 +37,19 @@ function getHistoricValue(
   sbcBreakdowns: Record<string, Record<string, number>>,
   danaBreakdowns: Record<string, number>
 ): number {
-  return computeRowValue(
-    row,
-    year,
-    incomeStatement,
-    incomeStatement,
-    allStatements,
-    sbcBreakdowns,
-    danaBreakdowns
-  );
+  return computeRowValue(row, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
 }
 
-/**
- * Compute projected revenue (v1) for projection years only.
- * Returns rowId -> year -> stored value. Does not run if validation fails.
- */
+function walkForecastNodes(nodes: ForecastRevenueNodeV1[], fn: (n: ForecastRevenueNodeV1) => void): void {
+  for (const n of nodes) {
+    fn(n);
+    walkForecastNodes(n.children, fn);
+  }
+}
+
 export function computeRevenueProjectionsV1(
   incomeStatement: Row[],
+  forecastTree: ForecastRevenueNodeV1[],
   config: RevenueForecastConfigV1,
   projectionYears: string[],
   lastHistoricYear: string,
@@ -62,114 +57,150 @@ export function computeRevenueProjectionsV1(
   sbcBreakdowns: Record<string, Record<string, number>>,
   danaBreakdowns: Record<string, number>
 ): { result: ProjectedRevenueResultV1; valid: boolean } {
-  const validation = validateRevenueForecastV1(incomeStatement, config);
+  const rows = config.rows ?? {};
+  const lastHistoricByRowId: Record<string, number | null> = {};
+
+  const revRow = incomeStatement.find((r) => r.id === "rev");
+  if (revRow && lastHistoricYear) {
+    const v = getHistoricValue(revRow, lastHistoricYear, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+    lastHistoricByRowId["rev"] = typeof v === "number" && !Number.isNaN(v) ? v : null;
+  }
+
+  walkForecastNodes(forecastTree, (node) => {
+    const isRow = findRow(incomeStatement, node.id);
+    if (isRow && lastHistoricYear) {
+      const v = getHistoricValue(isRow, lastHistoricYear, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
+      lastHistoricByRowId[node.id] = typeof v === "number" && !Number.isNaN(v) ? v : null;
+    } else {
+      lastHistoricByRowId[node.id] = null;
+    }
+  });
+
+  const lastHistoricForValidation: Record<string, number> = {};
+  for (const [k, v] of Object.entries(lastHistoricByRowId)) {
+    lastHistoricForValidation[k] = v !== null && !Number.isNaN(v) ? v : NaN;
+  }
+
+  const validation = validateRevenueForecastV1(incomeStatement, config, {
+    forecastTree,
+    lastHistoricYear,
+    lastHistoricByRowId: lastHistoricForValidation,
+    projectionYears,
+  });
   if (!validation.valid) {
     return { result: {}, valid: false };
   }
 
   const result: ProjectedRevenueResultV1 = {};
-  const rev = incomeStatement.find((r) => r.id === "rev");
-  if (!rev) return { result: {}, valid: true };
+  const revCfg = rows["rev"];
+  if (!revCfg) return { result: {}, valid: false };
 
-  const rows = config.rows ?? {};
-  const streams = rev.children ?? [];
-
-  const getPriorStored = (rowId: string, yearIndex: number, row: Row, params: Record<string, unknown>): number | null => {
+  const getPriorStored = (rowId: string, yearIndex: number, params: Record<string, unknown>): number | null => {
     if (yearIndex > 0) {
-      const year = projectionYears[yearIndex - 1];
-      return result[rowId]?.[year] ?? 0;
+      const y = projectionYears[yearIndex - 1];
+      return result[rowId]?.[y] ?? 0;
     }
-    // First projection year: use startingAmount if provided, else last historical
+    const basis = params.startingBasis as GrowthStartingBasisV1 | undefined;
     const startingAmount = params.startingAmount;
-    if (startingAmount != null && Number.isFinite(Number(startingAmount))) {
-      return Number(startingAmount);
-    }
-    const year = lastHistoricYear;
-    const historic = getHistoricValue(row, year, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns);
-    if (typeof historic !== "number" || Number.isNaN(historic)) return null;
-    return historic;
+    const hasStarting = startingAmount != null && Number.isFinite(Number(startingAmount));
+    const lastHistoric = lastHistoricByRowId[rowId] ?? null;
+    const hasHistoric = lastHistoric !== null && !Number.isNaN(lastHistoric);
+
+    if (basis === "starting_amount" && hasStarting) return Number(startingAmount);
+    if (basis === "last_historical" && hasHistoric) return lastHistoric!;
+    return null;
   };
 
-  const projectIndependentDriver = (row: Row) => {
-    const cfg = rows[row.id];
+  const projectIndependentRow = (rowId: string) => {
+    const cfg = rows[rowId];
     if (cfg?.forecastRole !== "independent_driver" || !cfg.forecastMethod) return;
     const method = cfg.forecastMethod as RevenueForecastMethodV1;
     const params = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
-    result[row.id] = {};
+    const resolvedRates = method === "growth_rate" ? resolveGrowthRatesByYear(params, projectionYears) : null;
+    result[rowId] = {};
     for (let i = 0; i < projectionYears.length; i++) {
       const year = projectionYears[i];
       if (method === "growth_rate") {
-        const prior = getPriorStored(row.id, i, row, params);
-        if (prior === null) {
-          // No base: do not project this row (validation will have raised an error)
-          return;
-        }
-        const rate =
-          (params.ratesByYear as Record<string, number>)?.[year] != null
-            ? (params.ratesByYear as Record<string, number>)[year] / 100
-            : (Number(params.ratePercent) ?? 0) / 100;
-        result[row.id][year] = prior * (1 + rate);
+        const prior = getPriorStored(rowId, i, params);
+        if (prior === null) return;
+        const pct =
+          resolvedRates?.[year] != null && Number.isFinite(Number(resolvedRates[year]))
+            ? Number(resolvedRates[year])
+            : Number(params.ratePercent) ?? 0;
+        const rate = pct / 100;
+        result[rowId][year] = prior * (1 + rate);
       } else {
         const valuesByYear = params.valuesByYear as Record<string, number> | undefined;
-        const val = valuesByYear?.[year] ?? Number(params.value) ?? 0;
-        result[row.id][year] = val;
+        result[rowId][year] = valuesByYear?.[year] ?? Number(params.value) ?? 0;
       }
     }
   };
 
-  // 1) Independent drivers: top-level streams
-  for (const stream of streams) {
-    projectIndependentDriver(stream);
-  }
-  // 1b) Independent drivers: children of derived_sum streams (nested segments)
-  for (const stream of streams) {
-    if (rows[stream.id]?.forecastRole !== "derived_sum") continue;
-    for (const child of stream.children ?? []) {
-      projectIndependentDriver(child);
-    }
-  }
-
-  // 2) Allocation-of-parent children (parent already computed as independent_driver)
-  for (const stream of streams) {
-    const streamCfg = rows[stream.id];
-    if (streamCfg?.forecastRole !== "independent_driver") continue;
-    const children = stream.children ?? [];
+  const projectAllocChildren = (parentId: string, children: ForecastRevenueNodeV1[]) => {
     for (const child of children) {
-      const childCfg = rows[child.id];
-      if (childCfg?.forecastRole !== "allocation_of_parent") continue;
-      const pctVal = childCfg.forecastParameters?.allocationPercent;
-      const pct = (typeof pctVal === "number" ? pctVal : 0) / 100;
+      const cCfg = rows[child.id];
+      if (cCfg?.forecastRole !== "allocation_of_parent") continue;
+      const pct = ((cCfg.forecastParameters?.allocationPercent as number) ?? 0) / 100;
       result[child.id] = {};
       for (const year of projectionYears) {
-        const parentVal = result[stream.id]?.[year] ?? 0;
-        result[child.id][year] = parentVal * pct;
+        const pv = result[parentId]?.[year] ?? 0;
+        result[child.id][year] = pv * pct;
       }
     }
-  }
+  };
 
-  // 3) Streams that are derived_sum (sum of their children)
-  for (const stream of streams) {
-    const cfg = rows[stream.id];
-    if (cfg?.forecastRole !== "derived_sum") continue;
-    const children = stream.children ?? [];
-    result[stream.id] = {};
+  /** Build-from-children subtree: post-order compute children then sum. */
+  const projectDerivedSubtree = (node: ForecastRevenueNodeV1, parentDerivedForChildren: string) => {
+    const cfg = rows[node.id];
+    if (cfg?.forecastRole !== "derived_sum") return;
+
+    for (const child of node.children) {
+      const cCfg = rows[child.id];
+      if (cCfg?.forecastRole === "derived_sum") {
+        projectDerivedSubtree(child, child.id);
+      } else if (cCfg?.forecastRole === "independent_driver") {
+        projectIndependentRow(child.id);
+        if (child.children.length > 0) {
+          projectAllocChildren(child.id, child.children);
+        }
+      }
+    }
+
+    result[node.id] = {};
     for (const year of projectionYears) {
       let sum = 0;
-      for (const child of children) {
+      for (const child of node.children) {
         sum += result[child.id]?.[year] ?? 0;
       }
-      result[stream.id][year] = sum;
+      result[node.id][year] = sum;
     }
-  }
+  };
 
-  // 4) Total Revenue = sum of all streams
-  result["rev"] = {};
-  for (const year of projectionYears) {
-    let sum = 0;
-    for (const stream of streams) {
-      sum += result[stream.id]?.[year] ?? 0;
+  if (revCfg.forecastRole === "independent_driver") {
+    projectIndependentRow("rev");
+    if (forecastTree.length > 0) {
+      projectAllocChildren("rev", forecastTree);
     }
-    result["rev"][year] = sum;
+  } else if (revCfg.forecastRole === "derived_sum") {
+    for (const stream of forecastTree) {
+      const sCfg = rows[stream.id];
+      if (sCfg?.forecastRole === "derived_sum") {
+        projectDerivedSubtree(stream, stream.id);
+      } else if (sCfg?.forecastRole === "independent_driver") {
+        projectIndependentRow(stream.id);
+        if (stream.children.length > 0) {
+          projectAllocChildren(stream.id, stream.children);
+        }
+      }
+    }
+    result["rev"] = {};
+    for (const year of projectionYears) {
+      let sum = 0;
+      for (const stream of forecastTree) {
+        sum += result[stream.id]?.[year] ?? 0;
+      }
+      result["rev"][year] = sum;
+    }
   }
 
   return { result, valid: true };

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import RevenueForecastV1Tab from "@/components/revenue-forecast-v1-tab";
+import ForecastHelperCard from "@/components/forecast-helper-card";
 
 type SubTab = "revenue" | "operating_costs" | "wc_drivers" | "financing_taxes";
 
@@ -21,6 +22,7 @@ export default function ForecastDriversShell() {
 
   return (
     <div className="space-y-4">
+      <ForecastHelperCard />
       <div className="flex flex-wrap gap-2 border-b border-slate-700 pb-2">
         {SUB_TABS.map(({ id, label }) => (
           <button

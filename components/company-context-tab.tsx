@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useModelStore } from "@/store/useModelStore";
-import type { CompanyContextAiContext, SuggestedComp, CompRole, IndustryBenchmarks, WcIntensityLevel, ModelingImplications, PrimaryBusinessType, MainOperatingGeography, CustomerType, RevenueModel, PeerSuggestionType, ResearchConfidence, CompResolutionState, CompDerivedMetrics } from "@/types/company-context";
+import type { CompanyContextAiContext, CompRole, IndustryBenchmarks, WcIntensityLevel, ModelingImplications, PrimaryBusinessType, MainOperatingGeography, CustomerType, RevenueModel, PeerSuggestionType, CompResolutionState } from "@/types/company-context";
 
 const HEADQUARTERS_COUNTRIES = ["", "United States", "United Kingdom", "Canada", "Mexico", "Germany", "France", "Japan", "China", "India", "Australia", "Brazil", "Netherlands", "Switzerland", "Singapore", "Ireland", "Other"];
 const INDUSTRIES = ["", "Technology", "Software", "Consumer Retail", "Healthcare", "Financial Services", "Industrial & Manufacturing", "Energy", "Telecommunications", "Media & Entertainment", "Real Estate", "Biotechnology", "Other"];
@@ -95,7 +95,7 @@ function SourceBadge({ source }: { source: ContextSource }) {
     user_override: "Override",
   };
   return (
-    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${styles[source]}`}>
+    <span className={`inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold tracking-wide ${styles[source]} ring-1 ring-white/5`}>
       {labels[source]}
     </span>
   );
@@ -116,7 +116,7 @@ function PeerSuggestionBadge({ type }: { type?: PeerSuggestionType }) {
     low_confidence_suggestion: "bg-amber-800/50 text-amber-200",
   };
   return (
-    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${styles[type]}`}>
+    <span className={`inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold ${styles[type]} ring-1 ring-white/5`}>
       {PEER_SUGGESTION_LABELS[type]}
     </span>
   );
@@ -136,17 +136,10 @@ function ResolutionBadge({ state, confidence, matchScore }: { state: CompResolut
   };
   const title = [confidence && `Confidence: ${confidence}`, matchScore != null && `Match score: ${matchScore}`].filter(Boolean).join(" · ") || undefined;
   return (
-    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${styles[state]}`} title={title}>
+    <span className={`inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold ${styles[state]} ring-1 ring-white/5`} title={title}>
       {RESOLUTION_LABELS[state]}
     </span>
   );
-}
-
-function formatMetricRange(min: number | undefined, max: number | undefined, suffix = ""): string {
-  if (min == null && max == null) return "—";
-  if (min != null && max != null) return `${min}–${max}${suffix}`;
-  if (min != null) return `${min}${suffix}+`;
-  return `≤${max}${suffix}`;
 }
 
 export default function CompanyContextTab() {
@@ -155,7 +148,6 @@ export default function CompanyContextTab() {
   const generateCompanyContext = useModelStore((s) => s.generateCompanyContext);
   const updateCompanyContextCard = useModelStore((s) => s.updateCompanyContextCard);
   const updateCompanyContextOverride = useModelStore((s) => s.updateCompanyContextOverride);
-  const setSuggestedComps = useModelStore((s) => s.setSuggestedComps);
   const updateSuggestedComp = useModelStore((s) => s.updateSuggestedComp);
   const enrichSuggestedComp = useModelStore((s) => s.enrichSuggestedComp);
   const addSuggestedComp = useModelStore((s) => s.addSuggestedComp);
@@ -194,10 +186,7 @@ export default function CompanyContextTab() {
   const confidence = companyContext.confidence;
   const notEnoughEvidenceMessage = companyContext.notEnoughEvidenceMessage;
   const isLowConfidence = confidence?.overall === "low" || Boolean(notEnoughEvidenceMessage);
-  const researchConfidence = companyContext.companyResearch?.researchConfidence;
   const betaDisplay = companyContext.user_overrides?.["beta"] ?? wacc.betaEstimate ?? market.beta;
-  const reportingCurrency = market.reportingCurrency ?? "USD";
-  const marketType = market.marketType ?? "developed";
 
   const handleGenerate = async () => {
     setGenerating(true);
@@ -216,17 +205,30 @@ export default function CompanyContextTab() {
     return `≤${max}${suffix}`;
   };
 
+  const card = "rounded-xl border border-slate-700/80 bg-slate-950/35 shadow-sm ring-1 ring-white/[0.03]";
+  const sectionTitle = "text-base font-semibold text-slate-100 tracking-tight";
+  const sectionEyebrow = "text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500";
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8 pb-4">
+      <header className="border-b border-slate-800/80 pb-4">
+        <p className={sectionEyebrow}>Workspace</p>
+        <h1 className="text-lg font-semibold text-slate-50 mt-1">Context builder</h1>
+        <p className="text-xs text-slate-500 mt-1 max-w-xl">Capture inputs, refine comps and WACC, then edit benchmarks and guidance. Synthesized readout lives in Intelligence →</p>
+      </header>
+
       {/* 1. Company details — always first (inline so input keeps focus on re-render) */}
-      <div className="rounded-lg border border-slate-700 bg-slate-900/50 overflow-hidden">
+      <div className={`${card} overflow-hidden border-l-2 border-l-emerald-800/40`}>
         <button
           type="button"
           onClick={() => setDetailsOpen((o) => !o)}
-          className="w-full px-4 py-2.5 flex items-center justify-between text-left text-sm font-medium text-slate-200 hover:bg-slate-800/50"
+          className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-slate-900/40 transition-colors"
         >
-          <span>Company details</span>
-          <span className="text-slate-500 text-xs">{detailsOpen ? "▼" : "▶"}</span>
+          <span>
+            <span className={`${sectionEyebrow} block mb-0.5`}>Inputs</span>
+            <span className="text-sm font-semibold text-slate-100">Company details</span>
+          </span>
+          <span className="text-slate-500 text-xs tabular-nums">{detailsOpen ? "Hide" : "Show"}</span>
         </button>
         {detailsOpen && (
           <div className="px-4 pb-4 pt-2 border-t border-slate-700/60 space-y-3">
@@ -301,12 +303,12 @@ export default function CompanyContextTab() {
                 <textarea value={u.shortBusinessDescription} onChange={(e) => updateCompanyContextInputs({ shortBusinessDescription: e.target.value })} placeholder="Brief description…" rows={2} className="w-full rounded border border-slate-600 bg-slate-800 px-2.5 py-1.5 text-sm text-slate-100 resize-y" />
               </div>
             </div>
-            <div className="flex items-center gap-3 pt-1">
+            <div className="flex items-center gap-3 pt-2 border-t border-slate-800/60">
               <button
                 type="button"
                 onClick={handleGenerate}
                 disabled={generating || !u.companyName.trim()}
-                className="rounded px-4 py-2 text-sm font-medium bg-slate-100 text-slate-900 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+                className="rounded-lg px-4 py-2.5 text-sm font-semibold bg-slate-100 text-slate-900 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               >
                 {generating ? "Generating…" : hasGenerated ? "Regenerate company context" : "Generate company context"}
               </button>
@@ -317,99 +319,67 @@ export default function CompanyContextTab() {
       </div>
 
       {!hasGenerated && (
-        <div className="rounded-lg border border-slate-700/60 bg-slate-900/30 p-6 text-center">
-          <p className="text-sm text-slate-400">Enter company details above and click <strong className="text-slate-300">Generate company context</strong>. The dashboard will appear below.</p>
+        <div className={`${card} p-8 text-center`}>
+          <p className="text-sm text-slate-400 max-w-md mx-auto">Enter company details above and click <strong className="text-slate-300">Generate company context</strong>. The dashboard will appear below.</p>
         </div>
       )}
 
       {hasGenerated && (
         <>
           {isStale && (
-            <div className="rounded-lg border border-amber-700/60 bg-amber-900/20 px-4 py-2.5 flex items-center justify-between gap-3">
+            <div className="rounded-xl border border-amber-800/50 bg-amber-950/25 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ring-1 ring-amber-900/20">
               <p className="text-sm text-amber-200">Company details changed. Regenerate company context to refresh comps, benchmarks, and market context.</p>
-              <button type="button" onClick={handleGenerate} disabled={generating || !u.companyName.trim()} className="shrink-0 rounded px-3 py-1.5 text-sm font-medium bg-amber-600/80 text-white hover:bg-amber-600 disabled:opacity-50">Regenerate company context</button>
+              <button type="button" onClick={handleGenerate} disabled={generating || !u.companyName.trim()} className="shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium bg-amber-600/80 text-white hover:bg-amber-600 disabled:opacity-50">Regenerate company context</button>
             </div>
           )}
 
           {isLowConfidence && notEnoughEvidenceMessage && (
-            <div className="rounded-lg border border-amber-700/60 bg-amber-900/30 px-4 py-3">
+            <div className="rounded-xl border border-amber-800/40 bg-amber-950/20 px-4 py-3 ring-1 ring-amber-900/15">
               <p className="text-xs font-medium text-amber-300 mb-1">Low confidence — we could not confidently identify the right peer set</p>
               <p className="text-sm text-amber-200/90 mb-2">{notEnoughEvidenceMessage}</p>
               <p className="text-[11px] text-slate-400">Add 1–2 known peer names, set primary business type, or provide a more specific business description to improve comps and benchmarks.</p>
             </div>
           )}
 
-          {/* 2. Snapshot Bar */}
-          <section className="rounded-lg border border-slate-700 bg-slate-800/60 p-3">
-            <div className="flex flex-wrap gap-2 items-center">
-              <span className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">Snapshot</span>
-              {researchConfidence && (
-                <span
-                  className={`px-2 py-1 rounded text-xs font-medium ${
-                    researchConfidence === "research_backed"
-                      ? "bg-emerald-800/50 text-emerald-200"
-                      : researchConfidence === "mixed_evidence"
-                        ? "bg-amber-800/50 text-amber-200"
-                        : "bg-slate-600/60 text-slate-300"
-                  }`}
-                  title={researchConfidence === "research_backed" ? "Overview uses external company evidence" : researchConfidence === "mixed_evidence" ? "Overview uses your description and inferred evidence" : "Limited evidence — add description or external source for stronger overview"}
-                >
-                  {researchConfidence === "research_backed" ? "Research-backed" : researchConfidence === "mixed_evidence" ? "Mixed evidence" : "Limited evidence"}
-                </span>
-              )}
-              {u.industry && <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">{u.industry}</span>}
-              <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">{u.publicPrivate === "public" ? "Public" : "Private"}</span>
-              {u.headquartersCountry && <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">{u.headquartersCountry}</span>}
-              <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">{reportingCurrency}</span>
-              <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">{marketType === "developed" ? "Developed" : "Emerging"}</span>
-              {wacc.riskFreeRateMarket && <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">Rf: {wacc.riskFreeRateMarket}</span>}
-              {wacc.equityRiskPremiumBasis && <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">ERP: {wacc.equityRiskPremiumBasis}</span>}
-              {betaDisplay != null && <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">β {betaDisplay}</span>}
-              {(wacc.peerBetaRangeMin != null || wacc.peerBetaRangeMax != null) && (
-                <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">Peer β {formatRange(wacc.peerBetaRangeMin, wacc.peerBetaRangeMax)}</span>
-              )}
-              {wacc.leverageBenchmark && <span className="px-2 py-1 rounded bg-slate-700/80 text-slate-200 text-xs">{wacc.leverageBenchmark}</span>}
-            </div>
-          </section>
-
-          {/* 3. Market & Valuation Context */}
-          <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
-            <h3 className="text-sm font-semibold text-slate-200 mb-3">Market & valuation context</h3>
+          {/* Market & Valuation Context */}
+          <section className={`${card} p-5`}>
+            <p className={sectionEyebrow}>Market & WACC</p>
+            <h3 className={`${sectionTitle} mt-1 mb-3`}>Market & valuation context</h3>
             <p className="text-[11px] text-slate-500 mb-3">WACC inputs and reference. Override any field as needed. <SourceBadge source="ai_generated" /></p>
             {compDerivedMetrics?.source === "accepted_comps" && (compDerivedMetrics.medianBeta != null || compDerivedMetrics.medianNetDebtEbitda != null) ? (
               <p className="text-[11px] text-emerald-400/90 mb-2">Beta and leverage context from accepted comp set ({compDerivedMetrics.withDataCount} comps with data).</p>
             ) : (
               <p className="text-[11px] text-slate-500 mb-2">Using benchmark family fallback for beta/leverage (no comp-derived data or no accepted comps with data).</p>
             )}
-            <div className="rounded-md border border-slate-600/60 bg-slate-800/30 overflow-hidden">
+            <div className="rounded-lg border border-slate-700/50 bg-slate-900/40 overflow-hidden">
               <table className="w-full text-sm">
                 <tbody>
-                  <tr className="border-b border-slate-700/60">
-                    <td className="py-2 px-3 text-slate-400 w-44">Risk-free reference</td>
+                  <tr className="border-b border-slate-800/80 hover:bg-slate-900/50">
+                    <td className="py-2.5 px-3 text-slate-500 text-xs w-44">Risk-free reference</td>
                     <td className="py-2 px-3"><input type="text" value={wacc.riskFreeRateMarket ?? ""} onChange={(e) => updateWaccContext({ riskFreeRateMarket: e.target.value || undefined })} placeholder="e.g. US 10Y Treasury" className="w-full max-w-xs rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /></td>
                   </tr>
-                  <tr className="border-b border-slate-700/60">
-                    <td className="py-2 px-3 text-slate-400">Country / sovereign risk</td>
+                  <tr className="border-b border-slate-800/80 hover:bg-slate-900/50">
+                    <td className="py-2.5 px-3 text-slate-500 text-xs">Country / sovereign risk</td>
                     <td className="py-2 px-3"><input type="text" value={wacc.countrySovereignRisk ?? ""} onChange={(e) => updateWaccContext({ countrySovereignRisk: e.target.value || undefined })} placeholder="e.g. Canada" className="w-full max-w-xs rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /></td>
                   </tr>
-                  <tr className="border-b border-slate-700/60">
-                    <td className="py-2 px-3 text-slate-400">ERP basis</td>
+                  <tr className="border-b border-slate-800/80 hover:bg-slate-900/50">
+                    <td className="py-2.5 px-3 text-slate-500 text-xs">ERP basis</td>
                     <td className="py-2 px-3"><input type="text" value={wacc.equityRiskPremiumBasis ?? ""} onChange={(e) => updateWaccContext({ equityRiskPremiumBasis: e.target.value || undefined })} placeholder="e.g. Damodaran implied ERP" className="w-full max-w-xs rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /></td>
                   </tr>
-                  <tr className="border-b border-slate-700/60">
-                    <td className="py-2 px-3 text-slate-400">Beta estimate</td>
+                  <tr className="border-b border-slate-800/80 hover:bg-slate-900/50">
+                    <td className="py-2.5 px-3 text-slate-500 text-xs">Beta estimate</td>
                     <td className="py-2 px-3"><input type="number" step={0.1} value={betaDisplay ?? ""} onChange={(e) => { const v = e.target.value === "" ? undefined : parseFloat(e.target.value); updateCompanyContextOverride("beta", v !== undefined && !Number.isNaN(v) ? v : undefined); updateWaccContext({ betaEstimate: v }); }} className="w-16 rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /></td>
                   </tr>
-                  <tr className="border-b border-slate-700/60">
-                    <td className="py-2 px-3 text-slate-400">Peer beta range</td>
+                  <tr className="border-b border-slate-800/80 hover:bg-slate-900/50">
+                    <td className="py-2.5 px-3 text-slate-500 text-xs">Peer beta range</td>
                     <td className="py-2 px-3 flex items-center gap-1"><input type="number" step={0.1} value={wacc.peerBetaRangeMin ?? ""} onChange={(e) => updateWaccContext({ peerBetaRangeMin: e.target.value === "" ? undefined : parseFloat(e.target.value) })} placeholder="Min" className="w-14 rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /><span className="text-slate-500">–</span><input type="number" step={0.1} value={wacc.peerBetaRangeMax ?? ""} onChange={(e) => updateWaccContext({ peerBetaRangeMax: e.target.value === "" ? undefined : parseFloat(e.target.value) })} placeholder="Max" className="w-14 rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /></td>
                   </tr>
-                  <tr className="border-b border-slate-700/60">
-                    <td className="py-2 px-3 text-slate-400">Leverage benchmark</td>
+                  <tr className="border-b border-slate-800/80 hover:bg-slate-900/50">
+                    <td className="py-2.5 px-3 text-slate-500 text-xs">Leverage benchmark</td>
                     <td className="py-2 px-3"><input type="text" value={wacc.leverageBenchmark ?? ""} onChange={(e) => updateWaccContext({ leverageBenchmark: e.target.value || undefined })} placeholder="e.g. Net debt / EBITDA 0.5–2.0x" className="w-full max-w-xs rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /></td>
                   </tr>
-                  <tr>
-                    <td className="py-2 px-3 text-slate-400">Cost of debt context</td>
+                  <tr className="hover:bg-slate-900/50">
+                    <td className="py-2.5 px-3 text-slate-500 text-xs">Cost of debt context</td>
                     <td className="py-2 px-3"><input type="text" value={wacc.costOfDebtContext ?? ""} onChange={(e) => updateWaccContext({ costOfDebtContext: e.target.value || undefined })} placeholder="Optional" className="w-full max-w-xs rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-slate-100 text-xs" /></td>
                   </tr>
                 </tbody>
@@ -417,13 +387,14 @@ export default function CompanyContextTab() {
             </div>
           </section>
 
-          {/* 4. Comparable companies */}
-          <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
-            <h3 className="text-sm font-semibold text-slate-200 mb-2">Comparable companies</h3>
-            <p className="text-[11px] text-slate-500 mb-3">Proposed comps: accept, replace, or remove. Add manual comps as needed.</p>
-            <ul className="space-y-2">
+          {/* Comparable companies */}
+          <section className={`${card} p-5`}>
+            <p className={sectionEyebrow}>Peer set</p>
+            <h3 className={`${sectionTitle} mt-1 mb-1`}>Comparable companies</h3>
+            <p className="text-[11px] text-slate-500 mb-3">Accept, replace, or remove. Peer-derived metrics and snapshot tags are summarized in <span className="text-slate-400">Intelligence</span>.</p>
+            <ul className="space-y-2.5">
                 {comps.map((c) => (
-                  <li key={c.id} className="rounded-md border border-slate-600 bg-slate-800/50 p-3">
+                  <li key={c.id} className="rounded-lg border border-slate-700/60 bg-slate-900/50 p-3 ring-1 ring-white/[0.02]">
                     {editingCompId === c.id ? (
                       <div className="space-y-2">
                         <div>
@@ -527,44 +498,23 @@ export default function CompanyContextTab() {
                   setEditingCompId(newId);
                   setCompNameError(null);
                 }}
-                className="mt-2 rounded border border-dashed border-slate-600 px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:border-slate-500"
+                className="mt-3 w-full rounded-lg border border-dashed border-slate-600/80 px-3 py-2.5 text-xs font-medium text-slate-400 hover:text-slate-200 hover:border-slate-500 hover:bg-slate-900/30"
               >
                 + Add manual comp
               </button>
-
-          {/* Comp-derived metrics (from accepted comps) */}
-          {(compDerivedMetrics && compDerivedMetrics.acceptedCount > 0) && (
-            <div className="mt-4 rounded-lg border border-slate-600 bg-slate-800/40 p-3">
-              <h4 className="text-xs font-semibold text-slate-300 mb-2">Comp-derived metrics</h4>
-              <p className="text-[11px] text-slate-500 mb-2">
-                {compDerivedMetrics.source === "accepted_comps"
-                  ? `From ${compDerivedMetrics.acceptedCount} accepted comp${compDerivedMetrics.acceptedCount !== 1 ? "s" : ""} (${compDerivedMetrics.withDataCount} with data). Drives beta/leverage and benchmark context when available.`
-                  : "No comp data yet — using benchmark fallback for beta and leverage."}
-              </p>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-[11px]">
-                <div><span className="text-slate-500">Accepted comps</span><span className="ml-1 text-slate-200">{compDerivedMetrics.acceptedCount}</span></div>
-                <div><span className="text-slate-500">Median beta</span><span className="ml-1 text-slate-200">{compDerivedMetrics.medianBeta != null ? compDerivedMetrics.medianBeta.toFixed(2) : "—"}</span></div>
-                <div><span className="text-slate-500">Beta range</span><span className="ml-1 text-slate-200">{formatMetricRange(compDerivedMetrics.betaRangeMin, compDerivedMetrics.betaRangeMax)}</span></div>
-                <div><span className="text-slate-500">Median net debt / EBITDA</span><span className="ml-1 text-slate-200">{compDerivedMetrics.medianNetDebtEbitda != null ? compDerivedMetrics.medianNetDebtEbitda.toFixed(2) + "x" : "—"}</span></div>
-                <div><span className="text-slate-500">Leverage range</span><span className="ml-1 text-slate-200">{formatMetricRange(compDerivedMetrics.leverageRangeMin, compDerivedMetrics.leverageRangeMax)}</span></div>
-                <div><span className="text-slate-500">Revenue growth range</span><span className="ml-1 text-slate-200">{formatMetricRange(compDerivedMetrics.revenueGrowthMin, compDerivedMetrics.revenueGrowthMax, "%")}</span></div>
-                <div><span className="text-slate-500">EBITDA margin range</span><span className="ml-1 text-slate-200">{formatMetricRange(compDerivedMetrics.ebitdaMarginMin, compDerivedMetrics.ebitdaMarginMax, "%")}</span></div>
-                <div><span className="text-slate-500">Capex / revenue range</span><span className="ml-1 text-slate-200">{formatMetricRange(compDerivedMetrics.capexPctRevenueMin, compDerivedMetrics.capexPctRevenueMax, "%")}</span></div>
-              </div>
-            </div>
-          )}
           </section>
 
-          {/* 5. Industry benchmarks */}
-          <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
-            <h3 className="text-sm font-semibold text-slate-200 mb-2">Industry benchmarks</h3>
+          {/* Industry benchmarks */}
+          <section className={`${card} p-5`}>
+            <p className={sectionEyebrow}>Reference ranges</p>
+            <h3 className={`${sectionTitle} mt-1 mb-2`}>Industry benchmarks</h3>
               <p className="text-[11px] text-slate-500 mb-3">Analyst reference ranges. Override where needed. <SourceBadge source="benchmark" /></p>
-              <div className="rounded-md border border-slate-600 bg-slate-800/30 overflow-hidden">
+              <div className="rounded-lg border border-slate-700/50 bg-slate-900/40 overflow-hidden">
                 <table className="w-full text-sm">
                   <tbody>
                     {BENCHMARK_ROWS.map(({ minKey, maxKey, label, suffix = "" }) => (
-                      <tr key={minKey} className="border-b border-slate-700/60 last:border-0">
-                        <td className="py-2 px-3 text-slate-400 w-40">{label}</td>
+                      <tr key={minKey} className="border-b border-slate-800/80 last:border-0 hover:bg-slate-900/50">
+                        <td className="py-2.5 px-3 text-slate-500 text-xs w-40">{label}</td>
                         <td className="py-2 px-3 text-slate-200">
                           {formatRange(
                             typeof benchmarks[minKey] === "number" ? benchmarks[minKey] : undefined,
@@ -595,8 +545,8 @@ export default function CompanyContextTab() {
                         </td>
                       </tr>
                     ))}
-                    <tr className="border-b border-slate-700/60 last:border-0">
-                      <td className="py-2 px-3 text-slate-400">Working capital intensity</td>
+                    <tr className="hover:bg-slate-900/50">
+                      <td className="py-2.5 px-3 text-slate-500 text-xs">Working capital intensity</td>
                       <td className="py-2 px-3 text-slate-200">
                         {benchmarks.wcIntensityLevel ? WC_INTENSITY_OPTIONS.find((o) => o.value === benchmarks.wcIntensityLevel)?.label : "—"}
                       </td>
@@ -616,19 +566,20 @@ export default function CompanyContextTab() {
               </div>
           </section>
 
-          {/* 6. Modeling guidance */}
-          <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
-            <h3 className="text-sm font-semibold text-slate-200 mb-3">Modeling guidance</h3>
+          {/* Modeling guidance */}
+          <section className={`${card} p-5 border-slate-800/90`}>
+            <p className={sectionEyebrow}>Narrative</p>
+            <h3 className={`${sectionTitle} mt-1 mb-3`}>Modeling guidance</h3>
             <p className="text-[11px] text-slate-500 mb-4">Structured guidance for building the model. <SourceBadge source="ai_generated" /></p>
-            <div className="space-y-4">
+            <div className="space-y-5">
               {IMPLICATION_BLOCKS.map(({ key, label }) => (
                 <div key={key}>
-                  <label className="block text-[11px] font-medium text-slate-400 mb-1">{label}</label>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">{label}</label>
                   <textarea
                     value={implications[key] ?? ""}
                     onChange={(e) => updateModelingImplications({ [key]: e.target.value })}
                     rows={3}
-                    className="w-full rounded border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 resize-y"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 resize-y focus:outline-none focus:ring-1 focus:ring-emerald-900/50"
                     placeholder="…"
                   />
                 </div>
@@ -636,18 +587,19 @@ export default function CompanyContextTab() {
             </div>
           </section>
 
-          {/* 7. Company Snapshot / AI Notes (last) */}
-          <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
-            <h3 className="text-sm font-semibold text-slate-200 mb-3">Company snapshot</h3>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Company snapshot */}
+          <section className={`${card} p-5 border-slate-800/90`}>
+            <p className={sectionEyebrow}>AI snapshot cards</p>
+            <h3 className={`${sectionTitle} mt-1 mb-3`}>Company snapshot</h3>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
               {CARD_KEYS.map(({ key, label }) => (
                 <div key={key} className="flex flex-col">
-                  <label className="text-[11px] font-medium text-slate-500 mb-1">{label}</label>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">{label}</label>
                   <textarea
                     value={companyContext.user_overrides?.[`ai_context.${key}`] ?? ai[key]}
                     onChange={(e) => updateCompanyContextCard(key, e.target.value)}
                     rows={3}
-                    className="w-full rounded border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 resize-y"
+                    className="w-full rounded-lg border border-slate-700/80 bg-slate-900/60 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 resize-y focus:outline-none focus:ring-1 focus:ring-emerald-900/50"
                     placeholder={`${label}…`}
                   />
                 </div>

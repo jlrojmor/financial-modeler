@@ -131,9 +131,58 @@ function readManualGrowthFromCfg(
 const ALL_SUB_MODES: { id: DirectForecastSubModeV1; label: string }[] = [
   { id: "growth_from_historical", label: DIRECT_METHOD_UX.growth_from_historical.title },
   { id: "growth_from_manual_start", label: DIRECT_METHOD_UX.growth_from_manual_start.title },
+  { id: "price_volume", label: DIRECT_METHOD_UX.price_volume.title },
   { id: "flat_value", label: DIRECT_METHOD_UX.flat_value.title },
   { id: "manual_by_year", label: DIRECT_METHOD_UX.manual_by_year.title },
 ];
+
+function readPriceVolumeSideFromCfg(
+  cfg: RevenueForecastRowConfigV1 | undefined,
+  projectionYears: string[],
+  side: "volume" | "price",
+  fallbackRateStr: string
+): { shape: HistGrowthShapeV1; yearStrs: Record<string, string>; phaseRows: PhaseDraftV1[]; rateStr: string } {
+  const p = (cfg?.forecastParameters ?? {}) as Record<string, unknown>;
+  const pre = side === "volume" ? "volume" : "price";
+  const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+  const phasesKey = `${pre}GrowthPhases` as const;
+  if (pType === "phases" && Array.isArray(p[phasesKey]) && (p[phasesKey] as unknown[]).length > 0) {
+    const rows: PhaseDraftV1[] = (p[phasesKey] as GrowthPhaseV1[]).map((ph, i) => ({
+      id: `${pre}-${i}-${ph.startYear}`,
+      startYear: String(ph.startYear),
+      endYear: String(ph.endYear),
+      rateStr: String(ph.ratePercent),
+    }));
+    const rp = p[`${pre}RatePercent`];
+    return {
+      shape: "phases",
+      yearStrs: {},
+      phaseRows: rows,
+      rateStr: rp != null && Number.isFinite(Number(rp)) ? String(Number(rp)) : "",
+    };
+  }
+  if (pType === "by_year") {
+    const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+    const yearStrs: Record<string, string> = {};
+    for (const y of projectionYears) {
+      yearStrs[y] = rby?.[y] != null && Number.isFinite(Number(rby[y])) ? String(rby[y]) : "";
+    }
+    return {
+      shape: "by_year",
+      yearStrs,
+      phaseRows: defaultFullRangePhase(projectionYears, fallbackRateStr),
+      rateStr: "",
+    };
+  }
+  const rp = p[`${pre}RatePercent`];
+  const rateStr = rp != null && Number.isFinite(Number(rp)) ? String(Number(rp)) : "";
+  return {
+    shape: "constant",
+    yearStrs: Object.fromEntries(projectionYears.map((y) => [y, ""])),
+    phaseRows: defaultFullRangePhase(projectionYears, rateStr || fallbackRateStr),
+    rateStr,
+  };
+}
 
 function cfgToStrings(
   cfg: RevenueForecastRowConfigV1 | undefined,
@@ -149,6 +198,15 @@ function cfgToStrings(
   yearStrs: Record<string, string>;
 } {
   const c = cfg?.forecastMethod && cfg.forecastRole === "independent_driver" ? cfg : null;
+  if (c?.forecastMethod === "price_volume") {
+    return {
+      sub: "price_volume",
+      growthStr: "",
+      startStr: "",
+      flatStr: "",
+      yearStrs: {},
+    };
+  }
   const p = (c?.forecastParameters ?? {}) as Record<string, unknown>;
   const sub = getDirectForecastSubMode(
     (c as RevenueForecastRowConfigV1 | undefined) ??
@@ -377,6 +435,120 @@ function buildConfigFromForm(
       forecastRole: "independent_driver",
       forecastMethod: "fixed_value",
       forecastParameters: { valuesByYear },
+    },
+  };
+}
+
+function buildPriceVolumeConfig(
+  rowId: string,
+  unit: Unit,
+  projectionYears: string[],
+  volStartStr: string,
+  priceStartStr: string,
+  volShape: HistGrowthShapeV1,
+  volGrowthStr: string,
+  volYearStrs: Record<string, string>,
+  volPhaseRows: PhaseDraftV1[],
+  priceShape: HistGrowthShapeV1,
+  priceGrowthStr: string,
+  priceYearStrs: Record<string, string>,
+  pricePhaseRows: PhaseDraftV1[]
+): { valid: boolean; config: RevenueForecastRowConfigV1 } {
+  const bad = (): RevenueForecastRowConfigV1 => ({
+    rowId,
+    forecastRole: "independent_driver",
+    forecastMethod: "price_volume",
+    forecastParameters: {
+      startingVolume: 0,
+      startingPricePerUnit: 0,
+      volumeGrowthPatternType: "constant",
+      volumeRatePercent: 0,
+      priceGrowthPatternType: "constant",
+      priceRatePercent: 0,
+    },
+  });
+
+  const volParsed = parseFloat(String(volStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(volParsed) || volParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+  const priceDisp = parseFloat(String(priceStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(priceDisp) || priceDisp <= 0) {
+    return { valid: false, config: bad() };
+  }
+  const startingPricePerUnit = displayToStored(priceDisp, unit);
+
+  const buildSide = (
+    side: "volume" | "price",
+    shape: HistGrowthShapeV1,
+    gStr: string,
+    yStrs: Record<string, string>,
+    phRows: PhaseDraftV1[]
+  ): { ok: boolean; params: Record<string, unknown> } => {
+    const prefix = side === "volume" ? "volume" : "price";
+    const g = parseFloat(String(gStr).replace(/,/g, "").trim());
+    const hasG = Number.isFinite(g);
+    if (shape === "phases") {
+      const phases = draftsToPhases(phRows);
+      const { ok } = validateGrowthPhases(phases, projectionYears);
+      if (!ok || projectionYears.length === 0) return { ok: false, params: {} };
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      const y0 = projectionYears[0]!;
+      const rp = expanded[y0] ?? phases[0]!.ratePercent;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "phases",
+          [`${prefix}GrowthPhases`]: phases,
+          [`${prefix}RatePercent`]: rp,
+        },
+      };
+    }
+    if (shape === "by_year") {
+      const ratesByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        const t = (yStrs[y] ?? "").replace(/,/g, "").trim();
+        const v = parseFloat(t);
+        if (!Number.isFinite(v)) return { ok: false, params: {} };
+        ratesByYear[y] = v;
+      }
+      if (projectionYears.length === 0) return { ok: false, params: {} };
+      const y0 = projectionYears[0]!;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "by_year",
+          [`${prefix}RatesByYear`]: ratesByYear,
+          [`${prefix}RatePercent`]: ratesByYear[y0] ?? 0,
+        },
+      };
+    }
+    if (!hasG) return { ok: false, params: {} };
+    return {
+      ok: true,
+      params: {
+        [`${prefix}GrowthPatternType`]: "constant",
+        [`${prefix}RatePercent`]: g,
+      },
+    };
+  };
+
+  const vSide = buildSide("volume", volShape, volGrowthStr, volYearStrs, volPhaseRows);
+  const pSide = buildSide("price", priceShape, priceGrowthStr, priceYearStrs, pricePhaseRows);
+  if (!vSide.ok || !pSide.ok) return { valid: false, config: bad() };
+
+  return {
+    valid: true,
+    config: {
+      rowId,
+      forecastRole: "independent_driver",
+      forecastMethod: "price_volume",
+      forecastParameters: {
+        startingVolume: volParsed,
+        startingPricePerUnit,
+        ...vSide.params,
+        ...pSide.params,
+      },
     },
   };
 }
@@ -710,8 +882,18 @@ function validationStatus(
   ux: (typeof DIRECT_METHOD_UX)[DirectForecastSubModeV1],
   hasHistoric: boolean,
   growthStr: string,
-  startStr: string
+  startStr: string,
+  priceVolume?: { volStartStr: string; priceStartStr: string }
 ): string {
+  if (sub === "price_volume") {
+    if (!valid) {
+      const vv = parseFloat(String(priceVolume?.volStartStr ?? "").replace(/,/g, "").trim());
+      const pp = parseFloat(String(priceVolume?.priceStartStr ?? "").replace(/,/g, "").trim());
+      if (!Number.isFinite(vv) || vv <= 0 || !Number.isFinite(pp) || pp <= 0) return ux.missingStart;
+      return ux.missingGrowth;
+    }
+    return ux.ready;
+  }
   if (sub === "growth_from_historical" && !hasHistoric) return ux.missingHist;
   if (!valid) {
     if (sub === "growth_from_historical") {
@@ -775,6 +957,20 @@ export function RevenueForecastV1DirectForecastBlock(props: {
   const [manualPhaseRows, setManualPhaseRows] = useState<PhaseDraftV1[]>(() =>
     defaultFullRangePhase(projectionYears, "")
   );
+  const [volStartStr, setVolStartStr] = useState("");
+  const [priceStartStr, setPriceStartStr] = useState("");
+  const [volShape, setVolShape] = useState<HistGrowthShapeV1>("constant");
+  const [volGrowthStr, setVolGrowthStr] = useState("");
+  const [volYearStrs, setVolYearStrs] = useState<Record<string, string>>({});
+  const [volPhaseRows, setVolPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [priceShape, setPriceShape] = useState<HistGrowthShapeV1>("constant");
+  const [priceGrowthStr, setPriceGrowthStr] = useState("");
+  const [priceYearStrs, setPriceYearStrs] = useState<Record<string, string>>({});
+  const [pricePhaseRows, setPricePhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
 
   const syncFromCfg = useCallback(() => {
     const s = cfgToStrings(cfg, rowId, unit, projectionYears, allowGrowthFromHistorical);
@@ -800,6 +996,43 @@ export function RevenueForecastV1DirectForecastBlock(props: {
         ? m.manualYearStrs
         : Object.fromEntries(projectionYears.map((y) => [y, m.manualYearStrs[y] ?? ""]))
     );
+
+    if (cfg?.forecastMethod === "price_volume") {
+      const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+      const sv = Number(p.startingVolume);
+      const sp = Number(p.startingPricePerUnit);
+      setVolStartStr(sv > 0 && Number.isFinite(sv) ? String(sv) : "");
+      setPriceStartStr(sp > 0 && Number.isFinite(sp) ? String(storedToDisplay(sp, unit)) : "");
+      const vr = readPriceVolumeSideFromCfg(cfg, projectionYears, "volume", "");
+      setVolShape(vr.shape);
+      setVolGrowthStr(vr.rateStr);
+      setVolPhaseRows(vr.phaseRows);
+      setVolYearStrs(
+        vr.shape === "by_year"
+          ? vr.yearStrs
+          : Object.fromEntries(projectionYears.map((y) => [y, vr.yearStrs[y] ?? ""]))
+      );
+      const pr = readPriceVolumeSideFromCfg(cfg, projectionYears, "price", "");
+      setPriceShape(pr.shape);
+      setPriceGrowthStr(pr.rateStr);
+      setPricePhaseRows(pr.phaseRows);
+      setPriceYearStrs(
+        pr.shape === "by_year"
+          ? pr.yearStrs
+          : Object.fromEntries(projectionYears.map((y) => [y, pr.yearStrs[y] ?? ""]))
+      );
+    } else {
+      setVolStartStr("");
+      setPriceStartStr("");
+      setVolShape("constant");
+      setVolGrowthStr("");
+      setVolPhaseRows(defaultFullRangePhase(projectionYears, ""));
+      setVolYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setPriceShape("constant");
+      setPriceGrowthStr("");
+      setPricePhaseRows(defaultFullRangePhase(projectionYears, ""));
+      setPriceYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+    }
   }, [cfg, rowId, unit, projectionYears, allowGrowthFromHistorical]);
 
   /** Sync local draft from store only when committed config actually changes (avoid wiping inputs on parent re-renders). */
@@ -832,25 +1065,25 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     syncFromCfgRef.current();
   }, [rowId, committedFingerprint]);
 
-  const { config: tentative, valid: formValid } = useMemo(
-    () =>
-      buildConfigFromForm(
-        sub,
-        growthStr,
-        startStr,
-        flatStr,
-        yearStrs,
-        projectionYears,
-        unit,
+  const { config: tentative, valid: formValid } = useMemo(() => {
+    if (sub === "price_volume") {
+      return buildPriceVolumeConfig(
         rowId,
-        histShape,
-        histYearStrs,
-        histPhaseRows,
-        manualShape,
-        manualYearStrs,
-        manualPhaseRows
-      ),
-    [
+        unit,
+        projectionYears,
+        volStartStr,
+        priceStartStr,
+        volShape,
+        volGrowthStr,
+        volYearStrs,
+        volPhaseRows,
+        priceShape,
+        priceGrowthStr,
+        priceYearStrs,
+        pricePhaseRows
+      );
+    }
+    return buildConfigFromForm(
       sub,
       growthStr,
       startStr,
@@ -864,9 +1097,34 @@ export function RevenueForecastV1DirectForecastBlock(props: {
       histPhaseRows,
       manualShape,
       manualYearStrs,
-      manualPhaseRows,
-    ]
-  );
+      manualPhaseRows
+    );
+  }, [
+    sub,
+    growthStr,
+    startStr,
+    flatStr,
+    yearStrs,
+    projectionYears,
+    unit,
+    rowId,
+    histShape,
+    histYearStrs,
+    histPhaseRows,
+    manualShape,
+    manualYearStrs,
+    manualPhaseRows,
+    volStartStr,
+    priceStartStr,
+    volShape,
+    volGrowthStr,
+    volYearStrs,
+    volPhaseRows,
+    priceShape,
+    priceGrowthStr,
+    priceYearStrs,
+    pricePhaseRows,
+  ]);
 
   const phaseValidationMessage = useMemo(() => {
     if (sub === "growth_from_historical" && histShape === "phases") {
@@ -877,8 +1135,29 @@ export function RevenueForecastV1DirectForecastBlock(props: {
       const { errors } = validateGrowthPhases(draftsToPhases(manualPhaseRows), projectionYears);
       return errors[0] ?? "";
     }
+    if (sub === "price_volume") {
+      if (volShape === "phases") {
+        const { errors } = validateGrowthPhases(draftsToPhases(volPhaseRows), projectionYears);
+        if (errors[0]) return `Volume: ${errors[0]}`;
+      }
+      if (priceShape === "phases") {
+        const { errors } = validateGrowthPhases(draftsToPhases(pricePhaseRows), projectionYears);
+        if (errors[0]) return `Price: ${errors[0]}`;
+      }
+    }
     return "";
-  }, [sub, histShape, manualShape, histPhaseRows, manualPhaseRows, projectionYears]);
+  }, [
+    sub,
+    histShape,
+    manualShape,
+    volShape,
+    priceShape,
+    histPhaseRows,
+    manualPhaseRows,
+    volPhaseRows,
+    pricePhaseRows,
+    projectionYears,
+  ]);
 
   const hasHistoric =
     allowGrowthFromHistorical &&
@@ -892,10 +1171,16 @@ export function RevenueForecastV1DirectForecastBlock(props: {
   const unsaved = !matchesCommitted;
   const ux = DIRECT_METHOD_UX[sub];
   const statusLine =
-    (sub === "growth_from_historical" && histShape === "phases") ||
-    (sub === "growth_from_manual_start" && manualShape === "phases")
+    sub === "price_volume" &&
+    (volShape === "phases" || priceShape === "phases")
       ? phaseValidationMessage || (formValid ? "Ready" : "Incomplete")
-      : validationStatus(sub, formValid, ux, hasHistoric, growthStr, startStr);
+      : (sub === "growth_from_historical" && histShape === "phases") ||
+          (sub === "growth_from_manual_start" && manualShape === "phases")
+        ? phaseValidationMessage || (formValid ? "Ready" : "Incomplete")
+        : validationStatus(sub, formValid, ux, hasHistoric, growthStr, startStr, {
+            volStartStr,
+            priceStartStr,
+          });
 
   const forecastComplete = isDirectForecastConfigComplete(
     cfg,
@@ -908,7 +1193,10 @@ export function RevenueForecastV1DirectForecastBlock(props: {
   if (sub === "growth_from_historical" && !hasHistoric) rowStatus = "invalid";
   else if (
     (sub === "growth_from_historical" && histShape === "phases" && !formValid) ||
-    (sub === "growth_from_manual_start" && manualShape === "phases" && !formValid)
+    (sub === "growth_from_manual_start" && manualShape === "phases" && !formValid) ||
+    (sub === "price_volume" &&
+      (volShape === "phases" || priceShape === "phases") &&
+      !formValid)
   ) {
     rowStatus = "incomplete";
   } else if (forecastComplete && !unsaved) rowStatus = "ready";
@@ -944,6 +1232,17 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     } else if (id === "growth_from_manual_start") {
       setGrowthStr((s) => s || gRaw || "");
       setStartStr((s) => s || flatRaw || startRaw || "");
+    } else if (id === "price_volume") {
+      setVolStartStr((v) => v || "1");
+      setPriceStartStr((p) => p || flatRaw || startRaw || "1");
+      setVolShape("constant");
+      setPriceShape("constant");
+      setVolGrowthStr((s) => s || gRaw || "");
+      setPriceGrowthStr((s) => s || gRaw || "");
+      setVolPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setPricePhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setVolYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+      setPriceYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
     } else if (id === "flat_value") {
       setFlatStr((f) => f || startRaw || flatRaw || "");
     } else {
@@ -956,6 +1255,48 @@ export function RevenueForecastV1DirectForecastBlock(props: {
   };
 
   const commit = useCallback(() => {
+    if (sub === "price_volume") {
+      const { config, valid } = buildPriceVolumeConfig(
+        rowId,
+        unit,
+        projectionYears,
+        volStartStr,
+        priceStartStr,
+        volShape,
+        volGrowthStr,
+        volYearStrs,
+        volPhaseRows,
+        priceShape,
+        priceGrowthStr,
+        priceYearStrs,
+        pricePhaseRows
+      );
+      if (!valid) return;
+      setRevenueForecastRowV1(rowId, {
+        forecastRole: "independent_driver",
+        forecastMethod: config.forecastMethod,
+        forecastParameters: config.forecastParameters,
+      });
+      const p = (config.forecastParameters ?? {}) as Record<string, unknown>;
+      const sv = Number(p.startingVolume);
+      const sp = Number(p.startingPricePerUnit);
+      setVolStartStr(sv > 0 && Number.isFinite(sv) ? String(sv) : "");
+      setPriceStartStr(sp > 0 && Number.isFinite(sp) ? String(storedToDisplay(sp, unit)) : "");
+      const vr = readPriceVolumeSideFromCfg(config, projectionYears, "volume", "");
+      setVolShape(vr.shape);
+      setVolGrowthStr(vr.rateStr);
+      setVolPhaseRows(vr.phaseRows);
+      if (vr.shape === "by_year") setVolYearStrs(vr.yearStrs);
+      else setVolYearStrs(Object.fromEntries(projectionYears.map((y) => [y, vr.yearStrs[y] ?? ""])));
+      const pr = readPriceVolumeSideFromCfg(config, projectionYears, "price", "");
+      setPriceShape(pr.shape);
+      setPriceGrowthStr(pr.rateStr);
+      setPricePhaseRows(pr.phaseRows);
+      if (pr.shape === "by_year") setPriceYearStrs(pr.yearStrs);
+      else setPriceYearStrs(Object.fromEntries(projectionYears.map((y) => [y, pr.yearStrs[y] ?? ""])));
+      return;
+    }
+
     const { config, valid } = buildConfigFromForm(
       sub,
       growthStr,
@@ -1018,6 +1359,16 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     manualShape,
     manualYearStrs,
     manualPhaseRows,
+    volStartStr,
+    priceStartStr,
+    volShape,
+    volGrowthStr,
+    volYearStrs,
+    volPhaseRows,
+    priceShape,
+    priceGrowthStr,
+    priceYearStrs,
+    pricePhaseRows,
   ]);
 
   const reset = useCallback(() => {
@@ -1098,33 +1449,41 @@ export function RevenueForecastV1DirectForecastBlock(props: {
         }`}
       >
         <div className="font-semibold text-slate-100">
-          {(sub === "growth_from_historical" && histShape === "phases") ||
-          (sub === "growth_from_manual_start" && manualShape === "phases")
-            ? GROWTH_PHASES_UX.title
-            : ux.title}
+          {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
+            ? `${DIRECT_METHOD_UX.price_volume.title} · ${GROWTH_PHASES_UX.title}`
+            : (sub === "growth_from_historical" && histShape === "phases") ||
+                (sub === "growth_from_manual_start" && manualShape === "phases")
+              ? GROWTH_PHASES_UX.title
+              : ux.title}
         </div>
         <p className="text-slate-400 leading-snug">
-          {(sub === "growth_from_historical" && histShape === "phases") ||
-          (sub === "growth_from_manual_start" && manualShape === "phases")
-            ? GROWTH_PHASES_UX.oneLine
-            : ux.oneLine}
+          {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
+            ? `${DIRECT_METHOD_UX.price_volume.oneLine} ${GROWTH_PHASES_UX.oneLine}`
+            : (sub === "growth_from_historical" && histShape === "phases") ||
+                (sub === "growth_from_manual_start" && manualShape === "phases")
+              ? GROWTH_PHASES_UX.oneLine
+              : ux.oneLine}
         </p>
         <div>
           <span className="text-slate-500">Formula · </span>
           <span className="text-slate-300 font-mono text-[10px]">
-            {(sub === "growth_from_historical" && histShape === "phases") ||
-            (sub === "growth_from_manual_start" && manualShape === "phases")
-              ? GROWTH_PHASES_UX.formula
-              : ux.formula}
+            {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
+              ? `${DIRECT_METHOD_UX.price_volume.formula} ${GROWTH_PHASES_UX.formula}`
+              : (sub === "growth_from_historical" && histShape === "phases") ||
+                  (sub === "growth_from_manual_start" && manualShape === "phases")
+                ? GROWTH_PHASES_UX.formula
+                : ux.formula}
           </span>
         </div>
         <div>
           <span className="text-slate-500">Required · </span>
           <span className="text-slate-300">
-            {(sub === "growth_from_historical" && histShape === "phases") ||
-            (sub === "growth_from_manual_start" && manualShape === "phases")
-              ? GROWTH_PHASES_UX.required
-              : ux.required}
+            {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
+              ? `${DIRECT_METHOD_UX.price_volume.required} ${GROWTH_PHASES_UX.required}`
+              : (sub === "growth_from_historical" && histShape === "phases") ||
+                  (sub === "growth_from_manual_start" && manualShape === "phases")
+                ? GROWTH_PHASES_UX.required
+                : ux.required}
           </span>
         </div>
         <div className="pt-1 border-t border-slate-700/50">
@@ -1134,6 +1493,241 @@ export function RevenueForecastV1DirectForecastBlock(props: {
       </div>
 
       <div className="flex flex-wrap items-end gap-4">
+        {sub === "price_volume" ? (
+          <div className="w-full space-y-4">
+            <p className="text-[11px] text-slate-400 leading-snug">
+              Forecasts revenue as <span className="text-slate-300">units × price per unit</span>, each with its
+              own growth pattern. Use when topline depends on how much you sell and the average realized price.
+            </p>
+            <div className="flex flex-wrap gap-4">
+              <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                <span className="text-slate-500 shrink-0">Starting volume</span>
+                <input
+                  ref={firstRef}
+                  type="text"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  value={volStartStr}
+                  onChange={(e) => setVolStartStr(e.target.value)}
+                  className={`${inp} w-28`}
+                />
+                <span className="text-slate-600 text-[10px]">units</span>
+              </label>
+              <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                <span className="text-slate-500 shrink-0">Starting price / unit</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  value={priceStartStr}
+                  onChange={(e) => setPriceStartStr(e.target.value)}
+                  className={`${inp} w-28`}
+                />
+                {unitLabel ? <span className="text-slate-500 font-medium tabular-nums">{unitLabel}</span> : null}
+              </label>
+            </div>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">
+                Volume growth
+              </label>
+              <select
+                value={volShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = volShape;
+                  setVolShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(volPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setVolYearStrs(Object.fromEntries(projectionYears.map((y) => [y, String(r[y] ?? "")])));
+                      } else {
+                        const base = volGrowthStr.trim();
+                        setVolYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) {
+                            if (!n[y]) n[y] = base;
+                          }
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = volGrowthStr.trim();
+                      setVolYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) {
+                          if (!n[y]) n[y] = base;
+                        }
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setVolPhaseRows(defaultFullRangePhase(projectionYears, volGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (volYearStrs[y0] ?? "").trim();
+                      const fallbackRate = volGrowthStr.trim();
+                      setVolPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {volShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={volPhaseRows}
+                  setPhaseRows={setVolPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {volShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={volGrowthStr}
+                    onChange={(e) => setVolGrowthStr(e.target.value)}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {volShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          autoComplete="off"
+                          value={volYearStrs[y] ?? ""}
+                          onChange={(e) =>
+                            setVolYearStrs((prev) => ({ ...prev, [y]: e.target.value }))
+                          }
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">
+                Price growth
+              </label>
+              <select
+                value={priceShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = priceShape;
+                  setPriceShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(pricePhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setPriceYearStrs(Object.fromEntries(projectionYears.map((y) => [y, String(r[y] ?? "")])));
+                      } else {
+                        const base = priceGrowthStr.trim();
+                        setPriceYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) {
+                            if (!n[y]) n[y] = base;
+                          }
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = priceGrowthStr.trim();
+                      setPriceYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) {
+                          if (!n[y]) n[y] = base;
+                        }
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setPricePhaseRows(defaultFullRangePhase(projectionYears, priceGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (priceYearStrs[y0] ?? "").trim();
+                      const fallbackRate = priceGrowthStr.trim();
+                      setPricePhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {priceShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={pricePhaseRows}
+                  setPhaseRows={setPricePhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {priceShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={priceGrowthStr}
+                    onChange={(e) => setPriceGrowthStr(e.target.value)}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {priceShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          autoComplete="off"
+                          value={priceYearStrs[y] ?? ""}
+                          onChange={(e) =>
+                            setPriceYearStrs((prev) => ({ ...prev, [y]: e.target.value }))
+                          }
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {sub === "growth_from_historical" && hasHistoric ? (
           <div className="w-full space-y-2">
             <div>

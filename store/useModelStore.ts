@@ -505,6 +505,13 @@ export type CompanyType = "public" | "private";
 
 export type CurrencyUnit = "units" | "thousands" | "millions";
 
+/** Forecast Drivers left panel sub-tabs (coordinates preview). */
+export type ForecastDriversSubTab =
+  | "revenue"
+  | "operating_costs"
+  | "wc_drivers"
+  | "financing_taxes";
+
 export type ModelMeta = {
   companyName: string;
   companyType: CompanyType;
@@ -740,6 +747,8 @@ export type ModelState = {
   intangiblesHistoricalAmortizationByYear: Record<string, number>;
   /** BS Build preview only: rowId -> year -> value. WC schedule, PP&E, Intangibles schedule outputs. Not persisted. */
   bsBuildPreviewOverrides: Record<string, Record<string, number>>;
+  /** Forecast Drivers: active left-panel sub-tab (Revenue preview reads this). Omitted from ProjectSnapshot. */
+  forecastDriversSubTab: ForecastDriversSubTab;
   /** Company Context step: user inputs, AI context, overrides. */
   companyContext: CompanyContext;
 };
@@ -952,6 +961,7 @@ export type ModelActions = {
   setIntangiblesHistoricalAmortizationForYear: (year: string, value: number) => void;
   /** Set BS Build preview overrides (WC + PP&E + Intangibles schedule outputs). Preview-only, not persisted. */
   setBsBuildPreviewOverrides: (overrides: Record<string, Record<string, number>>) => void;
+  setForecastDriversSubTab: (subTab: ForecastDriversSubTab) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -1112,6 +1122,7 @@ const defaultState: ModelState = {
   intangiblesHasHistoricalAmortization: false,
   intangiblesHistoricalAmortizationByYear: {},
   bsBuildPreviewOverrides: {},
+  forecastDriversSubTab: "revenue",
   companyContext: getDefaultCompanyContext(),
 };
 
@@ -4919,6 +4930,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       intangiblesHistoricalAmortizationByYear: { ...(s.intangiblesHistoricalAmortizationByYear ?? {}), [year]: value },
     })),
   setBsBuildPreviewOverrides: (overrides) => set(() => ({ bsBuildPreviewOverrides: overrides })),
+  setForecastDriversSubTab: (subTab) => set(() => ({ forecastDriversSubTab: subTab })),
 
   // IS Build breakdowns live ONLY in config; they are NOT added to the incomeStatement tree.
   // Historicals structure (e.g. Revenue → Subscription, Services) is unchanged. For projection
@@ -5033,7 +5045,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
       ...(persistStorage ? { storage: persistStorage } : {}),
       // Persist all state; always write current project into projectStates so no progress is lost
       partialize: (state) => {
-        const { _hasHydrated, ...stateToPersist } = state;
+        // UI-only: preview coordination with ForecastDriversShell; do not persist across sessions.
+        const { _hasHydrated, forecastDriversSubTab: _fdSub, ...stateToPersist } = state;
         let projectStates = stateToPersist.projectStates;
         if (state.currentProjectId && state.isInitialized) {
           projectStates = {

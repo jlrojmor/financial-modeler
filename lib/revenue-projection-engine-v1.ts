@@ -14,7 +14,7 @@ import type {
 } from "@/types/revenue-forecast-v1";
 import { computeRowValue } from "@/lib/calculations";
 import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
-import { resolveGrowthRatesByYear } from "@/lib/revenue-growth-phases-v1";
+import { resolveGrowthRatesByYear, resolvePrefixedGrowthRatesByYear } from "@/lib/revenue-growth-phases-v1";
 
 export type ProjectedRevenueResultV1 = Record<string, Record<string, number>>;
 
@@ -116,6 +116,35 @@ export function computeRevenueProjectionsV1(
     if (cfg?.forecastRole !== "independent_driver" || !cfg.forecastMethod) return;
     const method = cfg.forecastMethod as RevenueForecastMethodV1;
     const params = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+
+    if (method === "price_volume") {
+      const v0 = Number(params.startingVolume);
+      const p0 = Number(params.startingPricePerUnit);
+      if (!Number.isFinite(v0) || !Number.isFinite(p0) || v0 <= 0 || p0 <= 0) return;
+      const volResolved = resolvePrefixedGrowthRatesByYear(params, "volume", projectionYears);
+      const priceResolved = resolvePrefixedGrowthRatesByYear(params, "price", projectionYears);
+      result[rowId] = {};
+      let volPrev = v0;
+      let pricePrev = p0;
+      for (let i = 0; i < projectionYears.length; i++) {
+        const year = projectionYears[i]!;
+        const volPct =
+          volResolved?.[year] != null && Number.isFinite(Number(volResolved[year]))
+            ? Number(volResolved[year])
+            : Number(params.volumeRatePercent) ?? 0;
+        const pricePct =
+          priceResolved?.[year] != null && Number.isFinite(Number(priceResolved[year]))
+            ? Number(priceResolved[year])
+            : Number(params.priceRatePercent) ?? 0;
+        const vol = volPrev * (1 + volPct / 100);
+        const price = pricePrev * (1 + pricePct / 100);
+        result[rowId][year] = vol * price;
+        volPrev = vol;
+        pricePrev = price;
+      }
+      return;
+    }
+
     const resolvedRates = method === "growth_rate" ? resolveGrowthRatesByYear(params, projectionYears) : null;
     result[rowId] = {};
     for (let i = 0; i < projectionYears.length; i++) {

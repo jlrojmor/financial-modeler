@@ -145,3 +145,19 @@ export function resolveGrowthRatesByYear(
   }
   return null;
 }
+
+/** Price × Volume: map volume/price-prefixed params into the same resolver shape as growth_rate. */
+export function resolvePrefixedGrowthRatesByYear(
+  params: Record<string, unknown>,
+  side: "volume" | "price",
+  projectionYears: string[]
+): Record<string, number> | null {
+  const pre = side === "volume" ? "volume" : "price";
+  const synth: Record<string, unknown> = {
+    growthPatternType: params[`${pre}GrowthPatternType`],
+    ratesByYear: params[`${pre}RatesByYear`],
+    growthPhases: params[`${pre}GrowthPhases`],
+    ratePercent: params[`${pre}RatePercent`],
+  };
+  return resolveGrowthRatesByYear(synth, projectionYears);
+}

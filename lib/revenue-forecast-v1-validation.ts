@@ -57,12 +57,101 @@ function validateIndependentLeafOrParent(
     });
     return;
   }
-  if (cfg.forecastMethod !== "growth_rate" && cfg.forecastMethod !== "fixed_value") {
-    errors.push({ rowId: node.id, message: "Only growth or fixed-value constructions are supported.", code: "INVALID_METHOD" });
+  if (cfg.forecastMethod !== "growth_rate" && cfg.forecastMethod !== "fixed_value" && cfg.forecastMethod !== "price_volume") {
+    errors.push({ rowId: node.id, message: "Only growth, fixed-value, or Price × Volume constructions are supported.", code: "INVALID_METHOD" });
     return;
   }
   const params = cfg.forecastParameters as Record<string, unknown> | undefined;
   const hasCh = (node.children?.length ?? 0) > 0;
+
+  if (cfg.forecastMethod === "price_volume") {
+    const p = params ?? {};
+    const sv = Number(p.startingVolume);
+    const sp = Number(p.startingPricePerUnit);
+    if (!(sv > 0 && Number.isFinite(sv))) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Price × Volume needs starting volume greater than zero.`,
+        code: "PV_START_VOL",
+      });
+    }
+    if (!(sp > 0 && Number.isFinite(sp))) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Price × Volume needs starting price per unit greater than zero.`,
+        code: "PV_START_PRICE",
+      });
+    }
+    const validateSide = (side: "volume" | "price") => {
+      const pre = side === "volume" ? "volume" : "price";
+      const label = side === "volume" ? "Volume" : "Price";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok, errors: phaseErrs } = validateGrowthPhases(phases, proj);
+        if (!ok) {
+          for (const msg of phaseErrs) {
+            errors.push({
+              rowId: node.id,
+              message: `"${node.label}": ${label} — ${msg}`,
+              code: "PV_PHASES_INVALID",
+            });
+          }
+        }
+        const rp = p[`${pre}RatePercent`];
+        if (rp == null || !Number.isFinite(Number(rp))) {
+          errors.push({
+            rowId: node.id,
+            message: `"${node.label}": ${label} growth needs a valid rate.`,
+            code: "PV_RATE_REQUIRED",
+          });
+        }
+      } else if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        for (const y of proj) {
+          const v = rby?.[y];
+          if (v == null || !Number.isFinite(Number(v))) {
+            errors.push({
+              rowId: node.id,
+              message: `"${node.label}": ${label} by-year growth needs a rate for each projection year (${y}).`,
+              code: "PV_BY_YEAR_INCOMPLETE",
+            });
+            break;
+          }
+        }
+        const rp = p[`${pre}RatePercent`];
+        if (rp == null || !Number.isFinite(Number(rp))) {
+          errors.push({
+            rowId: node.id,
+            message: `"${node.label}": ${label} growth needs a valid rate.`,
+            code: "PV_RATE_REQUIRED",
+          });
+        }
+      } else {
+        const rp = p[`${pre}RatePercent`];
+        if (rp == null || !Number.isFinite(Number(rp))) {
+          errors.push({
+            rowId: node.id,
+            message: `"${node.label}": ${label} growth % is required.`,
+            code: "PV_CONSTANT_RATE_REQUIRED",
+          });
+        }
+      }
+    };
+    validateSide("volume");
+    validateSide("price");
+  }
 
   if (cfg.forecastMethod === "growth_rate") {
     const rawBasis = params?.startingBasis as string | undefined;
@@ -388,6 +477,6 @@ export function getAllowedRolesForChild(parentRole: RevenueForecastRoleV1 | unde
   return ["allocation_of_parent", "independent_driver"];
 }
 
-export function getAllowedMethodsV1(): ("growth_rate" | "fixed_value")[] {
-  return ["growth_rate", "fixed_value"];
+export function getAllowedMethodsV1(): ("growth_rate" | "fixed_value" | "price_volume")[] {
+  return ["growth_rate", "fixed_value", "price_volume"];
 }

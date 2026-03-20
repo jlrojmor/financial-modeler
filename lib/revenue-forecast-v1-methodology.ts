@@ -68,7 +68,8 @@ export type DirectForecastSubModeV1 =
   | "growth_from_historical"
   | "growth_from_manual_start"
   | "flat_value"
-  | "manual_by_year";
+  | "manual_by_year"
+  | "price_volume";
 
 export function getDirectForecastSubMode(
   cfg: RevenueForecastRowConfigV1 | undefined,
@@ -76,6 +77,7 @@ export function getDirectForecastSubMode(
 ): DirectForecastSubModeV1 {
   const m = cfg?.forecastMethod as RevenueForecastMethodV1 | undefined;
   const p = (cfg?.forecastParameters ?? {}) as Record<string, unknown>;
+  if (m === "price_volume") return "price_volume";
   if (m === "fixed_value") {
     const vByY = p.valuesByYear as Record<string, number> | undefined;
     if (vByY && typeof vByY === "object" && Object.keys(vByY).length > 0) return "manual_by_year";
@@ -151,7 +153,55 @@ export const DIRECT_METHOD_UX: Record<
     missingFlat: "",
     missingYear: "Enter at least one year",
   },
+  price_volume: {
+    title: "Price × Volume",
+    oneLine: "Forecasts revenue as projected units × projected price per unit.",
+    formula: "Revenue(t) = Volume(t) × Price(t); each series grows with its own pattern.",
+    required: "Needs: starting volume & price/unit (both > 0), complete volume growth, complete price growth",
+    ready: "Ready",
+    missingGrowth: "Complete volume and price growth inputs",
+    missingStart: "Enter starting volume and price per unit (both > 0)",
+    missingHist: "",
+    missingFlat: "",
+    missingYear: "",
+  },
 };
+
+/** True when one side (volume or price) of Price × Volume has a complete growth definition. */
+export function isPriceVolumeGrowthSideComplete(
+  p: Record<string, unknown>,
+  side: "volume" | "price",
+  projectionYears: string[]
+): boolean {
+  const pre = side === "volume" ? "volume" : "price";
+  const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+  const proj = projectionYears;
+  if (pType === "phases") {
+    const raw = p[`${pre}GrowthPhases`];
+    const phases = Array.isArray(raw)
+      ? raw.map((x: unknown) => {
+          const o = x as Record<string, unknown>;
+          return {
+            startYear: String(o.startYear ?? ""),
+            endYear: String(o.endYear ?? ""),
+            ratePercent: Number(o.ratePercent),
+          };
+        })
+      : [];
+    const { ok } = validateGrowthPhases(phases, proj);
+    const rp = p[`${pre}RatePercent`];
+    return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+  }
+  if (pType === "by_year") {
+    const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+    if (!proj.length) return false;
+    const yearsOk = proj.every((y) => rby?.[y] != null && Number.isFinite(Number(rby[y])));
+    const rp = p[`${pre}RatePercent`];
+    return yearsOk && rp != null && Number.isFinite(Number(rp));
+  }
+  const g = p[`${pre}RatePercent`];
+  return g != null && Number.isFinite(Number(g));
+}
 
 /** Whether saved direct-forecast config passes minimum completeness for projections. */
 export function isDirectForecastConfigComplete(
@@ -167,6 +217,17 @@ export function isDirectForecastConfigComplete(
     allowGrowthFromHistorical &&
     typeof lastHistoricByRowId?.[rowId] === "number" &&
     !Number.isNaN(lastHistoricByRowId[rowId]!);
+  if (cfg.forecastMethod === "price_volume") {
+    const sv = Number(p.startingVolume);
+    const sp = Number(p.startingPricePerUnit);
+    if (!(sv > 0 && Number.isFinite(sv) && sp > 0 && Number.isFinite(sp))) return false;
+    const proj = projectionYears ?? [];
+    if (!proj.length) return false;
+    return (
+      isPriceVolumeGrowthSideComplete(p, "volume", proj) &&
+      isPriceVolumeGrowthSideComplete(p, "price", proj)
+    );
+  }
   if (cfg.forecastMethod === "growth_rate") {
     const basis = p.startingBasis as string | undefined;
     const proj = projectionYears ?? [];
@@ -319,6 +380,16 @@ export function getDirectForecastCompactSummary(
       if (filled.length === 0) return `Direct · ${DIRECT_METHOD_UX.manual_by_year.title} · (no values yet)`;
       const [y, v] = filled[0]!;
       return `Direct · ${DIRECT_METHOD_UX.manual_by_year.title} · ${y}: ${storedToDisplay(Number(v), unit).toLocaleString()}${u ? ` ${u}` : ""}${filled.length > 1 ? ` +${filled.length - 1}` : ""}`;
+    }
+    case "price_volume": {
+      const sv = Number(p.startingVolume);
+      const sp = Number(p.startingPricePerUnit);
+      const volOk =
+        projectionYears.length > 0 && isPriceVolumeGrowthSideComplete(p, "volume", projectionYears);
+      const priceOk =
+        projectionYears.length > 0 && isPriceVolumeGrowthSideComplete(p, "price", projectionYears);
+      const ready = volOk && priceOk && sv > 0 && sp > 0;
+      return `Direct · ${DIRECT_METHOD_UX.price_volume.title} · Vol: ${fmtN(sv)} · $/u: ${fmtAmt(sp)}${u ? ` ${u}` : ""} · ${ready ? "Ready" : "Incomplete"}`;
     }
     default:
       return "Direct";

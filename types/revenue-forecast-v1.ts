@@ -1,8 +1,7 @@
 /**
  * Revenue Forecasting v1: structured config and roles.
  * Supports only: independent_driver, derived_sum, allocation_of_parent.
- * Methods: growth_rate, fixed_value.
- * No price_volume, customers_arpu, percent_of_reference, plug, or circular resolution.
+ * Methods: growth_rate, fixed_value, price_volume (direct rows only).
  */
 
 export type RevenueForecastRoleV1 =
@@ -10,7 +9,7 @@ export type RevenueForecastRoleV1 =
   | "derived_sum"
   | "allocation_of_parent";
 
-export type RevenueForecastMethodV1 = "growth_rate" | "fixed_value";
+export type RevenueForecastMethodV1 = "growth_rate" | "fixed_value" | "price_volume";
 
 export type ForecastConfidenceV1 = "high" | "medium" | "low";
 
@@ -48,11 +47,29 @@ export interface FixedValueParamsV1 {
   valuesByYear?: Record<string, number>;
 }
 
-export type ForecastParametersV1 = GrowthRateParamsV1 | FixedValueParamsV1;
+/**
+ * Direct-only: revenue = volume × price; each side uses the same growth pattern shapes as growth_rate
+ * (constant / phases / by_year) with prefixed keys on forecastParameters.
+ */
+export interface PriceVolumeParamsV1 {
+  startingVolume?: number;
+  /** Stored currency per unit (same units as model revenue / amount). */
+  startingPricePerUnit?: number;
+  volumeGrowthPatternType?: GrowthPatternTypeV1;
+  volumeRatePercent?: number;
+  volumeRatesByYear?: Record<string, number>;
+  volumeGrowthPhases?: GrowthPhaseV1[];
+  priceGrowthPatternType?: GrowthPatternTypeV1;
+  priceRatePercent?: number;
+  priceRatesByYear?: Record<string, number>;
+  priceGrowthPhases?: GrowthPhaseV1[];
+}
+
+export type ForecastParametersV1 = GrowthRateParamsV1 | FixedValueParamsV1 | PriceVolumeParamsV1;
 
 /**
  * Per-row revenue forecast config (v1).
- * - independent_driver: has forecastMethod (growth_rate | fixed_value) and forecastParameters.
+ * - independent_driver: has forecastMethod (growth_rate | fixed_value | price_volume) and forecastParameters.
  * - derived_sum: no method; value = sum(children).
  * - allocation_of_parent: only allocation % (stored in forecastParameters as allocationPercent, or per-year).
  */

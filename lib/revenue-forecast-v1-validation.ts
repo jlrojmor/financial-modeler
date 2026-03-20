@@ -68,23 +68,37 @@ function validateIndependentLeafOrParent(
     const p = params ?? {};
     const sv = Number(p.startingVolume);
     const sp = Number(p.startingPricePerUnit);
-    if (!(sv > 0 && Number.isFinite(sv))) {
+    const volPresent = p.startingVolume != null && Number.isFinite(sv);
+    if (!volPresent) {
       errors.push({
         rowId: node.id,
-        message: `"${node.label}": Price × Volume needs starting volume greater than zero.`,
+        message: `"${node.label}": Enter a starting volume.`,
         code: "PV_START_VOL",
       });
-    }
-    if (!(sp > 0 && Number.isFinite(sp))) {
+    } else if (sv <= 0) {
       errors.push({
         rowId: node.id,
-        message: `"${node.label}": Price × Volume needs starting price per unit greater than zero.`,
-        code: "PV_START_PRICE",
+        message: `"${node.label}": Starting volume must be greater than 0.`,
+        code: "PV_START_VOL_POS",
       });
     }
-    const validateSide = (side: "volume" | "price") => {
-      const pre = side === "volume" ? "volume" : "price";
-      const label = side === "volume" ? "Volume" : "Price";
+    const pricePresent = p.startingPricePerUnit != null && Number.isFinite(sp);
+    if (!pricePresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting price per unit.`,
+        code: "PV_START_PRICE",
+      });
+    } else if (sp <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting price per unit must be greater than 0.`,
+        code: "PV_START_PRICE_POS",
+      });
+    }
+
+    const volumeGrowthComplete = (): boolean => {
+      const pre = "volume";
       const pType = p[`${pre}GrowthPatternType`] as string | undefined;
       const proj = projectionYears.length ? projectionYears : [];
       if (pType === "phases") {
@@ -99,58 +113,70 @@ function validateIndependentLeafOrParent(
               };
             })
           : [];
-        const { ok, errors: phaseErrs } = validateGrowthPhases(phases, proj);
-        if (!ok) {
-          for (const msg of phaseErrs) {
-            errors.push({
-              rowId: node.id,
-              message: `"${node.label}": ${label} — ${msg}`,
-              code: "PV_PHASES_INVALID",
-            });
-          }
-        }
+        const { ok } = validateGrowthPhases(phases, proj);
         const rp = p[`${pre}RatePercent`];
-        if (rp == null || !Number.isFinite(Number(rp))) {
-          errors.push({
-            rowId: node.id,
-            message: `"${node.label}": ${label} growth needs a valid rate.`,
-            code: "PV_RATE_REQUIRED",
-          });
-        }
-      } else if (pType === "by_year") {
-        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
-        for (const y of proj) {
-          const v = rby?.[y];
-          if (v == null || !Number.isFinite(Number(v))) {
-            errors.push({
-              rowId: node.id,
-              message: `"${node.label}": ${label} by-year growth needs a rate for each projection year (${y}).`,
-              code: "PV_BY_YEAR_INCOMPLETE",
-            });
-            break;
-          }
-        }
-        const rp = p[`${pre}RatePercent`];
-        if (rp == null || !Number.isFinite(Number(rp))) {
-          errors.push({
-            rowId: node.id,
-            message: `"${node.label}": ${label} growth needs a valid rate.`,
-            code: "PV_RATE_REQUIRED",
-          });
-        }
-      } else {
-        const rp = p[`${pre}RatePercent`];
-        if (rp == null || !Number.isFinite(Number(rp))) {
-          errors.push({
-            rowId: node.id,
-            message: `"${node.label}": ${label} growth % is required.`,
-            code: "PV_CONSTANT_RATE_REQUIRED",
-          });
-        }
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
       }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
     };
-    validateSide("volume");
-    validateSide("price");
+
+    const priceGrowthComplete = (): boolean => {
+      const pre = "price";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    if (volPresent && sv > 0 && !volumeGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the volume growth setup.`,
+        code: "PV_VOL_GROWTH_INCOMPLETE",
+      });
+    }
+    if (pricePresent && sp > 0 && !priceGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the price growth setup.`,
+        code: "PV_PRICE_GROWTH_INCOMPLETE",
+      });
+    }
   }
 
   if (cfg.forecastMethod === "growth_rate") {

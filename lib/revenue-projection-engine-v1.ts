@@ -234,3 +234,44 @@ export function computeRevenueProjectionsV1(
 
   return { result, valid: true };
 }
+
+/**
+ * Read-only helper for preview UI: starting drivers and volume/price after the first
+ * projection year's growth step. Matches the first loop iteration of
+ * `projectIndependentRow` for `price_volume` (no change to stored forecast math).
+ */
+export function getPriceVolumeFirstForecastYearDrivers(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): {
+  startingVolume: number;
+  startingPricePerUnit: number;
+  firstYearKey: string;
+  volumeAfterGrowth: number;
+  priceAfterGrowth: number;
+} | null {
+  const v0 = Number(params.startingVolume);
+  const p0 = Number(params.startingPricePerUnit);
+  if (!Number.isFinite(v0) || !Number.isFinite(p0) || v0 <= 0 || p0 <= 0) return null;
+  if (projectionYears.length === 0) return null;
+  const year = projectionYears[0]!;
+  const volResolved = resolvePrefixedGrowthRatesByYear(params, "volume", projectionYears);
+  const priceResolved = resolvePrefixedGrowthRatesByYear(params, "price", projectionYears);
+  const volPct =
+    volResolved?.[year] != null && Number.isFinite(Number(volResolved[year]))
+      ? Number(volResolved[year])
+      : Number(params.volumeRatePercent) ?? 0;
+  const pricePct =
+    priceResolved?.[year] != null && Number.isFinite(Number(priceResolved[year]))
+      ? Number(priceResolved[year])
+      : Number(params.priceRatePercent) ?? 0;
+  const volumeAfterGrowth = v0 * (1 + volPct / 100);
+  const priceAfterGrowth = p0 * (1 + pricePct / 100);
+  return {
+    startingVolume: v0,
+    startingPricePerUnit: p0,
+    firstYearKey: year,
+    volumeAfterGrowth,
+    priceAfterGrowth,
+  };
+}

@@ -476,8 +476,9 @@ export const REVENUE_GUIDE_SECTIONS: GuideSection[] = [
     {
       type: "list",
       items: [
-        "Starting volume (> 0) and starting price per unit (> 0), in consistent units so their product matches revenue scale.",
+        "Starting volume (> 0) as a plain count, and starting price per unit (> 0) as the actual price in your model currency (not scaled by K/M revenue display), so volume × price matches revenue in the model’s stored terms.",
         "A complete growth pattern for volume and a complete pattern for price (constant, by year, or phases).",
+        "Optional: a short volume unit label (e.g. subscribers, kg, cases)—purely for clarity in the builder and summaries; it does not change calculations.",
       ],
     },
     {

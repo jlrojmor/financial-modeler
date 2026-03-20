@@ -483,7 +483,6 @@ export default function RevenueForecastV1Tab() {
                       {getDirectForecastCompactSummary(
                             revCfg,
                             "rev",
-                            unit,
                             revAllowGrowthFromHistorical,
                             lastHistoricByRowId,
                             projectionYears
@@ -510,7 +509,7 @@ export default function RevenueForecastV1Tab() {
                     setRevenueForecastRowV1={setRevenueForecastRowV1}
                     lastHistoricByRowId={lastHistoricByRowId}
                     projectionYears={projectionYears}
-                    unit={unit}
+                    currencyCode={meta?.currency ?? "USD"}
                     allowGrowthFromHistorical={revAllowGrowthFromHistorical}
                     focusNonce={revFocusNonce}
                   />
@@ -555,6 +554,7 @@ export default function RevenueForecastV1Tab() {
             lastHistoricByRowId={lastHistoricByRowId}
             projectionYears={projectionYears}
             unit={unit}
+            currencyCode={meta?.currency ?? "USD"}
           />
         </div>
       </CollapsibleSection>

@@ -33,6 +33,7 @@ export interface GrowthPhaseV1 {
 export interface GrowthRateParamsV1 {
   ratePercent?: number;
   ratesByYear?: Record<string, number>;
+  /** Manual-start base: real currency amount (not K/M-scaled display units). */
   startingAmount?: number;
   startingBasis?: GrowthStartingBasisV1;
   growthPatternType?: GrowthPatternTypeV1;
@@ -41,9 +42,9 @@ export interface GrowthRateParamsV1 {
 
 /** Parameters for fixed_value: flat (same value each year) or manual by year. */
 export interface FixedValueParamsV1 {
-  /** Flat: single value (stored units) for all projection years. Used when valuesByYear is absent or empty. */
+  /** Flat: real currency amount (not scaled by model K/M display unit). */
   value?: number;
-  /** Manual by year: explicit value per projection year (stored units). When present, at least one year must have a value. */
+  /** Manual by year: real currency amount per projection year. */
   valuesByYear?: Record<string, number>;
 }
 
@@ -53,8 +54,13 @@ export interface FixedValueParamsV1 {
  */
 export interface PriceVolumeParamsV1 {
   startingVolume?: number;
-  /** Stored currency per unit (same units as model revenue / amount). */
+  /**
+   * Absolute price per unit in model currency (e.g. USD), **not** scaled by statement display unit (K/M).
+   * Revenue = startingVolume × startingPricePerUnit in the same absolute space as other IS amounts.
+   */
   startingPricePerUnit?: number;
+  /** Optional display label for what “volume” counts (e.g. subscribers, kg). Does not affect math. */
+  volumeUnitLabel?: string;
   volumeGrowthPatternType?: GrowthPatternTypeV1;
   volumeRatePercent?: number;
   volumeRatesByYear?: Record<string, number>;

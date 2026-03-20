@@ -8,7 +8,6 @@ import type {
   RevenueForecastRowConfigV1,
   RevenueForecastMethodV1,
 } from "@/types/revenue-forecast-v1";
-import { getUnitLabel, storedToDisplay, type CurrencyUnit } from "@/lib/currency-utils";
 import { validateGrowthPhases, type GrowthPhaseV1 } from "@/lib/revenue-growth-phases-v1";
 import {
   getAllocationPercentSum,
@@ -157,7 +156,8 @@ export const DIRECT_METHOD_UX: Record<
     title: "Price × Volume",
     oneLine: "Forecasts revenue as projected units × projected price per unit.",
     formula: "Revenue(t) = Volume(t) × Price(t); each series grows with its own pattern.",
-    required: "Needs: starting volume & price/unit (both > 0), complete volume growth, complete price growth",
+    required:
+      "Needs: starting volume & price/unit (both > 0), complete volume & price growth; optional volume unit label",
     ready: "Ready",
     missingGrowth: "Complete volume and price growth inputs",
     missingStart: "Enter starting volume and price per unit (both > 0)",
@@ -323,22 +323,28 @@ export function getDirectForecastRowUiStatusWithAlloc(
   );
 }
 
+function formatPriceVolumeSignedPct(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  const r = Math.round(n * 10) / 10;
+  return `${r >= 0 ? "+" : ""}${r}%`;
+}
+
+function fmtAssumptionAmt(n: unknown): string {
+  return typeof n === "number" && Number.isFinite(n)
+    ? n.toLocaleString(undefined, { maximumFractionDigits: 20, useGrouping: true })
+    : "—";
+}
+
 export function getDirectForecastCompactSummary(
   cfg: RevenueForecastRowConfigV1 | undefined,
   rowId: string,
-  unit: CurrencyUnit,
   allowGrowthFromHistorical: boolean,
   lastHistoricByRowId?: Record<string, number>,
   projectionYears: string[] = []
 ): string {
-  const u = getUnitLabel(unit) || "";
   const p = (cfg?.forecastParameters ?? {}) as Record<string, unknown>;
   const sub = getDirectForecastSubMode(cfg, allowGrowthFromHistorical);
   const fmtN = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? String(n) : "—");
-  const fmtAmt = (stored: unknown) =>
-    typeof stored === "number" && Number.isFinite(stored)
-      ? storedToDisplay(stored, unit).toLocaleString(undefined, { maximumFractionDigits: 0 })
-      : "—";
 
   switch (sub) {
     case "growth_from_historical": {
@@ -368,28 +374,49 @@ export function getDirectForecastCompactSummary(
         const ys = Object.entries(rby ?? {}).filter(([, v]) => v != null && Number.isFinite(Number(v)));
         const bit =
           ys.length === 0 ? "By year" : `${ys[0]![0]}: ${ys[0]![1]}%${ys.length > 1 ? " …" : ""}`;
-        return `Direct · ${DIRECT_METHOD_UX.growth_from_manual_start.title} · By year · ${bit} · Start: ${fmtAmt(p.startingAmount)}${u ? ` ${u}` : ""}`;
+        return `Direct · ${DIRECT_METHOD_UX.growth_from_manual_start.title} · By year · ${bit} · Start: ${fmtAssumptionAmt(p.startingAmount)}`;
       }
-      return `Direct · ${DIRECT_METHOD_UX.growth_from_manual_start.title} · ${fmtN(p.ratePercent)}% · Start: ${fmtAmt(p.startingAmount)}${u ? ` ${u}` : ""}`;
+      return `Direct · ${DIRECT_METHOD_UX.growth_from_manual_start.title} · ${fmtN(p.ratePercent)}% · Start: ${fmtAssumptionAmt(p.startingAmount)}`;
     }
     case "flat_value":
-      return `Direct · ${DIRECT_METHOD_UX.flat_value.title} · ${fmtAmt(p.value)}${u ? ` ${u}` : ""}`;
+      return `Direct · ${DIRECT_METHOD_UX.flat_value.title} · ${fmtAssumptionAmt(p.value)}`;
     case "manual_by_year": {
       const vByY = (p.valuesByYear ?? {}) as Record<string, number>;
       const filled = Object.entries(vByY).filter(([, v]) => v != null && Number.isFinite(Number(v)));
       if (filled.length === 0) return `Direct · ${DIRECT_METHOD_UX.manual_by_year.title} · (no values yet)`;
       const [y, v] = filled[0]!;
-      return `Direct · ${DIRECT_METHOD_UX.manual_by_year.title} · ${y}: ${storedToDisplay(Number(v), unit).toLocaleString()}${u ? ` ${u}` : ""}${filled.length > 1 ? ` +${filled.length - 1}` : ""}`;
+      return `Direct · ${DIRECT_METHOD_UX.manual_by_year.title} · ${y}: ${fmtAssumptionAmt(Number(v))}${
+        filled.length > 1 ? ` +${filled.length - 1}` : ""
+      }`;
     }
     case "price_volume": {
-      const sv = Number(p.startingVolume);
-      const sp = Number(p.startingPricePerUnit);
-      const volOk =
-        projectionYears.length > 0 && isPriceVolumeGrowthSideComplete(p, "volume", projectionYears);
-      const priceOk =
-        projectionYears.length > 0 && isPriceVolumeGrowthSideComplete(p, "price", projectionYears);
-      const ready = volOk && priceOk && sv > 0 && sp > 0;
-      return `Direct · ${DIRECT_METHOD_UX.price_volume.title} · Vol: ${fmtN(sv)} · $/u: ${fmtAmt(sp)}${u ? ` ${u}` : ""} · ${ready ? "Ready" : "Incomplete"}`;
+      const volT = p.volumeGrowthPatternType as string | undefined;
+      const priceT = p.priceGrowthPatternType as string | undefined;
+      const customVol = volT === "phases" || volT === "by_year";
+      const customPrice = priceT === "phases" || priceT === "by_year";
+      const bothConstant = volT === "constant" && priceT === "constant";
+      const unitLbl =
+        typeof p.volumeUnitLabel === "string" && p.volumeUnitLabel.trim()
+          ? p.volumeUnitLabel.trim().slice(0, 18)
+          : "";
+      const unitBit = unitLbl ? ` · ${unitLbl}` : "";
+
+      let driver: string;
+      if (bothConstant && !customVol && !customPrice) {
+        const vg = Number(p.volumeRatePercent);
+        const pg = Number(p.priceRatePercent);
+        if (Number.isFinite(vg) && Number.isFinite(pg)) {
+          driver = `Volume ${formatPriceVolumeSignedPct(vg)} · Price ${formatPriceVolumeSignedPct(pg)}`;
+        } else {
+          driver = "phased/custom growth";
+        }
+      } else if (customVol || customPrice) {
+        driver = "phased/custom growth";
+      } else {
+        driver = "phased/custom growth";
+      }
+
+      return `Direct · Price × Volume${unitBit} · ${driver}`;
     }
     default:
       return "Direct";

@@ -132,6 +132,8 @@ export function RevenueForecastV1HierarchyEditor(props: {
   lastHistoricByRowId: Record<string, number> | undefined;
   projectionYears: string[];
   unit: Unit;
+  /** ISO currency for Price × Volume driver labels (not K/M display). */
+  currencyCode?: string;
   /** Focus first input on this direct row after add (top-level from tab). */
   pendingDirectFocusRowId?: string | null;
   onConsumedDirectFocus?: () => void;
@@ -154,6 +156,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
     lastHistoricByRowId,
     projectionYears,
     unit,
+    currencyCode = "USD",
     pendingDirectFocusRowId,
     onConsumedDirectFocus,
     pendingAllocationFocusRowId,
@@ -413,7 +416,6 @@ export function RevenueForecastV1HierarchyEditor(props: {
     const methodSummary = getDirectForecastCompactSummary(
       cfg,
       node.id,
-      unit,
       allowHist,
       lastHistoricByRowId,
       projectionYears
@@ -598,7 +600,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
                 setRevenueForecastRowV1={setRevenueForecastRowV1}
                 lastHistoricByRowId={lastHistoricByRowId}
                 projectionYears={projectionYears}
-                unit={unit}
+                currencyCode={currencyCode}
                 allowGrowthFromHistorical={allowHist}
                 focusNonce={directFocusNonce[node.id] ?? 0}
                 compactExplainer

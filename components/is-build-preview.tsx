@@ -6,13 +6,40 @@ import type { Row } from "@/types/finance";
 import {
   storedToDisplay,
   getUnitLabel,
+  getCurrencySymbol,
   type CurrencyUnit,
 } from "@/lib/currency-utils";
 import { computeRowValue } from "@/lib/calculations";
 import { findRowInTree } from "@/lib/row-utils";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
-import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
+import {
+  computeRevenueProjectionsV1,
+  getPriceVolumeFirstForecastYearDrivers,
+} from "@/lib/revenue-projection-engine-v1";
 import type { ForecastRevenueNodeV1 } from "@/types/revenue-forecast-v1";
+
+/** Driver preview: unit counts only — no statement K/M scaling. */
+function formatVolumeDriverCount(n: number): string {
+  return new Intl.NumberFormat(undefined, {
+    useGrouping: true,
+    maximumFractionDigits: 8,
+    minimumFractionDigits: 0,
+  }).format(n);
+}
+
+/** Driver preview: absolute currency per unit (not statement display unit). */
+function formatAbsolutePricePerUnit(n: number, currencyCode: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currencyCode,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(n);
+  } catch {
+    return `${getCurrencySymbol(currencyCode)}${formatVolumeDriverCount(n)}`;
+  }
+}
 
 function formatAccounting(
   value: number,
@@ -261,6 +288,47 @@ export default function ISBuildPreview() {
   }, [revenueRows, lastHistoricYear, getRowHistoricalActual]);
 
   const firstForecastYear = methodologyProjectionYears[0] ?? "";
+  const currencyCode = meta?.currency ?? "USD";
+
+  /** Price × Volume driver audit rows (same growth resolution as projection engine v1). */
+  const priceVolumeDriverRows = useMemo(() => {
+    const v1Config = revenueForecastConfigV1 ?? { rows: {} };
+    const rowsCfg = v1Config.rows ?? {};
+    if (projectionYears.length === 0) return [];
+    const out: Array<{
+      rowId: string;
+      label: string;
+      volumeUnitLabel?: string;
+      metrics: NonNullable<ReturnType<typeof getPriceVolumeFirstForecastYearDrivers>>;
+    }> = [];
+    const seen = new Set<string>();
+    const pushIfPv = (rowId: string, label: string) => {
+      if (seen.has(rowId)) return;
+      const cfg = rowsCfg[rowId];
+      if (cfg?.forecastRole !== "independent_driver" || cfg.forecastMethod !== "price_volume") return;
+      const params = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+      const m = getPriceVolumeFirstForecastYearDrivers(params, projectionYears);
+      if (!m) return;
+      seen.add(rowId);
+      const vul = params.volumeUnitLabel;
+      out.push({
+        rowId,
+        label,
+        volumeUnitLabel: typeof vul === "string" && vul.trim() ? vul.trim() : undefined,
+        metrics: m,
+      });
+    };
+    pushIfPv("rev", incomeStatement?.find((r) => r.id === "rev")?.label ?? "Revenue");
+    const walk = (nodes: ForecastRevenueNodeV1[]) => {
+      for (const n of nodes) {
+        pushIfPv(n.id, n.label);
+        if (n.children?.length) walk(n.children);
+      }
+    };
+    walk(revenueForecastTreeV1);
+    return out;
+  }, [revenueForecastConfigV1, revenueForecastTreeV1, projectionYears, incomeStatement]);
+
   const openingBasisByRowId = useMemo(() => {
     const rowsCfg = revenueForecastConfigV1?.rows ?? {};
     const resolvedOpeningById: Record<string, number | null> = {};
@@ -810,6 +878,65 @@ export default function ISBuildPreview() {
                   );
                 })
               ))}
+            {priceVolumeDriverRows.length > 0 && (
+              <tr className="border-t-4 border-slate-700">
+                <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
+                  <h3 className="text-sm font-bold text-slate-100 mb-2">Price × Volume Drivers</h3>
+                  <p className="text-[10px] text-slate-500 mb-2 max-w-3xl">
+                    Driver audit only (volume × price after first-year growth). Not scaled to statement K/M;
+                    price/unit is absolute currency.
+                  </p>
+                  <div className="overflow-x-auto rounded border border-slate-700/80 bg-slate-950/50">
+                    <table className="w-full min-w-[640px] border-collapse text-[11px]">
+                      <thead>
+                        <tr className="border-b border-slate-700 bg-slate-900/60">
+                          <th className="px-3 py-2 text-left font-semibold text-slate-300">Line</th>
+                          <th className="px-3 py-2 text-right font-semibold text-slate-300">
+                            Starting volume
+                          </th>
+                          <th className="px-3 py-2 text-right font-semibold text-slate-300">
+                            Starting price / unit
+                          </th>
+                          <th className="px-3 py-2 text-right font-semibold text-slate-300">
+                            {priceVolumeDriverRows[0]?.metrics.firstYearKey ?? firstForecastYear} volume
+                          </th>
+                          <th className="px-3 py-2 text-right font-semibold text-slate-300">
+                            {priceVolumeDriverRows[0]?.metrics.firstYearKey ?? firstForecastYear} price / unit
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {priceVolumeDriverRows.map((r) => (
+                          <tr
+                            key={r.rowId}
+                            className="border-b border-slate-800/90 last:border-b-0"
+                          >
+                            <td className="px-3 py-2 text-slate-200">
+                              <div className="font-medium">{r.label}</div>
+                              {r.volumeUnitLabel ? (
+                                <div className="text-[10px] text-slate-500 mt-0.5">{r.volumeUnitLabel}</div>
+                              ) : null}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-slate-100">
+                              {formatVolumeDriverCount(r.metrics.startingVolume)}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-slate-100">
+                              {formatAbsolutePricePerUnit(r.metrics.startingPricePerUnit, currencyCode)}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-slate-100">
+                              {formatVolumeDriverCount(r.metrics.volumeAfterGrowth)}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-slate-100">
+                              {formatAbsolutePricePerUnit(r.metrics.priceAfterGrowth, currencyCode)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </td>
+              </tr>
+            )}
             {openingBasisCheck && (
               <>
                 <tr className="border-t-4 border-slate-700">

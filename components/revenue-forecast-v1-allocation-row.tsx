@@ -8,6 +8,8 @@ import {
   REVENUE_ALLOC_SUM_TOLERANCE,
 } from "@/lib/revenue-forecast-v1-validation";
 import { useModelStore } from "@/store/useModelStore";
+import { formatNumberInputDisplayOnBlur } from "@/lib/revenue-forecast-numeric-format";
+import { RevenueForecastDecimalInput } from "@/components/revenue-forecast-decimal-input";
 
 export type AllocationRowStatus = "ready" | "incomplete" | "invalid";
 
@@ -79,7 +81,7 @@ export function AllocationRowCard(props: {
   useEffect(() => {
     const c = typeof cParams.allocationPercent === "number" ? cParams.allocationPercent : undefined;
     setBaseline(c);
-    setLocalStr(c != null && Number.isFinite(c) ? String(c) : "");
+    setLocalStr(c != null && Number.isFinite(c) ? formatNumberInputDisplayOnBlur(String(c)) : "");
   }, [node.id, cParams.allocationPercent]);
 
   useEffect(() => {
@@ -109,11 +111,13 @@ export function AllocationRowCard(props: {
       forecastParameters: { ...cParams, allocationPercent: v },
     });
     setBaseline(v);
-    setLocalStr(String(v));
+    setLocalStr(formatNumberInputDisplayOnBlur(String(v)));
   }, [localStr, node.id, cParams, setRevenueForecastRowV1]);
 
   const resetLocal = useCallback(() => {
-    setLocalStr(baseline != null && Number.isFinite(baseline) ? String(baseline) : "");
+    setLocalStr(
+      baseline != null && Number.isFinite(baseline) ? formatNumberInputDisplayOnBlur(String(baseline)) : ""
+    );
   }, [baseline]);
 
   const displayPct =
@@ -178,13 +182,10 @@ export function AllocationRowCard(props: {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[11px] text-slate-500">%</span>
-            <input
+            <RevenueForecastDecimalInput
               ref={pctInputRef}
-              type="text"
-              inputMode="decimal"
-              autoComplete="off"
               value={localStr}
-              onChange={(e) => setLocalStr(e.target.value)}
+              onChange={setLocalStr}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();

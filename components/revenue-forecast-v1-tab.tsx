@@ -15,6 +15,7 @@ import {
   getDirectForecastRowUiStatus,
 } from "@/lib/revenue-forecast-v1-methodology";
 import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
+import { getRevenueForecastConfigV1RowsFingerprint } from "@/lib/revenue-forecast-v1-fingerprint";
 import { storedToDisplay, displayToStored, getUnitLabel } from "@/lib/currency-utils";
 import { computeRowValue } from "@/lib/calculations";
 import CollapsibleSection from "@/components/collapsible-section";
@@ -37,6 +38,9 @@ export default function RevenueForecastV1Tab() {
   const balanceSheet = useModelStore((s) => s.balanceSheet);
   const cashFlow = useModelStore((s) => s.cashFlow);
   const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
+  const revenueForecastV1RowsFingerprint = useModelStore((s) =>
+    getRevenueForecastConfigV1RowsFingerprint(s.revenueForecastConfigV1)
+  );
   const setRevenueForecastRowV1 = useModelStore((s) => s.setRevenueForecastRowV1);
   const addRevenueStream = useModelStore((s) => s.addRevenueStream);
   const addRevenueStreamChild = useModelStore((s) => s.addRevenueStreamChild);
@@ -50,14 +54,16 @@ export default function RevenueForecastV1Tab() {
 
   const [expandedStreams, setExpandedStreams] = useState<Set<string>>(new Set());
   const [revAllocControlsVisible, setRevAllocControlsVisible] = useState(false);
-  const [flashRowId, setFlashRowId] = useState<string | null>(null);
+  /** Highlight target row; scrollIntoView only when adding a new row (never on Apply / structure sync). */
+  const [flashState, setFlashState] = useState<{ id: string; scrollIntoView: boolean } | null>(null);
+  const flashRowId = flashState?.id ?? null;
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const flashRow = useCallback((id: string) => {
+  const flashRow = useCallback((id: string, opts?: { scrollIntoView?: boolean }) => {
     if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-    setFlashRowId(id);
+    setFlashState({ id, scrollIntoView: opts?.scrollIntoView !== false });
     flashTimerRef.current = setTimeout(() => {
-      setFlashRowId(null);
+      setFlashState(null);
       flashTimerRef.current = null;
     }, 2400);
   }, []);
@@ -150,7 +156,15 @@ export default function RevenueForecastV1Tab() {
         lastHistoricByRowId,
         projectionYears,
       }),
-    [incomeStatement, revenueForecastConfigV1, revenueForecastTreeV1, lastHistoricYear, lastHistoricByRowId, projectionYears]
+    [
+      incomeStatement,
+      revenueForecastConfigV1,
+      revenueForecastV1RowsFingerprint,
+      revenueForecastTreeV1,
+      lastHistoricYear,
+      lastHistoricByRowId,
+      projectionYears,
+    ]
   );
 
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns);
@@ -174,6 +188,7 @@ export default function RevenueForecastV1Tab() {
     incomeStatement,
     revenueForecastTreeV1,
     revenueForecastConfigV1,
+    revenueForecastV1RowsFingerprint,
     projectionYears,
     lastHistoricYear,
     allStatements,
@@ -546,6 +561,7 @@ export default function RevenueForecastV1Tab() {
             toggleExpanded={toggleStreamExpanded}
             ensureExpandedIds={ensureExpandedIds}
             flashRowId={flashRowId}
+            flashRowScrollIntoView={flashState?.scrollIntoView !== false}
             onFlashRow={flashRow}
             pendingDirectFocusRowId={pendingDirectFocusRowId}
             onConsumedDirectFocus={() => setPendingDirectFocusRowId(null)}

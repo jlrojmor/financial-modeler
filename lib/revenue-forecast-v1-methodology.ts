@@ -8,7 +8,11 @@ import type {
   RevenueForecastRowConfigV1,
   RevenueForecastMethodV1,
 } from "@/types/revenue-forecast-v1";
-import { validateGrowthPhases, type GrowthPhaseV1 } from "@/lib/revenue-growth-phases-v1";
+import {
+  validateGrowthPhases,
+  resolveUtilizationLevelsByYear,
+  type GrowthPhaseV1,
+} from "@/lib/revenue-growth-phases-v1";
 import {
   getAllocationPercentSum,
   REVENUE_ALLOC_SUM_TOLERANCE,
@@ -68,7 +72,11 @@ export type DirectForecastSubModeV1 =
   | "growth_from_manual_start"
   | "flat_value"
   | "manual_by_year"
-  | "price_volume";
+  | "price_volume"
+  | "customers_arpu"
+  | "locations_revenue_per_location"
+  | "capacity_utilization_yield"
+  | "contracts_acv";
 
 export function getDirectForecastSubMode(
   cfg: RevenueForecastRowConfigV1 | undefined,
@@ -77,6 +85,10 @@ export function getDirectForecastSubMode(
   const m = cfg?.forecastMethod as RevenueForecastMethodV1 | undefined;
   const p = (cfg?.forecastParameters ?? {}) as Record<string, unknown>;
   if (m === "price_volume") return "price_volume";
+  if (m === "customers_arpu") return "customers_arpu";
+  if (m === "locations_revenue_per_location") return "locations_revenue_per_location";
+  if (m === "capacity_utilization_yield") return "capacity_utilization_yield";
+  if (m === "contracts_acv") return "contracts_acv";
   if (m === "fixed_value") {
     const vByY = p.valuesByYear as Record<string, number> | undefined;
     if (vByY && typeof vByY === "object" && Object.keys(vByY).length > 0) return "manual_by_year";
@@ -165,19 +177,77 @@ export const DIRECT_METHOD_UX: Record<
     missingFlat: "",
     missingYear: "",
   },
+  customers_arpu: {
+    title: "Customers × ARPU",
+    oneLine: "Forecasts revenue as projected customers × projected ARPU (annual, or monthly ARPU × 12).",
+    formula:
+      "Revenue(t) = Customers(t) × ARPU(t) × (12 if ARPU basis is monthly, else 1); each series grows with its own pattern.",
+    required:
+      "Needs: starting customers & starting ARPU (both > 0), ARPU basis (annual default), complete customer & ARPU growth; optional customer unit label",
+    ready: "Ready",
+    missingGrowth: "Complete customer and ARPU growth inputs",
+    missingStart: "Enter starting customers and ARPU (both > 0)",
+    missingHist: "",
+    missingFlat: "",
+    missingYear: "",
+  },
+  locations_revenue_per_location: {
+    title: "Locations × Revenue per Location",
+    oneLine:
+      "Forecasts revenue as projected location count × projected revenue per location (annual, or monthly × 12).",
+    formula:
+      "Revenue(t) = Locations(t) × Revenue per Location(t) × (12 if revenue/location basis is monthly, else 1); each series grows with its own pattern.",
+    required:
+      "Needs: starting locations & starting revenue/location (both > 0), revenue/location basis (annual default), complete location & revenue/location growth; optional location unit label",
+    ready: "Ready",
+    missingGrowth: "Complete location and revenue per location growth inputs",
+    missingStart: "Enter starting locations and revenue per location (both > 0)",
+    missingHist: "",
+    missingFlat: "",
+    missingYear: "",
+  },
+  capacity_utilization_yield: {
+    title: "Capacity × Utilization × Yield",
+    oneLine:
+      "Forecasts revenue as capacity × utilization % × yield per utilized unit; capacity and yield grow with patterns; utilization is a level path by year.",
+    formula:
+      "Revenue(t) = Capacity(t) × Utilization(t)% × Yield(t) × (12 if yield basis is monthly, else 1).",
+    required:
+      "Needs: starting capacity, utilization (0–100%), and yield (all valid); complete capacity growth, utilization path, and yield growth; yield basis (annual default)",
+    ready: "Ready",
+    missingGrowth: "Complete capacity growth, utilization path, and yield growth",
+    missingStart: "Enter starting capacity, utilization %, and yield",
+    missingHist: "",
+    missingFlat: "",
+    missingYear: "",
+  },
+  contracts_acv: {
+    title: "Contracts × ACV",
+    oneLine:
+      "Forecasts revenue as projected contract count × projected annual contract value (ACV); each series grows with its own pattern.",
+    formula:
+      "Revenue(t) = Contracts(t) × ACV(t). ACV is annual contract value per contract — no monthly/annual basis toggle.",
+    required:
+      "Needs: starting contracts & starting ACV (both > 0), complete contract & ACV growth; optional contract unit label",
+    ready: "Ready",
+    missingGrowth: "Complete contract and ACV growth inputs",
+    missingStart: "Enter starting contracts and ACV (both > 0)",
+    missingHist: "",
+    missingFlat: "",
+    missingYear: "",
+  },
 };
 
-/** True when one side (volume or price) of Price × Volume has a complete growth definition. */
-export function isPriceVolumeGrowthSideComplete(
+/** True when one side of a two-driver method has a complete growth definition. */
+export function isPrefixedGrowthSideComplete(
   p: Record<string, unknown>,
-  side: "volume" | "price",
+  prefix: string,
   projectionYears: string[]
 ): boolean {
-  const pre = side === "volume" ? "volume" : "price";
-  const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+  const pType = p[`${prefix}GrowthPatternType`] as string | undefined;
   const proj = projectionYears;
   if (pType === "phases") {
-    const raw = p[`${pre}GrowthPhases`];
+    const raw = p[`${prefix}GrowthPhases`];
     const phases = Array.isArray(raw)
       ? raw.map((x: unknown) => {
           const o = x as Record<string, unknown>;
@@ -189,17 +259,17 @@ export function isPriceVolumeGrowthSideComplete(
         })
       : [];
     const { ok } = validateGrowthPhases(phases, proj);
-    const rp = p[`${pre}RatePercent`];
+    const rp = p[`${prefix}RatePercent`];
     return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
   }
   if (pType === "by_year") {
-    const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+    const rby = p[`${prefix}RatesByYear`] as Record<string, number> | undefined;
     if (!proj.length) return false;
     const yearsOk = proj.every((y) => rby?.[y] != null && Number.isFinite(Number(rby[y])));
-    const rp = p[`${pre}RatePercent`];
+    const rp = p[`${prefix}RatePercent`];
     return yearsOk && rp != null && Number.isFinite(Number(rp));
   }
-  const g = p[`${pre}RatePercent`];
+  const g = p[`${prefix}RatePercent`];
   return g != null && Number.isFinite(Number(g));
 }
 
@@ -224,8 +294,56 @@ export function isDirectForecastConfigComplete(
     const proj = projectionYears ?? [];
     if (!proj.length) return false;
     return (
-      isPriceVolumeGrowthSideComplete(p, "volume", proj) &&
-      isPriceVolumeGrowthSideComplete(p, "price", proj)
+      isPrefixedGrowthSideComplete(p, "volume", proj) &&
+      isPrefixedGrowthSideComplete(p, "price", proj)
+    );
+  }
+  if (cfg.forecastMethod === "customers_arpu") {
+    const sc = Number(p.startingCustomers);
+    const sa = Number(p.startingArpu);
+    if (!(sc > 0 && Number.isFinite(sc) && sa > 0 && Number.isFinite(sa))) return false;
+    const proj = projectionYears ?? [];
+    if (!proj.length) return false;
+    return (
+      isPrefixedGrowthSideComplete(p, "customer", proj) &&
+      isPrefixedGrowthSideComplete(p, "arpu", proj)
+    );
+  }
+  if (cfg.forecastMethod === "locations_revenue_per_location") {
+    const sl = Number(p.startingLocations);
+    const srpl = Number(p.startingRevenuePerLocation);
+    if (!(sl > 0 && Number.isFinite(sl) && srpl > 0 && Number.isFinite(srpl))) return false;
+    const proj = projectionYears ?? [];
+    if (!proj.length) return false;
+    return (
+      isPrefixedGrowthSideComplete(p, "location", proj) &&
+      isPrefixedGrowthSideComplete(p, "revenuePerLocation", proj)
+    );
+  }
+  if (cfg.forecastMethod === "capacity_utilization_yield") {
+    const sc = Number(p.startingCapacity);
+    const su = Number(p.startingUtilizationPct);
+    const sy = Number(p.startingYield);
+    if (!(sc > 0 && Number.isFinite(sc) && sy > 0 && Number.isFinite(sy))) return false;
+    if (!(Number.isFinite(su) && su >= 0 && su <= 100)) return false;
+    const proj = projectionYears ?? [];
+    if (!proj.length) return false;
+    const utilOk = resolveUtilizationLevelsByYear(p, proj);
+    if (!utilOk) return false;
+    return (
+      isPrefixedGrowthSideComplete(p, "capacity", proj) &&
+      isPrefixedGrowthSideComplete(p, "yield", proj)
+    );
+  }
+  if (cfg.forecastMethod === "contracts_acv") {
+    const sc = Number(p.startingContracts);
+    const sa = Number(p.startingAcv);
+    if (!(sc > 0 && Number.isFinite(sc) && sa > 0 && Number.isFinite(sa))) return false;
+    const proj = projectionYears ?? [];
+    if (!proj.length) return false;
+    return (
+      isPrefixedGrowthSideComplete(p, "contract", proj) &&
+      isPrefixedGrowthSideComplete(p, "acv", proj)
     );
   }
   if (cfg.forecastMethod === "growth_rate") {
@@ -323,7 +441,7 @@ export function getDirectForecastRowUiStatusWithAlloc(
   );
 }
 
-function formatPriceVolumeSignedPct(n: number): string {
+function formatSignedPct(n: number): string {
   if (!Number.isFinite(n)) return "—";
   const r = Math.round(n * 10) / 10;
   return `${r >= 0 ? "+" : ""}${r}%`;
@@ -406,7 +524,7 @@ export function getDirectForecastCompactSummary(
         const vg = Number(p.volumeRatePercent);
         const pg = Number(p.priceRatePercent);
         if (Number.isFinite(vg) && Number.isFinite(pg)) {
-          driver = `Volume ${formatPriceVolumeSignedPct(vg)} · Price ${formatPriceVolumeSignedPct(pg)}`;
+          driver = `Volume ${formatSignedPct(vg)} · Price ${formatSignedPct(pg)}`;
         } else {
           driver = "phased/custom growth";
         }
@@ -417,6 +535,123 @@ export function getDirectForecastCompactSummary(
       }
 
       return `Direct · Price × Volume${unitBit} · ${driver}`;
+    }
+    case "customers_arpu": {
+      const custT = p.customerGrowthPatternType as string | undefined;
+      const arpuT = p.arpuGrowthPatternType as string | undefined;
+      const customCust = custT === "phases" || custT === "by_year";
+      const customArpu = arpuT === "phases" || arpuT === "by_year";
+      const bothConstant = custT === "constant" && arpuT === "constant";
+      const unitLbl =
+        typeof p.customerUnitLabel === "string" && p.customerUnitLabel.trim()
+          ? p.customerUnitLabel.trim().slice(0, 18)
+          : "";
+      const unitBit = unitLbl ? ` · ${unitLbl}` : "";
+
+      let driver: string;
+      if (bothConstant && !customCust && !customArpu) {
+        const cg = Number(p.customerRatePercent);
+        const ag = Number(p.arpuRatePercent);
+        if (Number.isFinite(cg) && Number.isFinite(ag)) {
+          driver = `Customers ${formatSignedPct(cg)} · ARPU ${formatSignedPct(ag)}`;
+        } else {
+          driver = "phased/custom growth";
+        }
+      } else if (customCust || customArpu) {
+        driver = "phased/custom growth";
+      } else {
+        driver = "phased/custom growth";
+      }
+
+      const basisBit =
+        p.arpuBasis === "monthly" ? " · ARPU monthly→annual (×12)" : "";
+      return `Direct · Customers × ARPU${unitBit}${basisBit} · ${driver}`;
+    }
+    case "locations_revenue_per_location": {
+      const locT = p.locationGrowthPatternType as string | undefined;
+      const rplT = p.revenuePerLocationGrowthPatternType as string | undefined;
+      const customLoc = locT === "phases" || locT === "by_year";
+      const customRpl = rplT === "phases" || rplT === "by_year";
+      const bothConstant = locT === "constant" && rplT === "constant";
+      const unitLbl =
+        typeof p.locationUnitLabel === "string" && p.locationUnitLabel.trim()
+          ? p.locationUnitLabel.trim().slice(0, 18)
+          : "";
+      const unitBit = unitLbl ? ` · ${unitLbl}` : "";
+
+      let driver: string;
+      if (bothConstant && !customLoc && !customRpl) {
+        const lg = Number(p.locationRatePercent);
+        const rg = Number(p.revenuePerLocationRatePercent);
+        if (Number.isFinite(lg) && Number.isFinite(rg)) {
+          driver = `Locations ${formatSignedPct(lg)} · Rev/location ${formatSignedPct(rg)}`;
+        } else {
+          driver = "phased/custom growth";
+        }
+      } else if (customLoc || customRpl) {
+        driver = "phased/custom growth";
+      } else {
+        driver = "phased/custom growth";
+      }
+
+      const basisBit =
+        p.revenuePerLocationBasis === "monthly" ? " · Rev/loc monthly→annual (×12)" : "";
+      return `Direct · Locations × Revenue per Location${unitBit}${basisBit} · ${driver}`;
+    }
+    case "capacity_utilization_yield": {
+      const capT = p.capacityGrowthPatternType as string | undefined;
+      const yldT = p.yieldGrowthPatternType as string | undefined;
+      const utilT = p.utilizationPatternType as string | undefined;
+      const customCap = capT === "phases" || capT === "by_year";
+      const customYld = yldT === "phases" || yldT === "by_year";
+      const customUtil = utilT === "phases" || utilT === "by_year";
+      const bothGrowthConstant = capT === "constant" && yldT === "constant";
+      const unitLbl =
+        typeof p.capacityUnitLabel === "string" && p.capacityUnitLabel.trim()
+          ? p.capacityUnitLabel.trim().slice(0, 18)
+          : "";
+      const unitBit = unitLbl ? ` · ${unitLbl}` : "";
+      let driver: string;
+      if (bothGrowthConstant && !customCap && !customYld && !customUtil) {
+        const cg = Number(p.capacityRatePercent);
+        const yg = Number(p.yieldRatePercent);
+        if (Number.isFinite(cg) && Number.isFinite(yg)) {
+          driver = `Capacity ${formatSignedPct(cg)} · Yield ${formatSignedPct(yg)} · Util ${utilT ?? "constant"}`;
+        } else {
+          driver = "custom capacity / utilization / yield path";
+        }
+      } else {
+        driver = "custom capacity / utilization / yield path";
+      }
+      const basisBit = p.yieldBasis === "monthly" ? " · Yield monthly→annual (×12)" : "";
+      return `Direct · Capacity × Utilization × Yield${unitBit}${basisBit} · ${driver}`;
+    }
+    case "contracts_acv": {
+      const conT = p.contractGrowthPatternType as string | undefined;
+      const acvT = p.acvGrowthPatternType as string | undefined;
+      const customCon = conT === "phases" || conT === "by_year";
+      const customAcv = acvT === "phases" || acvT === "by_year";
+      const bothConstant = conT === "constant" && acvT === "constant";
+      const unitLbl =
+        typeof p.contractUnitLabel === "string" && p.contractUnitLabel.trim()
+          ? p.contractUnitLabel.trim().slice(0, 18)
+          : "";
+      const unitBit = unitLbl ? ` · ${unitLbl}` : "";
+      let driver: string;
+      if (bothConstant && !customCon && !customAcv) {
+        const cg = Number(p.contractRatePercent);
+        const ag = Number(p.acvRatePercent);
+        if (Number.isFinite(cg) && Number.isFinite(ag)) {
+          driver = `Contracts ${formatSignedPct(cg)} · ACV ${formatSignedPct(ag)}`;
+        } else {
+          driver = "phased/custom growth";
+        }
+      } else if (customCon || customAcv) {
+        driver = "phased/custom growth";
+      } else {
+        driver = "phased/custom growth";
+      }
+      return `Direct · Contracts × ACV${unitBit} · ${driver}`;
     }
     default:
       return "Direct";

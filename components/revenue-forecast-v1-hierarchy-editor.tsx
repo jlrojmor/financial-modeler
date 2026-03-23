@@ -128,7 +128,9 @@ export function RevenueForecastV1HierarchyEditor(props: {
   ensureExpandedIds: (ids: string[]) => void;
   /** Briefly highlight a row card (scroll target). */
   flashRowId: string | null;
-  onFlashRow: (rowId: string) => void;
+  /** When false, ring highlight still applies but scrollIntoView is skipped (e.g. existing row after modal). */
+  flashRowScrollIntoView?: boolean;
+  onFlashRow: (rowId: string, opts?: { scrollIntoView?: boolean }) => void;
   lastHistoricByRowId: Record<string, number> | undefined;
   projectionYears: string[];
   unit: Unit;
@@ -152,6 +154,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
     toggleExpanded,
     ensureExpandedIds,
     flashRowId,
+    flashRowScrollIntoView = true,
     onFlashRow,
     lastHistoricByRowId,
     projectionYears,
@@ -164,18 +167,31 @@ export function RevenueForecastV1HierarchyEditor(props: {
   } = props;
 
   const [modal, setModal] = useState<ModalState>(null);
-  const [collapsedDirectCards, setCollapsedDirectCards] = useState<Set<string>>(() => new Set());
+  /** Collapsed forecast cards (direct rows + derived “build from children” parents). */
+  const [collapsedForecastCards, setCollapsedForecastCards] = useState<Set<string>>(() => new Set());
   const [directFocusNonce, setDirectFocusNonce] = useState<Record<string, number>>({});
   const [allocPctFocusNonce, setAllocPctFocusNonce] = useState<Record<string, number>>({});
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const bumpDirectFocus = useCallback((rowId: string) => {
-    setCollapsedDirectCards((prev) => {
+    setCollapsedForecastCards((prev) => {
       const n = new Set(prev);
       n.delete(rowId);
       return n;
     });
     setDirectFocusNonce((prev) => ({ ...prev, [rowId]: (prev[rowId] ?? 0) + 1 }));
+  }, []);
+
+  /** Ensure ancestor cards are expanded so a new/edited nested line is visible. */
+  const expandForecastCardsOnPath = useCallback((targetId: string) => {
+    const tree = useModelStore.getState().revenueForecastTreeV1 ?? [];
+    const path = expandIdsForNodePath(tree, targetId);
+    if (!path?.length) return;
+    setCollapsedForecastCards((prev) => {
+      const next = new Set(prev);
+      path.forEach((id) => next.delete(id));
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -185,7 +201,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
     if (!exists) return;
     bumpDirectFocus(id);
     onConsumedDirectFocus();
-  }, [pendingDirectFocusRowId, onConsumedDirectFocus, bumpDirectFocus, forest]);
+  }, [pendingDirectFocusRowId, onConsumedDirectFocus, bumpDirectFocus]);
 
   useEffect(() => {
     const id = pendingAllocationFocusRowId;
@@ -194,7 +210,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
     if (!exists) return;
     setAllocPctFocusNonce((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
     onConsumedAllocationFocus();
-  }, [pendingAllocationFocusRowId, onConsumedAllocationFocus, forest]);
+  }, [pendingAllocationFocusRowId, onConsumedAllocationFocus]);
 
   const setRowRef = useCallback((id: string, el: HTMLDivElement | null) => {
     rowRefs.current[id] = el;
@@ -202,20 +218,26 @@ export function RevenueForecastV1HierarchyEditor(props: {
 
   useEffect(() => {
     if (!flashRowId) return;
+    if (!flashRowScrollIntoView) return;
     const el = rowRefs.current[flashRowId];
     el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [flashRowId]);
+  }, [flashRowId, flashRowScrollIntoView]);
 
   const afterAdd = useCallback(
     (
       newId: string | undefined,
-      opts?: { allocationParentDirectId?: string }
+      opts?: { allocationParentDirectId?: string; scrollToRow?: boolean; expandPath?: boolean }
     ) => {
       if (!newId) return;
+      const scrollToRow = opts?.scrollToRow !== false;
+      const expandPath = opts?.expandPath !== false;
       const tree = useModelStore.getState().revenueForecastTreeV1 ?? [];
-      const path = expandIdsForNodePath(tree, newId);
-      if (path?.length) ensureExpandedIds(path);
-      onFlashRow(newId);
+      if (expandPath) {
+        const path = expandIdsForNodePath(tree, newId);
+        if (path?.length) ensureExpandedIds(path);
+        expandForecastCardsOnPath(newId);
+      }
+      onFlashRow(newId, { scrollIntoView: scrollToRow });
       const role = useModelStore.getState().revenueForecastConfigV1?.rows?.[newId]?.forecastRole;
       if (role === "independent_driver") bumpDirectFocus(newId);
       if (role === "allocation_of_parent") {
@@ -223,7 +245,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
         setAllocPctFocusNonce((prev) => ({ ...prev, [newId]: (prev[newId] ?? 0) + 1 }));
       }
     },
-    [ensureExpandedIds, onFlashRow, bumpDirectFocus]
+    [ensureExpandedIds, onFlashRow, bumpDirectFocus, expandForecastCardsOnPath]
   );
 
   /** Top-level: Total Revenue direct → allocation lines only */
@@ -285,6 +307,15 @@ export function RevenueForecastV1HierarchyEditor(props: {
 
     if (role === "derived_sum") {
       const m = METHODOLOGY.build_from_children;
+      const derivedCardExpanded = !collapsedForecastCards.has(node.id);
+      const toggleDerivedCard = () => {
+        setCollapsedForecastCards((prev) => {
+          const next = new Set(prev);
+          if (next.has(node.id)) next.delete(node.id);
+          else next.add(node.id);
+          return next;
+        });
+      };
       return (
         <div
           ref={(el) => setRowRef(node.id, el)}
@@ -302,13 +333,31 @@ export function RevenueForecastV1HierarchyEditor(props: {
           >
             <button
               type="button"
+              onClick={toggleDerivedCard}
+              className="text-slate-400 hover:text-slate-200 w-6 text-xs shrink-0 -ml-0.5"
+              aria-expanded={derivedCardExpanded}
+              title={derivedCardExpanded ? "Collapse card" : "Expand card"}
+            >
+              {derivedCardExpanded ? "▼" : "▶"}
+            </button>
+            <button
+              type="button"
               onClick={() => {
+                const wasOpen = isOpen;
                 toggleExpanded(node.id);
-                ensureExpandedIds(expandIdsForNodePath(useModelStore.getState().revenueForecastTreeV1 ?? [], node.id) ?? []);
+                if (!wasOpen) {
+                  ensureExpandedIds(
+                    expandIdsForNodePath(useModelStore.getState().revenueForecastTreeV1 ?? [], node.id) ?? []
+                  );
+                }
               }}
               className="rounded border border-slate-600 bg-slate-800 px-2 py-1 text-[10px] text-slate-300"
             >
-              {node.children.length ? (isOpen ? "Collapse" : "Expand") : "Expand"}
+              {node.children.length
+                ? isOpen
+                  ? "Hide breakdown"
+                  : "Show breakdown"
+                : "Show breakdown"}
             </button>
             <RevenueForecastLineNameAdd
               placeholder="Child line name"
@@ -351,30 +400,38 @@ export function RevenueForecastV1HierarchyEditor(props: {
               Remove
             </button>
           </RowStatusHeader>
-          <div className="p-3 pl-4 space-y-2 bg-slate-950/30 border-t border-amber-800/35">
-            <div className="rounded-md border border-amber-700/45 bg-amber-950/10 px-3 py-2 text-[11px] text-amber-100/85 space-y-1">
-              <div className="font-semibold text-amber-200/90">{m.title}</div>
-              <div className="text-slate-400">Formula: {m.formula}</div>
-              <p className="text-[10px] text-slate-500">{DERIVED_PARENT_EXPLAINER}</p>
-              <div>Validation: {node.children.length > 0 ? `✓ ${m.validation}` : `⚠ At least one component line required`}</div>
+          {!derivedCardExpanded ? (
+            <div className="px-3 py-2 bg-slate-950/30 border-t border-amber-800/35">
+              <p className="text-[10px] text-slate-400 leading-snug pl-1">
+                {m.title} · {node.children.length} component line{node.children.length === 1 ? "" : "s"}
+              </p>
             </div>
-            {(node.children.length === 0 || isOpen) && (
-              <>
-                {node.children.map((c) => (
-                  <RecursiveNode key={c.id} node={c} depth={depth + 1} />
-                ))}
-                <RevenueForecastLineNameAdd
-                  placeholder="Child line name"
-                  buttonLabel="Add child line"
-                  inputClassName="rounded border border-slate-600 bg-slate-800 text-xs px-2 py-1 w-44"
-                  onAdd={(t) => {
-                    const id = addRevenueStreamChild(node.id, t);
-                    afterAdd(id);
-                  }}
-                />
-              </>
-            )}
-          </div>
+          ) : (
+            <div className="p-3 pl-4 space-y-2 bg-slate-950/30 border-t border-amber-800/35">
+              <div className="rounded-md border border-amber-700/45 bg-amber-950/10 px-3 py-2 text-[11px] text-amber-100/85 space-y-1">
+                <div className="font-semibold text-amber-200/90">{m.title}</div>
+                <div className="text-slate-400">Formula: {m.formula}</div>
+                <p className="text-[10px] text-slate-500">{DERIVED_PARENT_EXPLAINER}</p>
+                <div>Validation: {node.children.length > 0 ? `✓ ${m.validation}` : `⚠ At least one component line required`}</div>
+              </div>
+              {(node.children.length === 0 || isOpen) && (
+                <>
+                  {node.children.map((c) => (
+                    <RecursiveNode key={c.id} node={c} depth={depth + 1} />
+                  ))}
+                  <RevenueForecastLineNameAdd
+                    placeholder="Child line name"
+                    buttonLabel="Add child line"
+                    inputClassName="rounded border border-slate-600 bg-slate-800 text-xs px-2 py-1 w-44"
+                    onAdd={(t) => {
+                      const id = addRevenueStreamChild(node.id, t);
+                      afterAdd(id);
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          )}
         </div>
       );
     }
@@ -404,7 +461,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
 
     const isDirectStandalone = mode === "direct_standalone";
     const isDirectAllocParent = mode === "direct_with_allocation_children";
-    const cardExpanded = !collapsedDirectCards.has(node.id);
+    const cardExpanded = !collapsedForecastCards.has(node.id);
     const showAllocSection = cardExpanded && (isDirectStandalone || isDirectAllocParent);
     const allocSum = getAllocationPercentSum(node.children, rows);
     const allocCount = node.children.length;
@@ -430,7 +487,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
       projectionYears
     );
     const toggleCard = () => {
-      setCollapsedDirectCards((prev) => {
+      setCollapsedForecastCards((prev) => {
         const next = new Set(prev);
         if (next.has(node.id)) next.delete(node.id);
         else next.add(node.id);
@@ -471,10 +528,13 @@ export function RevenueForecastV1HierarchyEditor(props: {
               <button
                 type="button"
                 onClick={() => {
+                  const wasOpen = isOpen;
                   toggleExpanded(node.id);
-                  const tree = useModelStore.getState().revenueForecastTreeV1 ?? [];
-                  const path = expandIdsForNodePath(tree, node.id);
-                  if (path) ensureExpandedIds(path);
+                  if (!wasOpen) {
+                    const tree = useModelStore.getState().revenueForecastTreeV1 ?? [];
+                    const path = expandIdsForNodePath(tree, node.id);
+                    if (path) ensureExpandedIds(path);
+                  }
                 }}
                 className="rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-[10px] text-slate-400"
               >
@@ -736,8 +796,7 @@ export function RevenueForecastV1HierarchyEditor(props: {
               forecastParameters: {},
             });
             setModal(null);
-            ensureExpandedIds(expandIdsForNodePath(useModelStore.getState().revenueForecastTreeV1 ?? [], modal.nodeId) ?? []);
-            afterAdd(modal.nodeId);
+            afterAdd(modal.nodeId, { scrollToRow: false });
           }}
         />
       )}

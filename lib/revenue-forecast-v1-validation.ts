@@ -14,7 +14,12 @@ import type {
   GrowthStartingBasisV1,
   ForecastRevenueNodeV1,
 } from "@/types/revenue-forecast-v1";
-import { validateGrowthPhases, type GrowthPhaseV1 } from "@/lib/revenue-growth-phases-v1";
+import {
+  validateGrowthPhases,
+  validateUtilizationPhases,
+  type GrowthPhaseV1,
+} from "@/lib/revenue-growth-phases-v1";
+import type { UtilizationPhaseV1 } from "@/types/revenue-forecast-v1";
 
 /** Sum of allocation % under a direct row must match 100 within this tolerance (floating-point safe). */
 export const REVENUE_ALLOC_SUM_TOLERANCE = 1e-6;
@@ -57,8 +62,21 @@ function validateIndependentLeafOrParent(
     });
     return;
   }
-  if (cfg.forecastMethod !== "growth_rate" && cfg.forecastMethod !== "fixed_value" && cfg.forecastMethod !== "price_volume") {
-    errors.push({ rowId: node.id, message: "Only growth, fixed-value, or Price × Volume constructions are supported.", code: "INVALID_METHOD" });
+  if (
+    cfg.forecastMethod !== "growth_rate" &&
+    cfg.forecastMethod !== "fixed_value" &&
+    cfg.forecastMethod !== "price_volume" &&
+    cfg.forecastMethod !== "customers_arpu" &&
+    cfg.forecastMethod !== "locations_revenue_per_location" &&
+    cfg.forecastMethod !== "capacity_utilization_yield" &&
+    cfg.forecastMethod !== "contracts_acv"
+  ) {
+    errors.push({
+      rowId: node.id,
+      message:
+        "Only growth, fixed-value, Price × Volume, Customers × ARPU, Locations × Revenue per Location, Capacity × Utilization × Yield, or Contracts × ACV constructions are supported.",
+      code: "INVALID_METHOD",
+    });
     return;
   }
   const params = cfg.forecastParameters as Record<string, unknown> | undefined;
@@ -175,6 +193,548 @@ function validateIndependentLeafOrParent(
         rowId: node.id,
         message: `"${node.label}": Complete the price growth setup.`,
         code: "PV_PRICE_GROWTH_INCOMPLETE",
+      });
+    }
+  }
+
+  if (cfg.forecastMethod === "customers_arpu") {
+    const p = params ?? {};
+    const sc = Number(p.startingCustomers);
+    const sa = Number(p.startingArpu);
+    const custPresent = p.startingCustomers != null && Number.isFinite(sc);
+    if (!custPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting customer base.`,
+        code: "CA_START_CUSTOMERS",
+      });
+    } else if (sc <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting customer base must be greater than 0.`,
+        code: "CA_START_CUSTOMERS_POS",
+      });
+    }
+    const arpuPresent = p.startingArpu != null && Number.isFinite(sa);
+    if (!arpuPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting ARPU.`,
+        code: "CA_START_ARPU",
+      });
+    } else if (sa <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting ARPU must be greater than 0.`,
+        code: "CA_START_ARPU_POS",
+      });
+    }
+
+    const customerGrowthComplete = (): boolean => {
+      const pre = "customer";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    const arpuGrowthComplete = (): boolean => {
+      const pre = "arpu";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    if (custPresent && sc > 0 && !customerGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the customer growth setup.`,
+        code: "CA_CUSTOMER_GROWTH_INCOMPLETE",
+      });
+    }
+    if (arpuPresent && sa > 0 && !arpuGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the ARPU growth setup.`,
+        code: "CA_ARPU_GROWTH_INCOMPLETE",
+      });
+    }
+    const arpuBasis = p.arpuBasis;
+    if (arpuBasis != null && arpuBasis !== "monthly" && arpuBasis !== "annual") {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": ARPU basis must be Monthly or Annual.`,
+        code: "CA_ARPU_BASIS_INVALID",
+      });
+    }
+  }
+
+  if (cfg.forecastMethod === "locations_revenue_per_location") {
+    const p = params ?? {};
+    const sl = Number(p.startingLocations);
+    const sr = Number(p.startingRevenuePerLocation);
+    const locPresent = p.startingLocations != null && Number.isFinite(sl);
+    if (!locPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting location count.`,
+        code: "LRPL_START_LOCATIONS",
+      });
+    } else if (sl <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting location count must be greater than 0.`,
+        code: "LRPL_START_LOCATIONS_POS",
+      });
+    }
+    const revPerLocPresent = p.startingRevenuePerLocation != null && Number.isFinite(sr);
+    if (!revPerLocPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting revenue per location.`,
+        code: "LRPL_START_RPL",
+      });
+    } else if (sr <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting revenue per location must be greater than 0.`,
+        code: "LRPL_START_RPL_POS",
+      });
+    }
+
+    const locationGrowthComplete = (): boolean => {
+      const pre = "location";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    const revenuePerLocationGrowthComplete = (): boolean => {
+      const pre = "revenuePerLocation";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    if (locPresent && sl > 0 && !locationGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the location growth setup.`,
+        code: "LRPL_LOCATION_GROWTH_INCOMPLETE",
+      });
+    }
+    if (revPerLocPresent && sr > 0 && !revenuePerLocationGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the revenue per location growth setup.`,
+        code: "LRPL_RPL_GROWTH_INCOMPLETE",
+      });
+    }
+    const rplBasis = p.revenuePerLocationBasis;
+    if (rplBasis != null && rplBasis !== "monthly" && rplBasis !== "annual") {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Revenue per location basis must be Monthly or Annual.`,
+        code: "LRPL_RPL_BASIS_INVALID",
+      });
+    }
+  }
+
+  if (cfg.forecastMethod === "capacity_utilization_yield") {
+    const p = params ?? {};
+    const scap = Number(p.startingCapacity);
+    const capPresent = p.startingCapacity != null && Number.isFinite(scap);
+    if (!capPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting capacity.`,
+        code: "CUY_START_CAP",
+      });
+    } else if (scap <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting capacity must be greater than 0.`,
+        code: "CUY_START_CAP_POS",
+      });
+    }
+
+    const su = Number(p.startingUtilizationPct);
+    const utilStartPresent = p.startingUtilizationPct != null && Number.isFinite(su);
+    if (!utilStartPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting utilization.`,
+        code: "CUY_START_UTIL",
+      });
+    } else if (su < 0 || su > 100) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting utilization must be between 0% and 100%.`,
+        code: "CUY_START_UTIL_RANGE",
+      });
+    }
+
+    const sy = Number(p.startingYield);
+    const yieldPresent = p.startingYield != null && Number.isFinite(sy);
+    if (!yieldPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting yield.`,
+        code: "CUY_START_YIELD",
+      });
+    } else if (sy <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting yield must be greater than 0.`,
+        code: "CUY_START_YIELD_POS",
+      });
+    }
+
+    const yieldBasis = p.yieldBasis;
+    if (yieldBasis != null && yieldBasis !== "monthly" && yieldBasis !== "annual") {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Yield basis must be Monthly or Annual.`,
+        code: "CUY_YIELD_BASIS_INVALID",
+      });
+    }
+
+    const capacityGrowthComplete = (): boolean => {
+      const pre = "capacity";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    const yieldGrowthComplete = (): boolean => {
+      const pre = "yield";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    const utilizationSetupComplete = (): boolean => {
+      const uType = p.utilizationPatternType as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      const anchor =
+        p.utilizationPct != null && Number.isFinite(Number(p.utilizationPct))
+          ? Number(p.utilizationPct)
+          : su;
+      if (uType === "phases") {
+        const raw = p.utilizationPhases;
+        const phases: UtilizationPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                utilizationPct: Number(o.utilizationPct),
+              };
+            })
+          : [];
+        const { ok } = validateUtilizationPhases(phases, proj);
+        return ok && proj.length > 0 && Number.isFinite(anchor);
+      }
+      if (uType === "by_year") {
+        const rby = p.utilizationPctsByYear as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 100;
+        });
+        return yearsOk && Number.isFinite(anchor);
+      }
+      return Number.isFinite(anchor) && anchor >= 0 && anchor <= 100;
+    };
+
+    if (capPresent && scap > 0 && !capacityGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the capacity growth setup.`,
+        code: "CUY_CAPACITY_GROWTH_INCOMPLETE",
+      });
+    }
+    if (utilStartPresent && su >= 0 && su <= 100 && !utilizationSetupComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the utilization setup.`,
+        code: "CUY_UTIL_INCOMPLETE",
+      });
+    }
+    if (yieldPresent && sy > 0 && !yieldGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the yield growth setup.`,
+        code: "CUY_YIELD_GROWTH_INCOMPLETE",
+      });
+    }
+  }
+
+  if (cfg.forecastMethod === "contracts_acv") {
+    const p = params ?? {};
+    const sct = Number(p.startingContracts);
+    const sac = Number(p.startingAcv);
+    const contractsPresent = p.startingContracts != null && Number.isFinite(sct);
+    if (!contractsPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting contract count.`,
+        code: "CACV_START_CONTRACTS",
+      });
+    } else if (sct <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting contract count must be greater than 0.`,
+        code: "CACV_START_CONTRACTS_POS",
+      });
+    }
+    const acvPresent = p.startingAcv != null && Number.isFinite(sac);
+    if (!acvPresent) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Enter a starting ACV.`,
+        code: "CACV_START_ACV",
+      });
+    } else if (sac <= 0) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Starting ACV must be greater than 0.`,
+        code: "CACV_START_ACV_POS",
+      });
+    }
+
+    const contractGrowthComplete = (): boolean => {
+      const pre = "contract";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    const acvGrowthComplete = (): boolean => {
+      const pre = "acv";
+      const pType = p[`${pre}GrowthPatternType`] as string | undefined;
+      const proj = projectionYears.length ? projectionYears : [];
+      if (pType === "phases") {
+        const raw = p[`${pre}GrowthPhases`];
+        const phases: GrowthPhaseV1[] = Array.isArray(raw)
+          ? raw.map((x: unknown) => {
+              const o = x as Record<string, unknown>;
+              return {
+                startYear: String(o.startYear ?? ""),
+                endYear: String(o.endYear ?? ""),
+                ratePercent: Number(o.ratePercent),
+              };
+            })
+          : [];
+        const { ok } = validateGrowthPhases(phases, proj);
+        const rp = p[`${pre}RatePercent`];
+        return ok && proj.length > 0 && rp != null && Number.isFinite(Number(rp));
+      }
+      if (pType === "by_year") {
+        const rby = p[`${pre}RatesByYear`] as Record<string, number> | undefined;
+        const yearsOk = proj.every((y) => {
+          const v = rby?.[y];
+          return v != null && Number.isFinite(Number(v));
+        });
+        const rp = p[`${pre}RatePercent`];
+        return yearsOk && rp != null && Number.isFinite(Number(rp));
+      }
+      const rp = p[`${pre}RatePercent`];
+      return rp != null && Number.isFinite(Number(rp));
+    };
+
+    if (contractsPresent && sct > 0 && !contractGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the contract growth setup.`,
+        code: "CACV_CONTRACT_GROWTH_INCOMPLETE",
+      });
+    }
+    if (acvPresent && sac > 0 && !acvGrowthComplete()) {
+      errors.push({
+        rowId: node.id,
+        message: `"${node.label}": Complete the ACV growth setup.`,
+        code: "CACV_ACV_GROWTH_INCOMPLETE",
       });
     }
   }
@@ -503,6 +1063,22 @@ export function getAllowedRolesForChild(parentRole: RevenueForecastRoleV1 | unde
   return ["allocation_of_parent", "independent_driver"];
 }
 
-export function getAllowedMethodsV1(): ("growth_rate" | "fixed_value" | "price_volume")[] {
-  return ["growth_rate", "fixed_value", "price_volume"];
+export function getAllowedMethodsV1(): (
+  | "growth_rate"
+  | "fixed_value"
+  | "price_volume"
+  | "customers_arpu"
+  | "locations_revenue_per_location"
+  | "capacity_utilization_yield"
+  | "contracts_acv"
+)[] {
+  return [
+    "growth_rate",
+    "fixed_value",
+    "price_volume",
+    "customers_arpu",
+    "locations_revenue_per_location",
+    "capacity_utilization_yield",
+    "contracts_acv",
+  ];
 }

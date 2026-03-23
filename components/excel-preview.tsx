@@ -8,6 +8,7 @@ import { checkBalanceSheetBalance, computeBalanceSheetTotalsWithOverrides, compu
 import { resolveHistoricalCfoValueOnly } from "@/lib/cfo-source-resolution";
 import { computeRevenueProjections } from "@/lib/revenue-projection-engine";
 import { computeRevenueProjectionsV1 } from "@/lib/revenue-projection-engine-v1";
+import { getRevenueForecastConfigV1RowsFingerprint } from "@/lib/revenue-forecast-v1-fingerprint";
 import {
   sanitizeHistoricalRevenueInIncomeStatement,
   mergeForecastRevenueTreeIntoIncomeStatementForPreview,
@@ -1069,6 +1070,9 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns || {});
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
+  const revenueForecastV1RowsFingerprint = useModelStore((s) =>
+    getRevenueForecastConfigV1RowsFingerprint(s.revenueForecastConfigV1)
+  );
   const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
   const cogsPctByRevenueLine = useModelStore((s) => s.cogsPctByRevenueLine ?? {});
   const cogsPctModeByRevenueLine = useModelStore((s) => s.cogsPctModeByRevenueLine ?? {});
@@ -1257,6 +1261,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   }, [
     incomeStatement,
     revenueForecastConfigV1,
+    revenueForecastV1RowsFingerprint,
     revenueForecastTreeV1,
     revenueProjectionConfig,
     projectionYears,

@@ -357,6 +357,533 @@ export const REVENUE_GUIDE_SECTIONS: GuideSection[] = [
     },
   ]),
 
+  section("method_price_volume", "Price × Volume", "Price × Volume", [
+    {
+      type: "paragraph",
+      text: "Revenue is built from two drivers you forecast separately: volume (e.g. units sold) and average realized price per unit. Each series can grow at constant %, by year, or in phases—same patterns as other direct growth methods. Projected revenue each year is volume × price for that year.",
+    },
+    {
+      type: "subheading",
+      text: "When to use it",
+    },
+    {
+      type: "list",
+      items: [
+        "Revenue is naturally thought of as units × price (subscriptions, widgets, seats, tons, etc.).",
+        "You want to stress-test volume and pricing assumptions independently.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "When not to use it",
+    },
+    {
+      type: "list",
+      items: [
+        "The line is a pure dollar subtotal or allocation split with no meaningful unit economics.",
+        "You need seasonality, utilization, or extra drivers—the app does not add those in this method yet.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "Required inputs",
+    },
+    {
+      type: "list",
+      items: [
+        "Starting volume (> 0) as a plain count, and starting price per unit (> 0) as the actual price in your model currency (not scaled by K/M revenue display), so volume × price matches revenue in the model’s stored terms.",
+        "A complete growth pattern for volume and a complete pattern for price (constant, by year, or phases).",
+        "Optional: a short volume unit label (e.g. subscribers, kg, cases)—purely for clarity in the builder and summaries; it does not change calculations.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "How the model calculates it",
+    },
+    {
+      type: "paragraph",
+      text: "First forecast year: volume = starting volume × (1 + volume growth for that year); price = starting price × (1 + price growth for that year); revenue = volume × price. Later years: each of volume and price grows from the prior year’s projected level using that year’s growth rates, then revenue is the product again.",
+    },
+    {
+      type: "subheading",
+      text: "Direct rows only",
+    },
+    {
+      type: "paragraph",
+      text: "Price × Volume is available only when you forecast the line directly. It is not used on derived (build-from-children) or allocation rows.",
+    },
+    {
+      type: "subheading",
+      text: "Preview and opening base",
+    },
+    {
+      type: "paragraph",
+      text: "For forecast-only lines, the preview may show an opening base in the last actual column equal to starting volume × starting price per unit, so the Revenue Growth section and opening bridge can reconcile the jump into the first forecast year.",
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes to avoid",
+    },
+    {
+      type: "list",
+      items: [
+        "Mixing display units (e.g. thousands) between volume and price—keep definitions aligned so revenue is not off by scale.",
+        "Using zero or missing starts; both starting volume and price must be positive for a valid row.",
+        "Completing only one growth side—both volume and price patterns must be fully specified.",
+      ],
+    },
+  ]),
+
+  section("method_customers_arpu", "Customers × ARPU", "Customers × ARPU", [
+    {
+      type: "paragraph",
+      text: "This method forecasts revenue as the product of the number of customers and the average revenue generated per customer (ARPU). It is commonly used for subscription, SaaS, marketplace, and user-based business models.",
+    },
+    {
+      type: "subheading",
+      text: "What is ARPU?",
+    },
+    {
+      type: "paragraph",
+      text: "ARPU (Average Revenue Per User) represents the average amount of revenue generated per customer over a given period. It reflects pricing, monetization strategy, and customer value.",
+    },
+    {
+      type: "list",
+      items: [
+        "Subscription: monthly fee per user",
+        "Marketplace: average spend per active customer",
+        "Telecom / SaaS: revenue per subscriber",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "When to use this method",
+    },
+    {
+      type: "list",
+      items: [
+        "When revenue is driven by user growth and monetization",
+        "When you want to separate customer acquisition from pricing power",
+        "When ARPU can change independently from customer count",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "When NOT to use",
+    },
+    {
+      type: "list",
+      items: [
+        "When revenue is not tied to identifiable customers",
+        "When pricing varies heavily per transaction (use Price × Volume instead)",
+        "When only total revenue growth assumptions are available",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "Required inputs",
+    },
+    {
+      type: "list",
+      items: [
+        "Starting number of customers (plain count, not scaled)",
+        "Starting ARPU (absolute currency per customer, at the basis you choose below)",
+        "ARPU basis: Monthly or Annual (default Annual — existing saved models without this field behave as Annual)",
+        "Customer growth assumptions (constant, by year, or phases)",
+        "ARPU growth assumptions (constant, by year, or phases)",
+        "Optional customer unit label (e.g., users, subscribers, accounts)",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "ARPU basis (monthly vs annual)",
+    },
+    {
+      type: "paragraph",
+      text: "The model outputs annual revenue. ARPU is a monetization driver: you must say whether your ARPU input is per month or per year.",
+    },
+    {
+      type: "list",
+      items: [
+        "Annual: Revenue(t) = Customers(t) × ARPU(t) — no extra conversion.",
+        "Monthly: Revenue(t) = Customers(t) × ARPU(t) × 12 — monthly ARPU is annualized to match annual revenue.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "How the model calculates revenue",
+    },
+    {
+      type: "paragraph",
+      text: "For each forecast year, the model projects customers and ARPU independently based on their respective growth assumptions. Revenue is calculated as:",
+    },
+    {
+      type: "paragraph",
+      text: "Revenue(t) = Customers(t) × ARPU(t) when ARPU basis is Annual; or Customers(t) × ARPU(t) × 12 when ARPU basis is Monthly.",
+    },
+    {
+      type: "paragraph",
+      text: "Both customers and ARPU are compounded year-over-year based on the selected growth pattern. The ×12 annualization applies to the monetization side only (not to customer counts).",
+    },
+    {
+      type: "subheading",
+      text: "How it behaves in the model",
+    },
+    {
+      type: "list",
+      items: [
+        "Available only for direct forecast rows",
+        "Can be combined with allocation or child-line structures",
+        "Opening values are used as the base for first forecast year growth",
+        "Growth is applied separately to customers and ARPU before multiplying",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "How it appears in the preview",
+    },
+    {
+      type: "list",
+      items: [
+        "Revenue appears in the main table",
+        "A separate \"Customers × ARPU Drivers\" section shows: Starting customers, Starting ARPU, first forecast-year customers and ARPU, and the selected ARPU basis (Monthly / Annual)",
+        "ARPU is shown as absolute currency (not scaled to K/M)",
+        "Customer counts are shown as real units",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes",
+    },
+    {
+      type: "list",
+      items: [
+        "Entering monthly ARPU but leaving the basis on Annual — the model will understate revenue by roughly 12×",
+        "Entering ARPU scaled to K/M instead of actual price per customer",
+        "Mixing customer count with transaction volume (should use Price × Volume instead)",
+        "Applying identical growth rates to customers and ARPU without justification",
+        "Forgetting that ARPU reflects monetization, not pricing alone",
+      ],
+    },
+  ]),
+
+  section(
+    "method_locations_revenue_per_location",
+    "Locations × Revenue per Location",
+    "Locations × Revenue per Location",
+    [
+      {
+        type: "paragraph",
+        text: "This method forecasts revenue as the number of locations multiplied by average revenue generated per location. It is useful for footprint-driven businesses such as retail, restaurants, clinics, branches, and gym networks.",
+      },
+      {
+        type: "subheading",
+        text: "When to use it",
+      },
+      {
+        type: "list",
+        items: [
+          "Revenue is driven by location count and location productivity.",
+          "You want to separate footprint expansion from per-location monetization.",
+          "Location growth and revenue per location can move independently.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "When not to use it",
+      },
+      {
+        type: "list",
+        items: [
+          "Online-only or user-based models with no meaningful location driver.",
+          "Unit-based transactional lines where Price × Volume is the correct structure.",
+          "Cases where only top-line growth is available and no location-level assumptions exist.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "Required inputs",
+      },
+      {
+        type: "list",
+        items: [
+          "Starting locations (plain count, not scaled).",
+          "Starting revenue per location (absolute currency per location, at the basis you choose below).",
+          "Revenue per location basis: Monthly or Annual (default Annual — older saves without this field behave as Annual).",
+          "Location growth assumptions (constant, by year, or phases).",
+          "Revenue-per-location growth assumptions (constant, by year, or phases).",
+          "Optional location unit label (e.g., stores, branches, clinics, restaurants).",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "Revenue per location basis (monthly vs annual)",
+      },
+      {
+        type: "paragraph",
+        text: "Footprint counts stay plain counts; only the monetization driver (revenue per location) carries a period basis. The model outputs annual revenue.",
+      },
+      {
+        type: "list",
+        items: [
+          "Annual: Revenue(t) = Locations(t) × Revenue per Location(t).",
+          "Monthly: Revenue(t) = Locations(t) × Revenue per Location(t) × 12 — monthly productivity is annualized.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "Formula",
+      },
+      {
+        type: "paragraph",
+        text: "Revenue(t) = Locations(t) × Revenue per Location(t) when basis is Annual; or Locations(t) × Revenue per Location(t) × 12 when basis is Monthly.",
+      },
+      {
+        type: "paragraph",
+        text: "Both location count and revenue per location compound year-over-year based on their selected growth patterns.",
+      },
+      {
+        type: "subheading",
+        text: "How it behaves in the model",
+      },
+      {
+        type: "list",
+        items: [
+          "Available only for direct forecast rows.",
+          "Can coexist with allocation and child-line structures through the existing row-role framework.",
+          "Opening inputs are used as the base for first forecast-year growth when needed.",
+          "Growth is applied independently to locations and revenue per location before multiplying.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "How it appears in the preview",
+      },
+      {
+        type: "list",
+        items: [
+          "Revenue appears in the main table like other direct methods.",
+          "A separate \"Locations × Revenue per Location Drivers\" section shows starting and first-year drivers and the selected revenue/location basis (Monthly / Annual).",
+          "Revenue per location is shown as absolute currency (not K/M scaled).",
+          "Location counts are shown as real units.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "Common mistakes",
+      },
+      {
+        type: "list",
+        items: [
+          "Entering monthly revenue per location but leaving the basis on Annual — output will read like weak annual productivity.",
+          "Using this for online-only or user-based revenue where locations are not the driver.",
+          "Confusing locations with units sold (use Price × Volume for units sold × price).",
+          "Entering revenue per location in K/M-scaled form instead of absolute currency.",
+          "Treating this method as explicit same-store-sales or openings/closures modeling in v1.",
+        ],
+      },
+    ]
+  ),
+
+  section(
+    "method_capacity_utilization_yield",
+    "Capacity × Utilization × Yield",
+    "Capacity × Utilization × Yield",
+    [
+      {
+        type: "paragraph",
+        text: "This method forecasts annual revenue as capacity × utilization (as a share of capacity) × yield per utilized unit. It fits businesses where revenue is constrained by how much capacity exists, how much of it is used, and what you earn on each utilized unit — manufacturing, airlines, hotels, energy, logistics, and seat/room/slot models.",
+      },
+      {
+        type: "subheading",
+        text: "When to use it",
+      },
+      {
+        type: "list",
+        items: [
+          "Revenue is naturally bounded by operational capacity and utilization, not only by demand.",
+          "You can articulate capacity, a utilization path (levels over time), and monetization per utilized unit.",
+          "You want separation between adding capacity, operating usage, and pricing/yield power.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "When NOT to use it",
+      },
+      {
+        type: "list",
+        items: [
+          "Simple unit × price transactional revenue with no meaningful capacity concept — use Price × Volume.",
+          "User or account count × ARPU — use Customers × ARPU.",
+          "Footprint × revenue per site without a utilization construct — use Locations × Revenue per Location.",
+          "You only have top-line growth and cannot define capacity, utilization, and yield credibly.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "Required inputs",
+      },
+      {
+        type: "list",
+        items: [
+          "Starting capacity (plain count: seats, rooms, MW, etc. — not K/M scaled).",
+          "Starting utilization % (0–100), as a level.",
+          "Starting yield: absolute currency per utilized unit, with a yield basis (Monthly or Annual; default Annual).",
+          "Capacity growth (constant, by year, or phases).",
+          "Utilization path: constant, by-year targets, or phased targets — always as % levels, not compounding “utilization growth %”.",
+          "Yield growth (constant, by year, or phases).",
+          "Optional capacity unit label.",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "Formula",
+      },
+      {
+        type: "paragraph",
+        text: "Revenue(t) = Capacity(t) × (Utilization(t) ÷ 100) × Yield(t). If yield basis is Monthly, multiply by 12 to annualize yield. Capacity and utilization are not given a monthly/annual ambiguity in v1 — only yield carries the period basis.",
+      },
+      {
+        type: "subheading",
+        text: "How the model behaves",
+      },
+      {
+        type: "list",
+        items: [
+          "Capacity and yield compound using their growth patterns year over year.",
+          "Utilization is resolved as an explicit % level each year (constant, by year, or from phases) — it does not chain-multiply like a growth rate.",
+          "Direct forecast rows only; not available on derived or allocation rows.",
+          "Historicals are unchanged; opening basis for preview uses starting capacity × starting utilization × starting yield (with yield basis multiplier).",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "How it appears in the preview",
+      },
+      {
+        type: "list",
+        items: [
+          "Main revenue table shows projected revenue; forecast-only lines may show a Base in the last actual column from the opening basis.",
+          "Revenue Growth can use that opening base when no true last actual exists, with the same alternate treatment as other opening-base methods.",
+          "A \"Capacity × Utilization × Yield Drivers\" block lists starting capacity, utilization, yield, and first forecast-year capacity, utilization, and yield (no duplicate revenue column).",
+        ],
+      },
+      {
+        type: "subheading",
+        text: "Common mistakes",
+      },
+      {
+        type: "list",
+        items: [
+          "Treating utilization as a compounding growth rate — it must be a level/target % each year.",
+          "Entering yield in K/M display form instead of real currency per utilized unit.",
+          "Setting utilization above 100% or confusing 100% capacity with unconstrained demand.",
+          "Using this where Price × Volume (units × price) is the clearer operational story.",
+          "Confusing capacity with demand — capacity is what could be served; utilization is how much of that you actually use.",
+        ],
+      },
+    ]
+  ),
+
+  section("method_contracts_acv", "Contracts × ACV", "Contracts × ACV", [
+    {
+      type: "paragraph",
+      text: "This method forecasts revenue as the number of contracts (or accounts) multiplied by ACV — Annual Contract Value — per contract. It is designed for B2B / enterprise models where revenue scales with contracted accounts and the average annual value per contract.",
+    },
+    {
+      type: "subheading",
+      text: "What is ACV?",
+    },
+    {
+      type: "paragraph",
+      text: "ACV (Annual Contract Value) is the annualized revenue attributed to a single contract in this line’s definition. It is entered as annual dollars per contract, not as a monthly rate that needs a basis toggle—this is intentional to avoid the monthly/annual ambiguity that can affect other monetization drivers.",
+    },
+    {
+      type: "subheading",
+      text: "When to use it",
+    },
+    {
+      type: "list",
+      items: [
+        "Enterprise or account-based recurring revenue where contract count and ACV are the clearest drivers.",
+        "B2B SaaS, managed services, or subscription businesses framed around contracts and annual value.",
+        "You want the same two-driver growth mechanics as Price × Volume, but with contract/account semantics.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "When NOT to use it",
+    },
+    {
+      type: "list",
+      items: [
+        "Purely transactional revenue with units × price and no contract/account framing — use Price × Volume.",
+        "User monetization where ARPU is the natural label — use Customers × ARPU.",
+        "You need a monthly monetization driver with a basis selector — choose ARPU (or another method), not this one.",
+        "You only have top-line growth and cannot define contracts and ACV credibly.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "Required inputs",
+    },
+    {
+      type: "list",
+      items: [
+        "Starting number of contracts (plain count).",
+        "Starting ACV: annual absolute currency per contract (not K/M scaled).",
+        "Contract growth and ACV growth, each as constant, by year, or phases.",
+        "Optional contract unit label (e.g., contracts, enterprise accounts, agreements).",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "Formula",
+    },
+    {
+      type: "paragraph",
+      text: "Revenue(t) = Contracts(t) × ACV(t). First forecast year: each side applies growth for that year to the starting level; later years compound each side from the prior year’s projected level using that year’s growth rates, then multiply.",
+    },
+    {
+      type: "subheading",
+      text: "How it behaves in the model",
+    },
+    {
+      type: "list",
+      items: [
+        "Direct forecast rows only. No change to historical actuals.",
+        "Same growth-resolution architecture as Price × Volume (two independent growth series).",
+        "Opening basis for preview uses starting contracts × starting ACV when no last actual exists for a forecast-only line.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "How it appears in the preview",
+    },
+    {
+      type: "list",
+      items: [
+        "Main revenue table shows projected revenue; Base may appear in the last actual column from the opening basis when applicable.",
+        "A \"Contracts × ACV Drivers\" block shows starting contracts, starting ACV, and first-year contracts and ACV after growth (no duplicate revenue column).",
+        "Counts and ACV are shown as real units and absolute currency, not statement K/M.",
+      ],
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes",
+    },
+    {
+      type: "list",
+      items: [
+        "Treating ACV as a monthly rate — ACV is annual by definition in this method.",
+        "Entering ACV in K/M display form instead of real annual dollars per contract.",
+        "Using this for transaction-heavy volume × price businesses where Price × Volume is clearer.",
+        "Using this when ARPU is the more natural metric for your user base.",
+        "Confusing contract count with generic unit volume (units sold vs. contracted accounts).",
+      ],
+    },
+  ]),
+
   section("method_flat", "Flat value", "Flat value", [
     {
       type: "paragraph",
@@ -438,83 +965,6 @@ export const REVENUE_GUIDE_SECTIONS: GuideSection[] = [
       items: [
         "Inconsistent year-to-year jumps without documentation—add notes in your workbook or memo outside the app if needed.",
         "Mixing manual-by-year on a parent that should be the sum of children—structure the roll-up first.",
-      ],
-    },
-  ]),
-
-  section("method_price_volume", "Price × Volume", "Price × Volume", [
-    {
-      type: "paragraph",
-      text: "Revenue is built from two drivers you forecast separately: volume (e.g. units sold) and average realized price per unit. Each series can grow at constant %, by year, or in phases—same patterns as other direct growth methods. Projected revenue each year is volume × price for that year.",
-    },
-    {
-      type: "subheading",
-      text: "When to use it",
-    },
-    {
-      type: "list",
-      items: [
-        "Revenue is naturally thought of as units × price (subscriptions, widgets, seats, tons, etc.).",
-        "You want to stress-test volume and pricing assumptions independently.",
-      ],
-    },
-    {
-      type: "subheading",
-      text: "When not to use it",
-    },
-    {
-      type: "list",
-      items: [
-        "The line is a pure dollar subtotal or allocation split with no meaningful unit economics.",
-        "You need seasonality, utilization, or extra drivers—the app does not add those in this method yet.",
-      ],
-    },
-    {
-      type: "subheading",
-      text: "Required inputs",
-    },
-    {
-      type: "list",
-      items: [
-        "Starting volume (> 0) as a plain count, and starting price per unit (> 0) as the actual price in your model currency (not scaled by K/M revenue display), so volume × price matches revenue in the model’s stored terms.",
-        "A complete growth pattern for volume and a complete pattern for price (constant, by year, or phases).",
-        "Optional: a short volume unit label (e.g. subscribers, kg, cases)—purely for clarity in the builder and summaries; it does not change calculations.",
-      ],
-    },
-    {
-      type: "subheading",
-      text: "How the model calculates it",
-    },
-    {
-      type: "paragraph",
-      text: "First forecast year: volume = starting volume × (1 + volume growth for that year); price = starting price × (1 + price growth for that year); revenue = volume × price. Later years: each of volume and price grows from the prior year’s projected level using that year’s growth rates, then revenue is the product again.",
-    },
-    {
-      type: "subheading",
-      text: "Direct rows only",
-    },
-    {
-      type: "paragraph",
-      text: "Price × Volume is available only when you forecast the line directly. It is not used on derived (build-from-children) or allocation rows.",
-    },
-    {
-      type: "subheading",
-      text: "Preview and opening base",
-    },
-    {
-      type: "paragraph",
-      text: "For forecast-only lines, the preview may show an opening base in the last actual column equal to starting volume × starting price per unit, so the Revenue Growth section and opening bridge can reconcile the jump into the first forecast year.",
-    },
-    {
-      type: "subheading",
-      text: "Common mistakes to avoid",
-    },
-    {
-      type: "list",
-      items: [
-        "Mixing display units (e.g. thousands) between volume and price—keep definitions aligned so revenue is not off by scale.",
-        "Using zero or missing starts; both starting volume and price must be positive for a valid row.",
-        "Completing only one growth side—both volume and price patterns must be fully specified.",
       ],
     },
   ]),

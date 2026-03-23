@@ -9,7 +9,14 @@ export type RevenueForecastRoleV1 =
   | "derived_sum"
   | "allocation_of_parent";
 
-export type RevenueForecastMethodV1 = "growth_rate" | "fixed_value" | "price_volume";
+export type RevenueForecastMethodV1 =
+  | "growth_rate"
+  | "fixed_value"
+  | "price_volume"
+  | "customers_arpu"
+  | "locations_revenue_per_location"
+  | "capacity_utilization_yield"
+  | "contracts_acv";
 
 export type ForecastConfidenceV1 = "high" | "medium" | "low";
 
@@ -71,7 +78,129 @@ export interface PriceVolumeParamsV1 {
   priceGrowthPhases?: GrowthPhaseV1[];
 }
 
-export type ForecastParametersV1 = GrowthRateParamsV1 | FixedValueParamsV1 | PriceVolumeParamsV1;
+/** Monetization driver period: monthly inputs are annualized (×12) to match annual revenue output. */
+export type MonetizationPeriodBasisV1 = "monthly" | "annual";
+
+/**
+ * Direct-only: revenue = customers × ARPU; each side can use constant/phases/by_year growth.
+ */
+export interface CustomersArpuParamsV1 {
+  /** Starting paying customer base (plain count, not K/M-scaled). */
+  startingCustomers?: number;
+  /** Starting ARPU in absolute model currency (not statement display-unit scaled). */
+  startingArpu?: number;
+  /**
+   * Whether `startingArpu` / projected ARPU are **monthly** or **annual** per customer.
+   * Omitted or invalid values are treated as `"annual"` for backward compatibility.
+   */
+  arpuBasis?: MonetizationPeriodBasisV1;
+  /** Optional display label for customer base (e.g. subscribers, members, accounts). */
+  customerUnitLabel?: string;
+  customerGrowthPatternType?: GrowthPatternTypeV1;
+  customerRatePercent?: number;
+  customerRatesByYear?: Record<string, number>;
+  customerGrowthPhases?: GrowthPhaseV1[];
+  arpuGrowthPatternType?: GrowthPatternTypeV1;
+  arpuRatePercent?: number;
+  arpuRatesByYear?: Record<string, number>;
+  arpuGrowthPhases?: GrowthPhaseV1[];
+}
+
+/**
+ * Direct-only: revenue = locations × revenue per location; each side can use constant/phases/by_year growth.
+ */
+export interface LocationsRevenuePerLocationParamsV1 {
+  /** Starting location count (plain count, not K/M-scaled). */
+  startingLocations?: number;
+  /** Starting revenue per location in absolute model currency (not statement display-unit scaled). */
+  startingRevenuePerLocation?: number;
+  /**
+   * Whether `startingRevenuePerLocation` / projected values are **monthly** or **annual** per location.
+   * Omitted or invalid values are treated as `"annual"` for backward compatibility.
+   */
+  revenuePerLocationBasis?: MonetizationPeriodBasisV1;
+  /** Optional display label for location base (e.g. stores, branches, clinics). */
+  locationUnitLabel?: string;
+  locationGrowthPatternType?: GrowthPatternTypeV1;
+  locationRatePercent?: number;
+  locationRatesByYear?: Record<string, number>;
+  locationGrowthPhases?: GrowthPhaseV1[];
+  revenuePerLocationGrowthPatternType?: GrowthPatternTypeV1;
+  revenuePerLocationRatePercent?: number;
+  revenuePerLocationRatesByYear?: Record<string, number>;
+  revenuePerLocationGrowthPhases?: GrowthPhaseV1[];
+}
+
+/** Utilization path: levels (% of capacity used), not compounding growth. */
+export type UtilizationPatternTypeV1 = "constant" | "by_year" | "phases";
+
+/** One phase of constant target utilization % (inclusive projection years). */
+export interface UtilizationPhaseV1 {
+  startYear: string;
+  endYear: string;
+  /** Target utilization 0–100 for all years in [startYear, endYear]. */
+  utilizationPct: number;
+}
+
+/**
+ * Direct-only: revenue = capacity × utilization × yield;
+ * capacity and yield compound with growth patterns; utilization is a level path by year.
+ */
+export interface CapacityUtilizationYieldParamsV1 {
+  startingCapacity?: number;
+  startingUtilizationPct?: number;
+  startingYield?: number;
+  /** Optional label for capacity units (seats, rooms, MW, etc.). */
+  capacityUnitLabel?: string;
+  /**
+   * Period basis for yield only (currency per utilized unit).
+   * Monthly yield is annualized ×12 for annual revenue output.
+   */
+  yieldBasis?: MonetizationPeriodBasisV1;
+  capacityGrowthPatternType?: GrowthPatternTypeV1;
+  capacityRatePercent?: number;
+  capacityRatesByYear?: Record<string, number>;
+  capacityGrowthPhases?: GrowthPhaseV1[];
+  utilizationPatternType?: UtilizationPatternTypeV1;
+  /** Constant-path level (0–100); if omitted, engine uses startingUtilizationPct. */
+  utilizationPct?: number;
+  utilizationPctsByYear?: Record<string, number>;
+  utilizationPhases?: UtilizationPhaseV1[];
+  yieldGrowthPatternType?: GrowthPatternTypeV1;
+  yieldRatePercent?: number;
+  yieldRatesByYear?: Record<string, number>;
+  yieldGrowthPhases?: GrowthPhaseV1[];
+}
+
+/**
+ * Direct-only: revenue = contracts × ACV (annual contract value per contract).
+ * Same growth-pattern architecture as Price × Volume; no monthly/annual basis — ACV is annual by definition.
+ */
+export interface ContractsAcvParamsV1 {
+  /** Contract / account count (plain number, not K/M-scaled). */
+  startingContracts?: number;
+  /** Annual contract value per contract in absolute model currency (not statement K/M). */
+  startingAcv?: number;
+  /** Optional label (e.g. contracts, enterprise accounts, agreements). */
+  contractUnitLabel?: string;
+  contractGrowthPatternType?: GrowthPatternTypeV1;
+  contractRatePercent?: number;
+  contractRatesByYear?: Record<string, number>;
+  contractGrowthPhases?: GrowthPhaseV1[];
+  acvGrowthPatternType?: GrowthPatternTypeV1;
+  acvRatePercent?: number;
+  acvRatesByYear?: Record<string, number>;
+  acvGrowthPhases?: GrowthPhaseV1[];
+}
+
+export type ForecastParametersV1 =
+  | GrowthRateParamsV1
+  | FixedValueParamsV1
+  | PriceVolumeParamsV1
+  | CustomersArpuParamsV1
+  | LocationsRevenuePerLocationParamsV1
+  | CapacityUtilizationYieldParamsV1
+  | ContractsAcvParamsV1;
 
 /**
  * Per-row revenue forecast config (v1).

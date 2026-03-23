@@ -14,9 +14,43 @@ import type {
 } from "@/types/revenue-forecast-v1";
 import { computeRowValue } from "@/lib/calculations";
 import { validateRevenueForecastV1 } from "@/lib/revenue-forecast-v1-validation";
-import { resolveGrowthRatesByYear, resolvePrefixedGrowthRatesByYear } from "@/lib/revenue-growth-phases-v1";
+import {
+  resolveGrowthRatesByYear,
+  resolvePrefixedGrowthRatesByYear,
+  resolveUtilizationLevelsByYear,
+} from "@/lib/revenue-growth-phases-v1";
 
 export type ProjectedRevenueResultV1 = Record<string, Record<string, number>>;
+
+/** Resolved ARPU period basis; missing/invalid config → annual (backward compatible). */
+export function resolveArpuBasisFromParams(params: Record<string, unknown>): "monthly" | "annual" {
+  return params.arpuBasis === "monthly" ? "monthly" : "annual";
+}
+
+/** Resolved revenue-per-location period basis; missing/invalid config → annual (backward compatible). */
+export function resolveRevenuePerLocationBasisFromParams(params: Record<string, unknown>): "monthly" | "annual" {
+  return params.revenuePerLocationBasis === "monthly" ? "monthly" : "annual";
+}
+
+/** ×12 when monetization is monthly (annual revenue model); ×1 when annual. */
+export function getArpuAnnualizationMultiplier(params: Record<string, unknown>): number {
+  return resolveArpuBasisFromParams(params) === "monthly" ? 12 : 1;
+}
+
+/** ×12 when monetization is monthly (annual revenue model); ×1 when annual. */
+export function getRevenuePerLocationAnnualizationMultiplier(params: Record<string, unknown>): number {
+  return resolveRevenuePerLocationBasisFromParams(params) === "monthly" ? 12 : 1;
+}
+
+/** Resolved yield period basis for Capacity × Utilization × Yield; missing/invalid → annual. */
+export function resolveYieldBasisFromParams(params: Record<string, unknown>): "monthly" | "annual" {
+  return params.yieldBasis === "monthly" ? "monthly" : "annual";
+}
+
+/** ×12 when yield is entered as monthly per utilized unit; ×1 when annual. */
+export function getYieldAnnualizationMultiplier(params: Record<string, unknown>): number {
+  return resolveYieldBasisFromParams(params) === "monthly" ? 12 : 1;
+}
 
 function findRow(rows: Row[], id: string): Row | null {
   for (const r of rows) {
@@ -141,6 +175,125 @@ export function computeRevenueProjectionsV1(
         result[rowId][year] = vol * price;
         volPrev = vol;
         pricePrev = price;
+      }
+      return;
+    }
+
+    if (method === "contracts_acv") {
+      const c0 = Number(params.startingContracts);
+      const a0 = Number(params.startingAcv);
+      if (!Number.isFinite(c0) || !Number.isFinite(a0) || c0 <= 0 || a0 <= 0) return;
+      const contractResolved = resolvePrefixedGrowthRatesByYear(params, "contract", projectionYears);
+      const acvResolved = resolvePrefixedGrowthRatesByYear(params, "acv", projectionYears);
+      result[rowId] = {};
+      let contractPrev = c0;
+      let acvPrev = a0;
+      for (let i = 0; i < projectionYears.length; i++) {
+        const year = projectionYears[i]!;
+        const contractPct =
+          contractResolved?.[year] != null && Number.isFinite(Number(contractResolved[year]))
+            ? Number(contractResolved[year])
+            : Number(params.contractRatePercent) ?? 0;
+        const acvPct =
+          acvResolved?.[year] != null && Number.isFinite(Number(acvResolved[year]))
+            ? Number(acvResolved[year])
+            : Number(params.acvRatePercent) ?? 0;
+        const contracts = contractPrev * (1 + contractPct / 100);
+        const acv = acvPrev * (1 + acvPct / 100);
+        result[rowId][year] = contracts * acv;
+        contractPrev = contracts;
+        acvPrev = acv;
+      }
+      return;
+    }
+
+    if (method === "customers_arpu") {
+      const c0 = Number(params.startingCustomers);
+      const a0 = Number(params.startingArpu);
+      if (!Number.isFinite(c0) || !Number.isFinite(a0) || c0 <= 0 || a0 <= 0) return;
+      const arpuAnnualization = getArpuAnnualizationMultiplier(params);
+      const customerResolved = resolvePrefixedGrowthRatesByYear(params, "customer", projectionYears);
+      const arpuResolved = resolvePrefixedGrowthRatesByYear(params, "arpu", projectionYears);
+      result[rowId] = {};
+      let customerPrev = c0;
+      let arpuPrev = a0;
+      for (let i = 0; i < projectionYears.length; i++) {
+        const year = projectionYears[i]!;
+        const customerPct =
+          customerResolved?.[year] != null && Number.isFinite(Number(customerResolved[year]))
+            ? Number(customerResolved[year])
+            : Number(params.customerRatePercent) ?? 0;
+        const arpuPct =
+          arpuResolved?.[year] != null && Number.isFinite(Number(arpuResolved[year]))
+            ? Number(arpuResolved[year])
+            : Number(params.arpuRatePercent) ?? 0;
+        const customers = customerPrev * (1 + customerPct / 100);
+        const arpu = arpuPrev * (1 + arpuPct / 100);
+        result[rowId][year] = customers * arpu * arpuAnnualization;
+        customerPrev = customers;
+        arpuPrev = arpu;
+      }
+      return;
+    }
+
+    if (method === "locations_revenue_per_location") {
+      const l0 = Number(params.startingLocations);
+      const r0 = Number(params.startingRevenuePerLocation);
+      if (!Number.isFinite(l0) || !Number.isFinite(r0) || l0 <= 0 || r0 <= 0) return;
+      const rplAnnualization = getRevenuePerLocationAnnualizationMultiplier(params);
+      const locResolved = resolvePrefixedGrowthRatesByYear(params, "location", projectionYears);
+      const rplResolved = resolvePrefixedGrowthRatesByYear(params, "revenuePerLocation", projectionYears);
+      result[rowId] = {};
+      let locPrev = l0;
+      let rplPrev = r0;
+      for (let i = 0; i < projectionYears.length; i++) {
+        const year = projectionYears[i]!;
+        const locPct =
+          locResolved?.[year] != null && Number.isFinite(Number(locResolved[year]))
+            ? Number(locResolved[year])
+            : Number(params.locationRatePercent) ?? 0;
+        const rplPct =
+          rplResolved?.[year] != null && Number.isFinite(Number(rplResolved[year]))
+            ? Number(rplResolved[year])
+            : Number(params.revenuePerLocationRatePercent) ?? 0;
+        const locations = locPrev * (1 + locPct / 100);
+        const revenuePerLocation = rplPrev * (1 + rplPct / 100);
+        result[rowId][year] = locations * revenuePerLocation * rplAnnualization;
+        locPrev = locations;
+        rplPrev = revenuePerLocation;
+      }
+      return;
+    }
+
+    if (method === "capacity_utilization_yield") {
+      const cap0 = Number(params.startingCapacity);
+      const yield0 = Number(params.startingYield);
+      if (!Number.isFinite(cap0) || !Number.isFinite(yield0) || cap0 <= 0 || yield0 <= 0) return;
+      const utilLevels = resolveUtilizationLevelsByYear(params, projectionYears);
+      if (!utilLevels) return;
+      const capResolved = resolvePrefixedGrowthRatesByYear(params, "capacity", projectionYears);
+      const yieldResolved = resolvePrefixedGrowthRatesByYear(params, "yield", projectionYears);
+      const yieldMult = getYieldAnnualizationMultiplier(params);
+      result[rowId] = {};
+      let capPrev = cap0;
+      let yieldPrev = yield0;
+      for (let i = 0; i < projectionYears.length; i++) {
+        const year = projectionYears[i]!;
+        const utilPct = utilLevels[year];
+        if (utilPct == null || !Number.isFinite(utilPct)) return;
+        const capPct =
+          capResolved?.[year] != null && Number.isFinite(Number(capResolved[year]))
+            ? Number(capResolved[year])
+            : Number(params.capacityRatePercent) ?? 0;
+        const yPct =
+          yieldResolved?.[year] != null && Number.isFinite(Number(yieldResolved[year]))
+            ? Number(yieldResolved[year])
+            : Number(params.yieldRatePercent) ?? 0;
+        const cap = capPrev * (1 + capPct / 100);
+        const yVal = yieldPrev * (1 + yPct / 100);
+        result[rowId][year] = cap * (utilPct / 100) * yVal * yieldMult;
+        capPrev = cap;
+        yieldPrev = yVal;
       }
       return;
     }
@@ -273,5 +426,181 @@ export function getPriceVolumeFirstForecastYearDrivers(
     firstYearKey: year,
     volumeAfterGrowth,
     priceAfterGrowth,
+  };
+}
+
+/**
+ * Read-only helper for preview UI: first projection year drivers for `contracts_acv`
+ * (matches first loop iteration of `projectIndependentRow`).
+ */
+export function getContractsAcvFirstForecastYearDrivers(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): {
+  startingContracts: number;
+  startingAcv: number;
+  firstYearKey: string;
+  contractsAfterGrowth: number;
+  acvAfterGrowth: number;
+} | null {
+  const c0 = Number(params.startingContracts);
+  const a0 = Number(params.startingAcv);
+  if (!Number.isFinite(c0) || !Number.isFinite(a0) || c0 <= 0 || a0 <= 0) return null;
+  if (projectionYears.length === 0) return null;
+  const year = projectionYears[0]!;
+  const contractResolved = resolvePrefixedGrowthRatesByYear(params, "contract", projectionYears);
+  const acvResolved = resolvePrefixedGrowthRatesByYear(params, "acv", projectionYears);
+  const contractPct =
+    contractResolved?.[year] != null && Number.isFinite(Number(contractResolved[year]))
+      ? Number(contractResolved[year])
+      : Number(params.contractRatePercent) ?? 0;
+  const acvPct =
+    acvResolved?.[year] != null && Number.isFinite(Number(acvResolved[year]))
+      ? Number(acvResolved[year])
+      : Number(params.acvRatePercent) ?? 0;
+  const contractsAfterGrowth = c0 * (1 + contractPct / 100);
+  const acvAfterGrowth = a0 * (1 + acvPct / 100);
+  return {
+    startingContracts: c0,
+    startingAcv: a0,
+    firstYearKey: year,
+    contractsAfterGrowth,
+    acvAfterGrowth,
+  };
+}
+
+/**
+ * Read-only helper for preview UI: starting customers/ARPU and first projection year
+ * drivers after growth step. Matches the first loop iteration of
+ * `projectIndependentRow` for `customers_arpu` (including ARPU basis annualization).
+ */
+export function getCustomersArpuFirstForecastYearDrivers(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): {
+  startingCustomers: number;
+  startingArpu: number;
+  firstYearKey: string;
+  customersAfterGrowth: number;
+  arpuAfterGrowth: number;
+  arpuBasis: "monthly" | "annual";
+} | null {
+  const c0 = Number(params.startingCustomers);
+  const a0 = Number(params.startingArpu);
+  if (!Number.isFinite(c0) || !Number.isFinite(a0) || c0 <= 0 || a0 <= 0) return null;
+  if (projectionYears.length === 0) return null;
+  const year = projectionYears[0]!;
+  const customerResolved = resolvePrefixedGrowthRatesByYear(params, "customer", projectionYears);
+  const arpuResolved = resolvePrefixedGrowthRatesByYear(params, "arpu", projectionYears);
+  const customerPct =
+    customerResolved?.[year] != null && Number.isFinite(Number(customerResolved[year]))
+      ? Number(customerResolved[year])
+      : Number(params.customerRatePercent) ?? 0;
+  const arpuPct =
+    arpuResolved?.[year] != null && Number.isFinite(Number(arpuResolved[year]))
+      ? Number(arpuResolved[year])
+      : Number(params.arpuRatePercent) ?? 0;
+  const customersAfterGrowth = c0 * (1 + customerPct / 100);
+  const arpuAfterGrowth = a0 * (1 + arpuPct / 100);
+  return {
+    startingCustomers: c0,
+    startingArpu: a0,
+    firstYearKey: year,
+    customersAfterGrowth,
+    arpuAfterGrowth,
+    arpuBasis: resolveArpuBasisFromParams(params),
+  };
+}
+
+/**
+ * Read-only helper for preview UI: starting locations/revenue-per-location and first projection year
+ * drivers after growth step. Matches the first loop iteration of
+ * `projectIndependentRow` for `locations_revenue_per_location` (including monetization basis annualization).
+ */
+export function getLocationsRevenuePerLocationFirstForecastYearDrivers(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): {
+  startingLocations: number;
+  startingRevenuePerLocation: number;
+  firstYearKey: string;
+  locationsAfterGrowth: number;
+  revenuePerLocationAfterGrowth: number;
+  revenuePerLocationBasis: "monthly" | "annual";
+} | null {
+  const l0 = Number(params.startingLocations);
+  const r0 = Number(params.startingRevenuePerLocation);
+  if (!Number.isFinite(l0) || !Number.isFinite(r0) || l0 <= 0 || r0 <= 0) return null;
+  if (projectionYears.length === 0) return null;
+  const year = projectionYears[0]!;
+  const locResolved = resolvePrefixedGrowthRatesByYear(params, "location", projectionYears);
+  const rplResolved = resolvePrefixedGrowthRatesByYear(params, "revenuePerLocation", projectionYears);
+  const locPct =
+    locResolved?.[year] != null && Number.isFinite(Number(locResolved[year]))
+      ? Number(locResolved[year])
+      : Number(params.locationRatePercent) ?? 0;
+  const rplPct =
+    rplResolved?.[year] != null && Number.isFinite(Number(rplResolved[year]))
+      ? Number(rplResolved[year])
+      : Number(params.revenuePerLocationRatePercent) ?? 0;
+  const locationsAfterGrowth = l0 * (1 + locPct / 100);
+  const revenuePerLocationAfterGrowth = r0 * (1 + rplPct / 100);
+  return {
+    startingLocations: l0,
+    startingRevenuePerLocation: r0,
+    firstYearKey: year,
+    locationsAfterGrowth,
+    revenuePerLocationAfterGrowth,
+    revenuePerLocationBasis: resolveRevenuePerLocationBasisFromParams(params),
+  };
+}
+
+/**
+ * Read-only helper for preview UI: first projection year drivers for
+ * `capacity_utilization_yield` (matches first loop iteration of `projectIndependentRow`).
+ */
+export function getCapacityUtilizationYieldFirstForecastYearDrivers(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): {
+  startingCapacity: number;
+  startingUtilizationPct: number;
+  startingYield: number;
+  firstYearKey: string;
+  capacityAfterGrowth: number;
+  utilizationPctFirstYear: number;
+  yieldAfterGrowth: number;
+  yieldBasis: "monthly" | "annual";
+} | null {
+  const cap0 = Number(params.startingCapacity);
+  const yld0 = Number(params.startingYield);
+  if (!Number.isFinite(cap0) || !Number.isFinite(yld0) || cap0 <= 0 || yld0 <= 0) return null;
+  if (projectionYears.length === 0) return null;
+  const year = projectionYears[0]!;
+  const utilLevels = resolveUtilizationLevelsByYear(params, projectionYears);
+  if (!utilLevels || utilLevels[year] == null || !Number.isFinite(utilLevels[year])) return null;
+  const u0 = Number(params.startingUtilizationPct);
+  if (!Number.isFinite(u0) || u0 < 0 || u0 > 100) return null;
+  const capResolved = resolvePrefixedGrowthRatesByYear(params, "capacity", projectionYears);
+  const yieldResolved = resolvePrefixedGrowthRatesByYear(params, "yield", projectionYears);
+  const capPct =
+    capResolved?.[year] != null && Number.isFinite(Number(capResolved[year]))
+      ? Number(capResolved[year])
+      : Number(params.capacityRatePercent) ?? 0;
+  const yieldPct =
+    yieldResolved?.[year] != null && Number.isFinite(Number(yieldResolved[year]))
+      ? Number(yieldResolved[year])
+      : Number(params.yieldRatePercent) ?? 0;
+  const capacityAfterGrowth = cap0 * (1 + capPct / 100);
+  const yieldAfterGrowth = yld0 * (1 + yieldPct / 100);
+  return {
+    startingCapacity: cap0,
+    startingUtilizationPct: u0,
+    startingYield: yld0,
+    firstYearKey: year,
+    capacityAfterGrowth,
+    utilizationPctFirstYear: utilLevels[year]!,
+    yieldAfterGrowth,
+    yieldBasis: resolveYieldBasisFromParams(params),
   };
 }

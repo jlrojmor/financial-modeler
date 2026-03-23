@@ -73,6 +73,7 @@ export function AllocationRowCard(props: {
   const [baseline, setBaseline] = useState(committed);
   const [nameDraft, setNameDraft] = useState(node.label);
   const pctInputRef = useRef<HTMLInputElement>(null);
+  const lastAppliedAllocPctNonceRef = useRef(0);
 
   useEffect(() => {
     setNameDraft(node.label);
@@ -85,9 +86,15 @@ export function AllocationRowCard(props: {
   }, [node.id, cParams.allocationPercent]);
 
   useEffect(() => {
+    lastAppliedAllocPctNonceRef.current = 0;
+  }, [node.id]);
+
+  useEffect(() => {
     if (allocPctFocusNonce <= 0) return;
+    if (allocPctFocusNonce === lastAppliedAllocPctNonceRef.current) return;
+    lastAppliedAllocPctNonceRef.current = allocPctFocusNonce;
     setCollapsed(false);
-    const t = requestAnimationFrame(() => pctInputRef.current?.focus());
+    const t = requestAnimationFrame(() => pctInputRef.current?.focus({ preventScroll: true }));
     return () => cancelAnimationFrame(t);
   }, [allocPctFocusNonce]);
 

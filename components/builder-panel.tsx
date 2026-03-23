@@ -149,6 +149,88 @@ export default function BuilderPanel() {
 
   // Allow download even if model not complete (for testing)
   const canDownload = true; // isModelComplete;
+  const isForecastDriversStep = currentStepId === "forecast_drivers";
+  const builderActions = (
+    <>
+      <button
+        type="button"
+        className="rounded-md h-9 px-3 text-xs font-medium text-slate-300 hover:text-slate-200 border border-slate-600 bg-slate-800 hover:bg-slate-700 hover:border-slate-500 transition-colors cursor-pointer"
+        onClick={() => setShowResetModal(true)}
+      >
+        Reset Inputs
+      </button>
+      <button
+        className={`rounded-md h-9 px-3 text-xs font-medium transition-colors ${
+          canDownload
+            ? "text-slate-300 border border-slate-600 bg-slate-800 hover:bg-slate-700 hover:border-slate-500"
+            : "text-slate-500 border border-slate-700 bg-slate-800/60 cursor-not-allowed"
+        }`}
+        disabled={!canDownload}
+        onClick={async () => {
+          const state = useModelStore.getState();
+          const response = await fetch("/api/generate-excel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(state),
+          });
+          if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${state.meta.companyName || "model"}_${new Date().toISOString().split("T")[0]}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+          } else {
+            const errorData = await response.json().catch(() => ({}));
+            const errorMsg = errorData.details || errorData.error || "Failed to generate Excel file";
+            console.error("Excel generation error:", errorData);
+            alert(`Failed to generate Excel file: ${errorMsg}`);
+          }
+        }}
+      >
+        Download Excel
+      </button>
+      <button
+        className={`rounded-md h-9 px-3 text-xs font-medium transition-colors ${
+          saveFeedback === "saved"
+            ? "text-emerald-300 border border-emerald-600/60 bg-emerald-950/40"
+            : saveFeedback === "saving"
+            ? "text-blue-200 border border-blue-600/60 bg-blue-950/40 cursor-wait"
+            : "text-blue-100 border border-blue-700 bg-blue-900 hover:bg-blue-800 hover:border-blue-600"
+        }`}
+        onClick={handleSave}
+        disabled={saveFeedback === "saving"}
+      >
+        {saveFeedback === "saved" ? "✓ Saved" : saveFeedback === "saving" ? "Saving..." : "Save"}
+      </button>
+      <div className="w-px h-6 bg-slate-700" aria-hidden />
+      <button
+        className={`rounded-md h-9 px-4 text-xs font-semibold transition-colors ${
+          canContinue
+            ? "bg-slate-100 text-slate-950 hover:bg-white"
+            : "bg-slate-800 text-slate-500 cursor-not-allowed"
+        }`}
+        onClick={continueToNextStep}
+        disabled={!canContinue}
+        title={
+          !isCurrentStepComplete
+            ? "Please save the current step first"
+            : currentStepId === "historicals" && rowsMissingIsClassification.length > 0
+            ? "Classify all custom Income Statement rows (section & operating vs non-operating) before continuing"
+            : currentStepId === "historicals" && !balanceCheck.isBalanced && balanceCheck.hasData
+            ? "Balance sheet must balance for all historical years before continuing"
+            : currentStepId === "statement_structure" && unclassifiedCfRows.length > 0
+            ? "Classify cash flow treatment for all custom BS rows before continuing"
+            : undefined
+        }
+      >
+        Continue →
+      </button>
+    </>
+  );
 
   return (
     <section className="h-full w-full rounded-lg border border-slate-800 bg-slate-950 flex flex-col overflow-hidden">
@@ -191,85 +273,9 @@ export default function BuilderPanel() {
           </div>
 
           {/* Actions: tertiary → secondary → primary, consistent height */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              className="rounded-md h-9 px-3 text-xs font-medium text-slate-300 hover:text-slate-200 border border-slate-600 bg-slate-800 hover:bg-slate-700 hover:border-slate-500 transition-colors cursor-pointer"
-              onClick={() => setShowResetModal(true)}
-            >
-              Reset Inputs
-            </button>
-            <button
-              className={`rounded-md h-9 px-3 text-xs font-medium transition-colors ${
-                canDownload
-                  ? "text-slate-300 border border-slate-600 bg-slate-800 hover:bg-slate-700 hover:border-slate-500"
-                  : "text-slate-500 border border-slate-700 bg-slate-800/60 cursor-not-allowed"
-              }`}
-              disabled={!canDownload}
-              onClick={async () => {
-                const state = useModelStore.getState();
-                const response = await fetch("/api/generate-excel", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(state),
-                });
-                if (response.ok) {
-                  const blob = await response.blob();
-                  const url = window.URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = `${state.meta.companyName || "model"}_${new Date().toISOString().split("T")[0]}.xlsx`;
-                  document.body.appendChild(a);
-                  a.click();
-                  window.URL.revokeObjectURL(url);
-                  document.body.removeChild(a);
-                } else {
-                  const errorData = await response.json().catch(() => ({}));
-                  const errorMsg = errorData.details || errorData.error || "Failed to generate Excel file";
-                  console.error("Excel generation error:", errorData);
-                  alert(`Failed to generate Excel file: ${errorMsg}`);
-                }
-              }}
-            >
-              Download Excel
-            </button>
-            <button
-              className={`rounded-md h-9 px-3 text-xs font-medium transition-colors ${
-                saveFeedback === "saved"
-                  ? "text-emerald-300 border border-emerald-600/60 bg-emerald-950/40"
-                  : saveFeedback === "saving"
-                  ? "text-blue-200 border border-blue-600/60 bg-blue-950/40 cursor-wait"
-                  : "text-blue-100 border border-blue-700 bg-blue-900 hover:bg-blue-800 hover:border-blue-600"
-              }`}
-              onClick={handleSave}
-              disabled={saveFeedback === "saving"}
-            >
-              {saveFeedback === "saved" ? "✓ Saved" : saveFeedback === "saving" ? "Saving..." : "Save"}
-            </button>
-            <div className="w-px h-6 bg-slate-700" aria-hidden />
-            <button
-              className={`rounded-md h-9 px-4 text-xs font-semibold transition-colors ${
-                canContinue
-                  ? "bg-slate-100 text-slate-950 hover:bg-white"
-                  : "bg-slate-800 text-slate-500 cursor-not-allowed"
-              }`}
-              onClick={continueToNextStep}
-              disabled={!canContinue}
-              title={
-                !isCurrentStepComplete
-                  ? "Please save the current step first"
-                  : currentStepId === "historicals" && rowsMissingIsClassification.length > 0
-                  ? "Classify all custom Income Statement rows (section & operating vs non-operating) before continuing"
-                  : currentStepId === "historicals" && !balanceCheck.isBalanced && balanceCheck.hasData
-                  ? "Balance sheet must balance for all historical years before continuing"
-                  : currentStepId === "statement_structure" && unclassifiedCfRows.length > 0
-                  ? "Classify cash flow treatment for all custom BS rows before continuing"
-                  : undefined
-              }
-            >
-              Continue →
-            </button>
-          </div>
+          {!isForecastDriversStep ? (
+            <div className="flex items-center gap-2 shrink-0">{builderActions}</div>
+          ) : null}
         </div>
 
         {/* Reset Inputs: scope choice then confirmation */}
@@ -554,7 +560,7 @@ export default function BuilderPanel() {
 
         {currentStepId === "statement_structure" && <StatementStructureShell />}
 
-        {currentStepId === "forecast_drivers" && <ForecastDriversShell />}
+        {currentStepId === "forecast_drivers" && <ForecastDriversShell rightControls={builderActions} />}
 
         {currentStepId === "schedules" && <SchedulesShell />}
 

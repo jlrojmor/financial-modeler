@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import type { RevenueForecastRowConfigV1 } from "@/types/revenue-forecast-v1";
+import type {
+  MonetizationPeriodBasisV1,
+  RevenueForecastRowConfigV1,
+  UtilizationPhaseV1,
+} from "@/types/revenue-forecast-v1";
 import {
   getDirectForecastSubMode,
   DIRECT_METHOD_UX,
@@ -17,7 +21,9 @@ import { RevenueForecastDecimalInput } from "@/components/revenue-forecast-decim
 import { RowStatusPill, type AllocationRowStatus } from "@/components/revenue-forecast-v1-allocation-row";
 import {
   validateGrowthPhases,
+  validateUtilizationPhases,
   expandPhasesToRatesByYear,
+  expandUtilizationPhasesToLevelsByYear,
   GROWTH_PHASE_MESSAGES,
   type GrowthPhaseV1,
 } from "@/lib/revenue-growth-phases-v1";
@@ -37,6 +43,9 @@ function fmtNumericDisplay(n: number): string {
 }
 
 export type HistGrowthShapeV1 = "constant" | "phases" | "by_year";
+
+/** Utilization path: target % levels by year (not compounding growth). */
+type UtilizationPathShapeV1 = "constant" | "phases" | "by_year";
 
 export type PhaseDraftV1 = { id: string; startYear: string; endYear: string; rateStr: string };
 
@@ -145,18 +154,38 @@ const ALL_SUB_MODES: { id: DirectForecastSubModeV1; label: string }[] = [
   { id: "growth_from_historical", label: DIRECT_METHOD_UX.growth_from_historical.title },
   { id: "growth_from_manual_start", label: DIRECT_METHOD_UX.growth_from_manual_start.title },
   { id: "price_volume", label: DIRECT_METHOD_UX.price_volume.title },
+  { id: "customers_arpu", label: DIRECT_METHOD_UX.customers_arpu.title },
+  {
+    id: "locations_revenue_per_location",
+    label: DIRECT_METHOD_UX.locations_revenue_per_location.title,
+  },
+  {
+    id: "capacity_utilization_yield",
+    label: DIRECT_METHOD_UX.capacity_utilization_yield.title,
+  },
+  { id: "contracts_acv", label: DIRECT_METHOD_UX.contracts_acv.title },
   { id: "flat_value", label: DIRECT_METHOD_UX.flat_value.title },
   { id: "manual_by_year", label: DIRECT_METHOD_UX.manual_by_year.title },
 ];
 
-function readPriceVolumeSideFromCfg(
+function readTwoDriverSideFromCfg(
   cfg: RevenueForecastRowConfigV1 | undefined,
   projectionYears: string[],
-  side: "volume" | "price",
+  side:
+    | "volume"
+    | "price"
+    | "customer"
+    | "arpu"
+    | "location"
+    | "revenuePerLocation"
+    | "capacity"
+    | "yield"
+    | "contract"
+    | "acv",
   fallbackRateStr: string
 ): { shape: HistGrowthShapeV1; yearStrs: Record<string, string>; phaseRows: PhaseDraftV1[]; rateStr: string } {
   const p = (cfg?.forecastParameters ?? {}) as Record<string, unknown>;
-  const pre = side === "volume" ? "volume" : "price";
+  const pre = side;
   const pType = p[`${pre}GrowthPatternType`] as string | undefined;
   const phasesKey = `${pre}GrowthPhases` as const;
   if (pType === "phases" && Array.isArray(p[phasesKey]) && (p[phasesKey] as unknown[]).length > 0) {
@@ -198,6 +227,45 @@ function readPriceVolumeSideFromCfg(
   };
 }
 
+function readUtilizationPathFromCfg(
+  cfg: RevenueForecastRowConfigV1 | undefined,
+  projectionYears: string[]
+): {
+  shape: UtilizationPathShapeV1;
+  yearStrs: Record<string, string>;
+  phaseRows: PhaseDraftV1[];
+} {
+  const p = (cfg?.forecastParameters ?? {}) as Record<string, unknown>;
+  const uType = (p.utilizationPatternType as string | undefined) ?? "constant";
+  if (uType === "phases" && Array.isArray(p.utilizationPhases) && (p.utilizationPhases as unknown[]).length > 0) {
+    const rows: PhaseDraftV1[] = (p.utilizationPhases as UtilizationPhaseV1[]).map((ph, i) => ({
+      id: `util-${i}-${ph.startYear}`,
+      startYear: String(ph.startYear),
+      endYear: String(ph.endYear),
+      rateStr: fmtNumericDisplay(Number(ph.utilizationPct)),
+    }));
+    return { shape: "phases", yearStrs: {}, phaseRows: rows };
+  }
+  if (uType === "by_year") {
+    const rby = p.utilizationPctsByYear as Record<string, number> | undefined;
+    const yearStrs: Record<string, string> = {};
+    for (const y of projectionYears) {
+      yearStrs[y] =
+        rby?.[y] != null && Number.isFinite(Number(rby[y])) ? fmtNumericDisplay(Number(rby[y])) : "";
+    }
+    return {
+      shape: "by_year",
+      yearStrs,
+      phaseRows: defaultFullRangePhase(projectionYears, ""),
+    };
+  }
+  return {
+    shape: "constant",
+    yearStrs: Object.fromEntries(projectionYears.map((y) => [y, ""])),
+    phaseRows: defaultFullRangePhase(projectionYears, ""),
+  };
+}
+
 function cfgToStrings(
   cfg: RevenueForecastRowConfigV1 | undefined,
   rowId: string,
@@ -211,9 +279,15 @@ function cfgToStrings(
   yearStrs: Record<string, string>;
 } {
   const c = cfg?.forecastMethod && cfg.forecastRole === "independent_driver" ? cfg : null;
-  if (c?.forecastMethod === "price_volume") {
+  if (
+    c?.forecastMethod === "price_volume" ||
+    c?.forecastMethod === "customers_arpu" ||
+    c?.forecastMethod === "locations_revenue_per_location" ||
+    c?.forecastMethod === "capacity_utilization_yield" ||
+    c?.forecastMethod === "contracts_acv"
+  ) {
     return {
-      sub: "price_volume",
+      sub: c.forecastMethod,
       growthStr: "",
       startStr: "",
       flatStr: "",
@@ -572,6 +646,562 @@ function buildPriceVolumeConfig(
   };
 }
 
+function buildContractsAcvConfig(
+  rowId: string,
+  projectionYears: string[],
+  contractsStartStr: string,
+  acvStartStr: string,
+  contractUnitLabelStr: string,
+  contractShape: HistGrowthShapeV1,
+  contractGrowthStr: string,
+  contractYearStrs: Record<string, string>,
+  contractPhaseRows: PhaseDraftV1[],
+  acvShape: HistGrowthShapeV1,
+  acvGrowthStr: string,
+  acvYearStrs: Record<string, string>,
+  acvPhaseRows: PhaseDraftV1[]
+): { valid: boolean; config: RevenueForecastRowConfigV1 } {
+  const bad = (): RevenueForecastRowConfigV1 => ({
+    rowId,
+    forecastRole: "independent_driver",
+    forecastMethod: "contracts_acv",
+    forecastParameters: {
+      startingContracts: 0,
+      startingAcv: 0,
+      contractGrowthPatternType: "constant",
+      contractRatePercent: 0,
+      acvGrowthPatternType: "constant",
+      acvRatePercent: 0,
+    },
+  });
+
+  const contractsParsed = parseFloat(String(contractsStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(contractsParsed) || contractsParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+  const acvDisp = parseFloat(String(acvStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(acvDisp) || acvDisp <= 0) {
+    return { valid: false, config: bad() };
+  }
+  const startingAcv = acvDisp;
+
+  const buildSide = (
+    side: "contract" | "acv",
+    shape: HistGrowthShapeV1,
+    gStr: string,
+    yStrs: Record<string, string>,
+    phRows: PhaseDraftV1[]
+  ): { ok: boolean; params: Record<string, unknown> } => {
+    const prefix = side;
+    const g = parseFloat(String(gStr).replace(/,/g, "").trim());
+    const hasG = Number.isFinite(g);
+    if (shape === "phases") {
+      const phases = draftsToPhases(phRows);
+      const { ok } = validateGrowthPhases(phases, projectionYears);
+      if (!ok || projectionYears.length === 0) return { ok: false, params: {} };
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      const y0 = projectionYears[0]!;
+      const rp = expanded[y0] ?? phases[0]!.ratePercent;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "phases",
+          [`${prefix}GrowthPhases`]: phases,
+          [`${prefix}RatePercent`]: rp,
+        },
+      };
+    }
+    if (shape === "by_year") {
+      const ratesByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        const t = (yStrs[y] ?? "").replace(/,/g, "").trim();
+        const v = parseFloat(t);
+        if (!Number.isFinite(v)) return { ok: false, params: {} };
+        ratesByYear[y] = v;
+      }
+      if (projectionYears.length === 0) return { ok: false, params: {} };
+      const y0 = projectionYears[0]!;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "by_year",
+          [`${prefix}RatesByYear`]: ratesByYear,
+          [`${prefix}RatePercent`]: ratesByYear[y0] ?? 0,
+        },
+      };
+    }
+    if (!hasG) return { ok: false, params: {} };
+    return {
+      ok: true,
+      params: {
+        [`${prefix}GrowthPatternType`]: "constant",
+        [`${prefix}RatePercent`]: g,
+      },
+    };
+  };
+
+  const cSide = buildSide("contract", contractShape, contractGrowthStr, contractYearStrs, contractPhaseRows);
+  const aSide = buildSide("acv", acvShape, acvGrowthStr, acvYearStrs, acvPhaseRows);
+  if (!cSide.ok || !aSide.ok) return { valid: false, config: bad() };
+
+  const labelTrim = String(contractUnitLabelStr).trim().slice(0, 64);
+
+  return {
+    valid: true,
+    config: {
+      rowId,
+      forecastRole: "independent_driver",
+      forecastMethod: "contracts_acv",
+      forecastParameters: {
+        startingContracts: contractsParsed,
+        startingAcv,
+        ...(labelTrim ? { contractUnitLabel: labelTrim } : {}),
+        ...cSide.params,
+        ...aSide.params,
+      },
+    },
+  };
+}
+
+function buildCustomersArpuConfig(
+  rowId: string,
+  projectionYears: string[],
+  customersStartStr: string,
+  arpuStartStr: string,
+  customerUnitLabelStr: string,
+  customerShape: HistGrowthShapeV1,
+  customerGrowthStr: string,
+  customerYearStrs: Record<string, string>,
+  customerPhaseRows: PhaseDraftV1[],
+  arpuShape: HistGrowthShapeV1,
+  arpuGrowthStr: string,
+  arpuYearStrs: Record<string, string>,
+  arpuPhaseRows: PhaseDraftV1[],
+  arpuBasis: MonetizationPeriodBasisV1
+): { valid: boolean; config: RevenueForecastRowConfigV1 } {
+  const bad = (): RevenueForecastRowConfigV1 => ({
+    rowId,
+    forecastRole: "independent_driver",
+    forecastMethod: "customers_arpu",
+    forecastParameters: {
+      startingCustomers: 0,
+      startingArpu: 0,
+      arpuBasis: "annual",
+      customerGrowthPatternType: "constant",
+      customerRatePercent: 0,
+      arpuGrowthPatternType: "constant",
+      arpuRatePercent: 0,
+    },
+  });
+
+  const customersParsed = parseFloat(String(customersStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(customersParsed) || customersParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+  const arpuParsed = parseFloat(String(arpuStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(arpuParsed) || arpuParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+
+  const buildSide = (
+    side: "customer" | "arpu",
+    shape: HistGrowthShapeV1,
+    gStr: string,
+    yStrs: Record<string, string>,
+    phRows: PhaseDraftV1[]
+  ): { ok: boolean; params: Record<string, unknown> } => {
+    const prefix = side;
+    const g = parseFloat(String(gStr).replace(/,/g, "").trim());
+    const hasG = Number.isFinite(g);
+    if (shape === "phases") {
+      const phases = draftsToPhases(phRows);
+      const { ok } = validateGrowthPhases(phases, projectionYears);
+      if (!ok || projectionYears.length === 0) return { ok: false, params: {} };
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      const y0 = projectionYears[0]!;
+      const rp = expanded[y0] ?? phases[0]!.ratePercent;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "phases",
+          [`${prefix}GrowthPhases`]: phases,
+          [`${prefix}RatePercent`]: rp,
+        },
+      };
+    }
+    if (shape === "by_year") {
+      const ratesByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        const t = (yStrs[y] ?? "").replace(/,/g, "").trim();
+        const v = parseFloat(t);
+        if (!Number.isFinite(v)) return { ok: false, params: {} };
+        ratesByYear[y] = v;
+      }
+      if (projectionYears.length === 0) return { ok: false, params: {} };
+      const y0 = projectionYears[0]!;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "by_year",
+          [`${prefix}RatesByYear`]: ratesByYear,
+          [`${prefix}RatePercent`]: ratesByYear[y0] ?? 0,
+        },
+      };
+    }
+    if (!hasG) return { ok: false, params: {} };
+    return {
+      ok: true,
+      params: {
+        [`${prefix}GrowthPatternType`]: "constant",
+        [`${prefix}RatePercent`]: g,
+      },
+    };
+  };
+
+  const cSide = buildSide("customer", customerShape, customerGrowthStr, customerYearStrs, customerPhaseRows);
+  const aSide = buildSide("arpu", arpuShape, arpuGrowthStr, arpuYearStrs, arpuPhaseRows);
+  if (!cSide.ok || !aSide.ok) return { valid: false, config: bad() };
+
+  const labelTrim = String(customerUnitLabelStr).trim().slice(0, 64);
+
+  return {
+    valid: true,
+    config: {
+      rowId,
+      forecastRole: "independent_driver",
+      forecastMethod: "customers_arpu",
+      forecastParameters: {
+        startingCustomers: customersParsed,
+        startingArpu: arpuParsed,
+        arpuBasis,
+        ...(labelTrim ? { customerUnitLabel: labelTrim } : {}),
+        ...cSide.params,
+        ...aSide.params,
+      },
+    },
+  };
+}
+
+function buildLocationsRevenuePerLocationConfig(
+  rowId: string,
+  projectionYears: string[],
+  locationsStartStr: string,
+  revenuePerLocationStartStr: string,
+  locationUnitLabelStr: string,
+  locationShape: HistGrowthShapeV1,
+  locationGrowthStr: string,
+  locationYearStrs: Record<string, string>,
+  locationPhaseRows: PhaseDraftV1[],
+  revenuePerLocationShape: HistGrowthShapeV1,
+  revenuePerLocationGrowthStr: string,
+  revenuePerLocationYearStrs: Record<string, string>,
+  revenuePerLocationPhaseRows: PhaseDraftV1[],
+  revenuePerLocationBasis: MonetizationPeriodBasisV1
+): { valid: boolean; config: RevenueForecastRowConfigV1 } {
+  const bad = (): RevenueForecastRowConfigV1 => ({
+    rowId,
+    forecastRole: "independent_driver",
+    forecastMethod: "locations_revenue_per_location",
+    forecastParameters: {
+      startingLocations: 0,
+      startingRevenuePerLocation: 0,
+      revenuePerLocationBasis: "annual",
+      locationGrowthPatternType: "constant",
+      locationRatePercent: 0,
+      revenuePerLocationGrowthPatternType: "constant",
+      revenuePerLocationRatePercent: 0,
+    },
+  });
+
+  const locationsParsed = parseFloat(String(locationsStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(locationsParsed) || locationsParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+  const revenuePerLocationParsed = parseFloat(
+    String(revenuePerLocationStartStr).replace(/,/g, "").trim()
+  );
+  if (!Number.isFinite(revenuePerLocationParsed) || revenuePerLocationParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+
+  const buildSide = (
+    side: "location" | "revenuePerLocation",
+    shape: HistGrowthShapeV1,
+    gStr: string,
+    yStrs: Record<string, string>,
+    phRows: PhaseDraftV1[]
+  ): { ok: boolean; params: Record<string, unknown> } => {
+    const prefix = side;
+    const g = parseFloat(String(gStr).replace(/,/g, "").trim());
+    const hasG = Number.isFinite(g);
+    if (shape === "phases") {
+      const phases = draftsToPhases(phRows);
+      const { ok } = validateGrowthPhases(phases, projectionYears);
+      if (!ok || projectionYears.length === 0) return { ok: false, params: {} };
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      const y0 = projectionYears[0]!;
+      const rp = expanded[y0] ?? phases[0]!.ratePercent;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "phases",
+          [`${prefix}GrowthPhases`]: phases,
+          [`${prefix}RatePercent`]: rp,
+        },
+      };
+    }
+    if (shape === "by_year") {
+      const ratesByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        const t = (yStrs[y] ?? "").replace(/,/g, "").trim();
+        const v = parseFloat(t);
+        if (!Number.isFinite(v)) return { ok: false, params: {} };
+        ratesByYear[y] = v;
+      }
+      if (projectionYears.length === 0) return { ok: false, params: {} };
+      const y0 = projectionYears[0]!;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "by_year",
+          [`${prefix}RatesByYear`]: ratesByYear,
+          [`${prefix}RatePercent`]: ratesByYear[y0] ?? 0,
+        },
+      };
+    }
+    if (!hasG) return { ok: false, params: {} };
+    return {
+      ok: true,
+      params: {
+        [`${prefix}GrowthPatternType`]: "constant",
+        [`${prefix}RatePercent`]: g,
+      },
+    };
+  };
+
+  const lSide = buildSide(
+    "location",
+    locationShape,
+    locationGrowthStr,
+    locationYearStrs,
+    locationPhaseRows
+  );
+  const rplSide = buildSide(
+    "revenuePerLocation",
+    revenuePerLocationShape,
+    revenuePerLocationGrowthStr,
+    revenuePerLocationYearStrs,
+    revenuePerLocationPhaseRows
+  );
+  if (!lSide.ok || !rplSide.ok) return { valid: false, config: bad() };
+
+  const labelTrim = String(locationUnitLabelStr).trim().slice(0, 64);
+  return {
+    valid: true,
+    config: {
+      rowId,
+      forecastRole: "independent_driver",
+      forecastMethod: "locations_revenue_per_location",
+      forecastParameters: {
+        startingLocations: locationsParsed,
+        startingRevenuePerLocation: revenuePerLocationParsed,
+        revenuePerLocationBasis,
+        ...(labelTrim ? { locationUnitLabel: labelTrim } : {}),
+        ...lSide.params,
+        ...rplSide.params,
+      },
+    },
+  };
+}
+
+function buildCapacityUtilizationYieldConfig(
+  rowId: string,
+  projectionYears: string[],
+  capacityStartStr: string,
+  capacityUnitLabelStr: string,
+  capacityShape: HistGrowthShapeV1,
+  capacityGrowthStr: string,
+  capacityYearStrs: Record<string, string>,
+  capacityPhaseRows: PhaseDraftV1[],
+  utilizationStartStr: string,
+  utilShape: UtilizationPathShapeV1,
+  utilYearStrs: Record<string, string>,
+  utilPhaseRows: PhaseDraftV1[],
+  yieldStartStr: string,
+  yieldShape: HistGrowthShapeV1,
+  yieldGrowthStr: string,
+  yieldYearStrs: Record<string, string>,
+  yieldPhaseRows: PhaseDraftV1[],
+  yieldBasis: MonetizationPeriodBasisV1
+): { valid: boolean; config: RevenueForecastRowConfigV1 } {
+  const bad = (): RevenueForecastRowConfigV1 => ({
+    rowId,
+    forecastRole: "independent_driver",
+    forecastMethod: "capacity_utilization_yield",
+    forecastParameters: {
+      startingCapacity: 0,
+      startingUtilizationPct: 0,
+      startingYield: 0,
+      yieldBasis: "annual",
+      capacityGrowthPatternType: "constant",
+      capacityRatePercent: 0,
+      utilizationPatternType: "constant",
+      utilizationPct: 0,
+      yieldGrowthPatternType: "constant",
+      yieldRatePercent: 0,
+    },
+  });
+
+  const capParsed = parseFloat(String(capacityStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(capParsed) || capParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+  const utilParsed = parseFloat(String(utilizationStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(utilParsed) || utilParsed < 0 || utilParsed > 100) {
+    return { valid: false, config: bad() };
+  }
+  const yieldParsed = parseFloat(String(yieldStartStr).replace(/,/g, "").trim());
+  if (!Number.isFinite(yieldParsed) || yieldParsed <= 0) {
+    return { valid: false, config: bad() };
+  }
+
+  const buildGrowthSide = (
+    side: "capacity" | "yield",
+    shape: HistGrowthShapeV1,
+    gStr: string,
+    yStrs: Record<string, string>,
+    phRows: PhaseDraftV1[]
+  ): { ok: boolean; params: Record<string, unknown> } => {
+    const prefix = side;
+    const g = parseFloat(String(gStr).replace(/,/g, "").trim());
+    const hasG = Number.isFinite(g);
+    if (shape === "phases") {
+      const phases = draftsToPhases(phRows);
+      const { ok } = validateGrowthPhases(phases, projectionYears);
+      if (!ok || projectionYears.length === 0) return { ok: false, params: {} };
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      const y0 = projectionYears[0]!;
+      const rp = expanded[y0] ?? phases[0]!.ratePercent;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "phases",
+          [`${prefix}GrowthPhases`]: phases,
+          [`${prefix}RatePercent`]: rp,
+        },
+      };
+    }
+    if (shape === "by_year") {
+      const ratesByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        const t = (yStrs[y] ?? "").replace(/,/g, "").trim();
+        const v = parseFloat(t);
+        if (!Number.isFinite(v)) return { ok: false, params: {} };
+        ratesByYear[y] = v;
+      }
+      if (projectionYears.length === 0) return { ok: false, params: {} };
+      const y0 = projectionYears[0]!;
+      return {
+        ok: true,
+        params: {
+          [`${prefix}GrowthPatternType`]: "by_year",
+          [`${prefix}RatesByYear`]: ratesByYear,
+          [`${prefix}RatePercent`]: ratesByYear[y0] ?? 0,
+        },
+      };
+    }
+    if (!hasG) return { ok: false, params: {} };
+    return {
+      ok: true,
+      params: {
+        [`${prefix}GrowthPatternType`]: "constant",
+        [`${prefix}RatePercent`]: g,
+      },
+    };
+  };
+
+  const buildUtilParams = (): { ok: boolean; params: Record<string, unknown> } => {
+    if (utilShape === "phases") {
+      const phases: UtilizationPhaseV1[] = utilPhaseRows.map((d) => ({
+        startYear: d.startYear,
+        endYear: d.endYear,
+        utilizationPct: parseFloat(String(d.rateStr).replace(/,/g, "").trim()),
+      }));
+      const { ok } = validateUtilizationPhases(phases, projectionYears);
+      if (!ok || projectionYears.length === 0) return { ok: false, params: {} };
+      const expanded = expandUtilizationPhasesToLevelsByYear(phases, projectionYears);
+      const y0 = projectionYears[0]!;
+      const anchor = expanded[y0] ?? phases[0]!.utilizationPct;
+      return {
+        ok: true,
+        params: {
+          utilizationPatternType: "phases",
+          utilizationPhases: phases,
+          utilizationPct: anchor,
+        },
+      };
+    }
+    if (utilShape === "by_year") {
+      const utilizationPctsByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        const t = (utilYearStrs[y] ?? "").replace(/,/g, "").trim();
+        const v = parseFloat(t);
+        if (!Number.isFinite(v) || v < 0 || v > 100) return { ok: false, params: {} };
+        utilizationPctsByYear[y] = v;
+      }
+      if (projectionYears.length === 0) return { ok: false, params: {} };
+      const y0 = projectionYears[0]!;
+      return {
+        ok: true,
+        params: {
+          utilizationPatternType: "by_year",
+          utilizationPctsByYear,
+          utilizationPct: utilizationPctsByYear[y0] ?? utilParsed,
+        },
+      };
+    }
+    return {
+      ok: true,
+      params: {
+        utilizationPatternType: "constant",
+        utilizationPct: utilParsed,
+      },
+    };
+  };
+
+  const capSide = buildGrowthSide(
+    "capacity",
+    capacityShape,
+    capacityGrowthStr,
+    capacityYearStrs,
+    capacityPhaseRows
+  );
+  const ySide = buildGrowthSide("yield", yieldShape, yieldGrowthStr, yieldYearStrs, yieldPhaseRows);
+  const uSide = buildUtilParams();
+  if (!capSide.ok || !ySide.ok || !uSide.ok) return { valid: false, config: bad() };
+
+  const labelTrim = String(capacityUnitLabelStr).trim().slice(0, 64);
+
+  return {
+    valid: true,
+    config: {
+      rowId,
+      forecastRole: "independent_driver",
+      forecastMethod: "capacity_utilization_yield",
+      forecastParameters: {
+        startingCapacity: capParsed,
+        startingUtilizationPct: utilParsed,
+        startingYield: yieldParsed,
+        yieldBasis,
+        ...(labelTrim ? { capacityUnitLabel: labelTrim } : {}),
+        ...capSide.params,
+        ...uSide.params,
+        ...ySide.params,
+      },
+    },
+  };
+}
+
 function placeholderConfig(
   rowId: string,
   sub: DirectForecastSubModeV1,
@@ -670,8 +1300,22 @@ function GrowthPhaseEditor(props: {
   setPhaseRows: (fn: (prev: PhaseDraftV1[]) => PhaseDraftV1[]) => void;
   projectionYears: string[];
   inp: string;
+  /** Header for the numeric column (default: growth %). */
+  rateColumnLabel?: string;
+  /** Shown after adding a phase. */
+  afterAddHint?: string;
+  /** Tooltip for “fill remaining” action. */
+  fillRemainingTitle?: string;
 }) {
-  const { phaseRows, setPhaseRows, projectionYears, inp } = props;
+  const {
+    phaseRows,
+    setPhaseRows,
+    projectionYears,
+    inp,
+    rateColumnLabel = "Growth %",
+    afterAddHint = "New phase added — review years and growth % if needed.",
+    fillRemainingTitle = "Fills any missing forecast years using the last growth rate.",
+  } = props;
   const yearOpts = projectionYears;
   const [highlightedPhaseId, setHighlightedPhaseId] = useState<string | null>(null);
   const [fillSuccess, setFillSuccess] = useState(false);
@@ -771,7 +1415,7 @@ function GrowthPhaseEditor(props: {
           <span className="text-[10px] text-slate-500 uppercase tracking-wide font-medium">From year</span>
           <span className="text-[10px] text-slate-500 uppercase tracking-wide font-medium">To year</span>
           <span className="text-[10px] text-slate-500 uppercase tracking-wide font-medium text-right pr-0.5">
-            Growth %
+            {rateColumnLabel}
           </span>
           <span className="text-[10px] text-slate-500 uppercase tracking-wide text-right font-medium pr-0.5">
             Action
@@ -862,7 +1506,7 @@ function GrowthPhaseEditor(props: {
           className="text-[11px] text-emerald-400/95 pl-0.5"
           role="status"
         >
-          New phase added — review years and growth % if needed.
+          {afterAddHint}
         </p>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
@@ -878,7 +1522,7 @@ function GrowthPhaseEditor(props: {
           type="button"
           disabled={allYearsCovered || !finalYear}
           onClick={fillRemainingWithLastRate}
-          title="Fills any missing forecast years using the last growth rate."
+          title={fillRemainingTitle}
           className="rounded border border-slate-600 bg-slate-800 text-slate-300 text-[10px] px-2 py-1.5 disabled:opacity-35"
         >
           Fill remaining years with last rate
@@ -893,6 +1537,30 @@ function GrowthPhaseEditor(props: {
 
 /** Draft check for one growth side (mirrors buildPriceVolumeConfig buildSide). */
 function isPriceVolumeSideDraftOk(
+  shape: HistGrowthShapeV1,
+  gStr: string,
+  yStrs: Record<string, string>,
+  phRows: PhaseDraftV1[],
+  projectionYears: string[]
+): boolean {
+  const g = parseFloat(String(gStr).replace(/,/g, "").trim());
+  const hasG = Number.isFinite(g);
+  if (shape === "phases") {
+    const phases = draftsToPhases(phRows);
+    const { ok } = validateGrowthPhases(phases, projectionYears);
+    return ok && projectionYears.length > 0;
+  }
+  if (shape === "by_year") {
+    if (projectionYears.length === 0) return false;
+    return projectionYears.every((y) => {
+      const t = (yStrs[y] ?? "").replace(/,/g, "").trim();
+      return Number.isFinite(parseFloat(t));
+    });
+  }
+  return hasG;
+}
+
+function isCustomersArpuSideDraftOk(
   shape: HistGrowthShapeV1,
   gStr: string,
   yStrs: Record<string, string>,
@@ -951,6 +1619,221 @@ function getPriceVolumePanelStatus(
   return "Ready";
 }
 
+function getContractsAcvPanelStatus(
+  contractsStartStr: string,
+  acvStartStr: string,
+  contractShape: HistGrowthShapeV1,
+  contractGrowthStr: string,
+  contractYearStrs: Record<string, string>,
+  contractPhaseRows: PhaseDraftV1[],
+  acvShape: HistGrowthShapeV1,
+  acvGrowthStr: string,
+  acvYearStrs: Record<string, string>,
+  acvPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): string {
+  const conTrim = String(contractsStartStr).trim();
+  const cc = parseFloat(conTrim.replace(/,/g, ""));
+  if (!conTrim) return "Enter a starting contract count.";
+  if (!Number.isFinite(cc)) return "Enter a starting contract count.";
+  if (cc <= 0) return "Starting contract count must be greater than 0.";
+
+  const acvTrim = String(acvStartStr).trim();
+  const aa = parseFloat(acvTrim.replace(/,/g, ""));
+  if (!acvTrim) return "Enter a starting ACV.";
+  if (!Number.isFinite(aa)) return "Enter a starting ACV.";
+  if (aa <= 0) return "Starting ACV must be greater than 0.";
+
+  if (!isPriceVolumeSideDraftOk(contractShape, contractGrowthStr, contractYearStrs, contractPhaseRows, projectionYears)) {
+    return "Complete the contract growth setup.";
+  }
+  if (!isPriceVolumeSideDraftOk(acvShape, acvGrowthStr, acvYearStrs, acvPhaseRows, projectionYears)) {
+    return "Complete the ACV growth setup.";
+  }
+  return "Ready";
+}
+
+function getCustomersArpuPanelStatus(
+  customersStartStr: string,
+  arpuStartStr: string,
+  customerShape: HistGrowthShapeV1,
+  customerGrowthStr: string,
+  customerYearStrs: Record<string, string>,
+  customerPhaseRows: PhaseDraftV1[],
+  arpuShape: HistGrowthShapeV1,
+  arpuGrowthStr: string,
+  arpuYearStrs: Record<string, string>,
+  arpuPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): string {
+  const customersTrim = String(customersStartStr).trim();
+  const cc = parseFloat(customersTrim.replace(/,/g, ""));
+  if (!customersTrim) return "Enter a starting customer base.";
+  if (!Number.isFinite(cc)) return "Enter a starting customer base.";
+  if (cc <= 0) return "Starting customer base must be greater than 0.";
+
+  const arpuTrim = String(arpuStartStr).trim();
+  const aa = parseFloat(arpuTrim.replace(/,/g, ""));
+  if (!arpuTrim) return "Enter a starting ARPU.";
+  if (!Number.isFinite(aa)) return "Enter a starting ARPU.";
+  if (aa <= 0) return "Starting ARPU must be greater than 0.";
+
+  if (
+    !isCustomersArpuSideDraftOk(
+      customerShape,
+      customerGrowthStr,
+      customerYearStrs,
+      customerPhaseRows,
+      projectionYears
+    )
+  ) {
+    return "Complete the customer growth setup.";
+  }
+  if (!isCustomersArpuSideDraftOk(arpuShape, arpuGrowthStr, arpuYearStrs, arpuPhaseRows, projectionYears)) {
+    return "Complete the ARPU growth setup.";
+  }
+  return "Ready";
+}
+
+function getLocationsRevenuePerLocationPanelStatus(
+  locationsStartStr: string,
+  revenuePerLocationStartStr: string,
+  locationShape: HistGrowthShapeV1,
+  locationGrowthStr: string,
+  locationYearStrs: Record<string, string>,
+  locationPhaseRows: PhaseDraftV1[],
+  revenuePerLocationShape: HistGrowthShapeV1,
+  revenuePerLocationGrowthStr: string,
+  revenuePerLocationYearStrs: Record<string, string>,
+  revenuePerLocationPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): string {
+  const locationsTrim = String(locationsStartStr).trim();
+  const ll = parseFloat(locationsTrim.replace(/,/g, ""));
+  if (!locationsTrim) return "Enter a starting location count.";
+  if (!Number.isFinite(ll)) return "Enter a starting location count.";
+  if (ll <= 0) return "Starting location count must be greater than 0.";
+
+  const rplTrim = String(revenuePerLocationStartStr).trim();
+  const rr = parseFloat(rplTrim.replace(/,/g, ""));
+  if (!rplTrim) return "Enter a starting revenue per location.";
+  if (!Number.isFinite(rr)) return "Enter a starting revenue per location.";
+  if (rr <= 0) return "Starting revenue per location must be greater than 0.";
+
+  if (
+    !isCustomersArpuSideDraftOk(
+      locationShape,
+      locationGrowthStr,
+      locationYearStrs,
+      locationPhaseRows,
+      projectionYears
+    )
+  ) {
+    return "Complete the location growth setup.";
+  }
+  if (
+    !isCustomersArpuSideDraftOk(
+      revenuePerLocationShape,
+      revenuePerLocationGrowthStr,
+      revenuePerLocationYearStrs,
+      revenuePerLocationPhaseRows,
+      projectionYears
+    )
+  ) {
+    return "Complete the revenue per location growth setup.";
+  }
+  return "Ready";
+}
+
+function isUtilizationPathDraftOk(
+  utilShape: UtilizationPathShapeV1,
+  utilYearStrs: Record<string, string>,
+  utilPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): boolean {
+  if (utilShape === "phases") {
+    const phases: UtilizationPhaseV1[] = utilPhaseRows.map((d) => ({
+      startYear: d.startYear,
+      endYear: d.endYear,
+      utilizationPct: parseFloat(String(d.rateStr).replace(/,/g, "").trim()),
+    }));
+    const { ok } = validateUtilizationPhases(phases, projectionYears);
+    return ok && projectionYears.length > 0;
+  }
+  if (utilShape === "by_year") {
+    if (projectionYears.length === 0) return false;
+    return projectionYears.every((y) => {
+      const t = (utilYearStrs[y] ?? "").replace(/,/g, "").trim();
+      const v = parseFloat(t);
+      return Number.isFinite(v) && v >= 0 && v <= 100;
+    });
+  }
+  return true;
+}
+
+function getCapacityUtilizationYieldPanelStatus(
+  capacityStartStr: string,
+  utilizationStartStr: string,
+  yieldStartStr: string,
+  capacityShape: HistGrowthShapeV1,
+  capacityGrowthStr: string,
+  capacityYearStrs: Record<string, string>,
+  capacityPhaseRows: PhaseDraftV1[],
+  utilShape: UtilizationPathShapeV1,
+  utilYearStrs: Record<string, string>,
+  utilPhaseRows: PhaseDraftV1[],
+  yieldShape: HistGrowthShapeV1,
+  yieldGrowthStr: string,
+  yieldYearStrs: Record<string, string>,
+  yieldPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): string {
+  const capTrim = String(capacityStartStr).trim();
+  const cc = parseFloat(capTrim.replace(/,/g, ""));
+  if (!capTrim) return "Enter a starting capacity.";
+  if (!Number.isFinite(cc)) return "Enter a starting capacity.";
+  if (cc <= 0) return "Starting capacity must be greater than 0.";
+
+  const utilTrim = String(utilizationStartStr).trim();
+  const uu = parseFloat(utilTrim.replace(/,/g, ""));
+  if (!utilTrim) return "Enter a starting utilization.";
+  if (!Number.isFinite(uu)) return "Enter a starting utilization.";
+  if (uu < 0 || uu > 100) return "Starting utilization must be between 0% and 100%.";
+
+  const yTrim = String(yieldStartStr).trim();
+  const yy = parseFloat(yTrim.replace(/,/g, ""));
+  if (!yTrim) return "Enter a starting yield.";
+  if (!Number.isFinite(yy)) return "Enter a starting yield.";
+  if (yy <= 0) return "Starting yield must be greater than 0.";
+
+  if (
+    !isCustomersArpuSideDraftOk(
+      capacityShape,
+      capacityGrowthStr,
+      capacityYearStrs,
+      capacityPhaseRows,
+      projectionYears
+    )
+  ) {
+    return "Complete the capacity growth setup.";
+  }
+  if (!isUtilizationPathDraftOk(utilShape, utilYearStrs, utilPhaseRows, projectionYears)) {
+    return "Complete the utilization setup.";
+  }
+  if (
+    !isCustomersArpuSideDraftOk(
+      yieldShape,
+      yieldGrowthStr,
+      yieldYearStrs,
+      yieldPhaseRows,
+      projectionYears
+    )
+  ) {
+    return "Complete the yield growth setup.";
+  }
+  return "Ready";
+}
+
 function validationStatus(
   sub: DirectForecastSubModeV1,
   valid: boolean,
@@ -1005,6 +1888,7 @@ export function RevenueForecastV1DirectForecastBlock(props: {
   } = props;
   const currencySymbol = getCurrencySymbol(currencyCode);
   const firstRef = useRef<HTMLInputElement>(null);
+  const lastAppliedFocusNonceRef = useRef(0);
 
   const [sub, setSub] = useState<DirectForecastSubModeV1>(() =>
     cfgToStrings(cfg, rowId, projectionYears, allowGrowthFromHistorical).sub
@@ -1038,9 +1922,89 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     defaultFullRangePhase(projectionYears, "")
   );
   const [volUnitLabelStr, setVolUnitLabelStr] = useState("");
+  const [customersStartStr, setCustomersStartStr] = useState("");
+  const [arpuStartStr, setArpuStartStr] = useState("");
+  const [customerShape, setCustomerShape] = useState<HistGrowthShapeV1>("constant");
+  const [customerGrowthStr, setCustomerGrowthStr] = useState("");
+  const [customerYearStrs, setCustomerYearStrs] = useState<Record<string, string>>({});
+  const [customerPhaseRows, setCustomerPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [arpuShape, setArpuShape] = useState<HistGrowthShapeV1>("constant");
+  const [arpuGrowthStr, setArpuGrowthStr] = useState("");
+  const [arpuYearStrs, setArpuYearStrs] = useState<Record<string, string>>({});
+  const [arpuPhaseRows, setArpuPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [customerUnitLabelStr, setCustomerUnitLabelStr] = useState("");
+  const [locationsStartStr, setLocationsStartStr] = useState("");
+  const [revenuePerLocationStartStr, setRevenuePerLocationStartStr] = useState("");
+  const [locationShape, setLocationShape] = useState<HistGrowthShapeV1>("constant");
+  const [locationGrowthStr, setLocationGrowthStr] = useState("");
+  const [locationYearStrs, setLocationYearStrs] = useState<Record<string, string>>({});
+  const [locationPhaseRows, setLocationPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [revenuePerLocationShape, setRevenuePerLocationShape] = useState<HistGrowthShapeV1>("constant");
+  const [revenuePerLocationGrowthStr, setRevenuePerLocationGrowthStr] = useState("");
+  const [revenuePerLocationYearStrs, setRevenuePerLocationYearStrs] = useState<Record<string, string>>({});
+  const [revenuePerLocationPhaseRows, setRevenuePerLocationPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [locationUnitLabelStr, setLocationUnitLabelStr] = useState("");
+  const [arpuBasis, setArpuBasis] = useState<MonetizationPeriodBasisV1>("annual");
+  const [revenuePerLocationBasis, setRevenuePerLocationBasis] =
+    useState<MonetizationPeriodBasisV1>("annual");
+
+  const [capacityStartStr, setCapacityStartStr] = useState("");
+  const [capacityUnitLabelStr, setCapacityUnitLabelStr] = useState("");
+  const [capacityShape, setCapacityShape] = useState<HistGrowthShapeV1>("constant");
+  const [capacityGrowthStr, setCapacityGrowthStr] = useState("");
+  const [capacityYearStrs, setCapacityYearStrs] = useState<Record<string, string>>({});
+  const [capacityPhaseRows, setCapacityPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [utilizationStartStr, setUtilizationStartStr] = useState("");
+  const [utilShape, setUtilShape] = useState<UtilizationPathShapeV1>("constant");
+  const [utilYearStrs, setUtilYearStrs] = useState<Record<string, string>>({});
+  const [utilPhaseRows, setUtilPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [yieldStartStr, setYieldStartStr] = useState("");
+  const [yieldShape, setYieldShape] = useState<HistGrowthShapeV1>("constant");
+  const [yieldGrowthStr, setYieldGrowthStr] = useState("");
+  const [yieldYearStrs, setYieldYearStrs] = useState<Record<string, string>>({});
+  const [yieldPhaseRows, setYieldPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [yieldBasis, setYieldBasis] = useState<MonetizationPeriodBasisV1>("annual");
+
+  const [contractsStartStr, setContractsStartStr] = useState("");
+  const [contractUnitLabelStr, setContractUnitLabelStr] = useState("");
+  const [contractShape, setContractShape] = useState<HistGrowthShapeV1>("constant");
+  const [contractGrowthStr, setContractGrowthStr] = useState("");
+  const [contractYearStrs, setContractYearStrs] = useState<Record<string, string>>({});
+  const [contractPhaseRows, setContractPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [acvStartStr, setAcvStartStr] = useState("");
+  const [acvShape, setAcvShape] = useState<HistGrowthShapeV1>("constant");
+  const [acvGrowthStr, setAcvGrowthStr] = useState("");
+  const [acvYearStrs, setAcvYearStrs] = useState<Record<string, string>>({});
+  const [acvPhaseRows, setAcvPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
 
   const syncFromCfg = useCallback(
     (forceReset: boolean) => {
+      // Avoid overwriting local P×V / CA / growth drafts when the store briefly has no row config
+      // (e.g. re-render before Zustand hydrates) — that used to reset `sub` and clear volume via the else branch.
+      if (
+        !forceReset &&
+        (!cfg || cfg.forecastRole !== "independent_driver" || !cfg.forecastMethod)
+      ) {
+        return;
+      }
       const s = cfgToStrings(cfg, rowId, projectionYears, allowGrowthFromHistorical);
       setSub(s.sub);
       setGrowthStr(s.growthStr);
@@ -1071,7 +2035,7 @@ export function RevenueForecastV1DirectForecastBlock(props: {
         const sp = Number(p.startingPricePerUnit);
         setVolStartStr(sv > 0 && Number.isFinite(sv) ? fmtNumericDisplay(sv) : "");
         setPriceStartStr(sp > 0 && Number.isFinite(sp) ? perUnitPriceStoredToInputString(sp) : "");
-        const vr = readPriceVolumeSideFromCfg(cfg, projectionYears, "volume", "");
+        const vr = readTwoDriverSideFromCfg(cfg, projectionYears, "volume", "");
         setVolShape(vr.shape);
         setVolGrowthStr(vr.rateStr);
         setVolPhaseRows(vr.phaseRows);
@@ -1080,7 +2044,7 @@ export function RevenueForecastV1DirectForecastBlock(props: {
             ? vr.yearStrs
             : Object.fromEntries(projectionYears.map((y) => [y, vr.yearStrs[y] ?? ""]))
         );
-        const pr = readPriceVolumeSideFromCfg(cfg, projectionYears, "price", "");
+        const pr = readTwoDriverSideFromCfg(cfg, projectionYears, "price", "");
         setPriceShape(pr.shape);
         setPriceGrowthStr(pr.rateStr);
         setPricePhaseRows(pr.phaseRows);
@@ -1090,6 +2054,123 @@ export function RevenueForecastV1DirectForecastBlock(props: {
             : Object.fromEntries(projectionYears.map((y) => [y, pr.yearStrs[y] ?? ""]))
         );
         setVolUnitLabelStr(typeof p.volumeUnitLabel === "string" ? p.volumeUnitLabel : "");
+      } else if (cfg?.forecastMethod === "customers_arpu") {
+        const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+        const sc = Number(p.startingCustomers);
+        const sa = Number(p.startingArpu);
+        setCustomersStartStr(sc > 0 && Number.isFinite(sc) ? fmtNumericDisplay(sc) : "");
+        setArpuStartStr(sa > 0 && Number.isFinite(sa) ? perUnitPriceStoredToInputString(sa) : "");
+        const cs = readTwoDriverSideFromCfg(cfg, projectionYears, "customer", "");
+        setCustomerShape(cs.shape);
+        setCustomerGrowthStr(cs.rateStr);
+        setCustomerPhaseRows(cs.phaseRows);
+        setCustomerYearStrs(
+          cs.shape === "by_year"
+            ? cs.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, cs.yearStrs[y] ?? ""]))
+        );
+        const as = readTwoDriverSideFromCfg(cfg, projectionYears, "arpu", "");
+        setArpuShape(as.shape);
+        setArpuGrowthStr(as.rateStr);
+        setArpuPhaseRows(as.phaseRows);
+        setArpuYearStrs(
+          as.shape === "by_year"
+            ? as.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, as.yearStrs[y] ?? ""]))
+        );
+        setCustomerUnitLabelStr(typeof p.customerUnitLabel === "string" ? p.customerUnitLabel : "");
+        setArpuBasis(p.arpuBasis === "monthly" ? "monthly" : "annual");
+      } else if (cfg?.forecastMethod === "locations_revenue_per_location") {
+        const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+        const sl = Number(p.startingLocations);
+        const sr = Number(p.startingRevenuePerLocation);
+        setLocationsStartStr(sl > 0 && Number.isFinite(sl) ? fmtNumericDisplay(sl) : "");
+        setRevenuePerLocationStartStr(
+          sr > 0 && Number.isFinite(sr) ? perUnitPriceStoredToInputString(sr) : ""
+        );
+        const ls = readTwoDriverSideFromCfg(cfg, projectionYears, "location", "");
+        setLocationShape(ls.shape);
+        setLocationGrowthStr(ls.rateStr);
+        setLocationPhaseRows(ls.phaseRows);
+        setLocationYearStrs(
+          ls.shape === "by_year"
+            ? ls.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, ls.yearStrs[y] ?? ""]))
+        );
+        const rs = readTwoDriverSideFromCfg(cfg, projectionYears, "revenuePerLocation", "");
+        setRevenuePerLocationShape(rs.shape);
+        setRevenuePerLocationGrowthStr(rs.rateStr);
+        setRevenuePerLocationPhaseRows(rs.phaseRows);
+        setRevenuePerLocationYearStrs(
+          rs.shape === "by_year"
+            ? rs.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, rs.yearStrs[y] ?? ""]))
+        );
+        setLocationUnitLabelStr(typeof p.locationUnitLabel === "string" ? p.locationUnitLabel : "");
+        setRevenuePerLocationBasis(p.revenuePerLocationBasis === "monthly" ? "monthly" : "annual");
+      } else if (cfg?.forecastMethod === "capacity_utilization_yield") {
+        const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+        const sc = Number(p.startingCapacity);
+        const su = Number(p.startingUtilizationPct);
+        const sy = Number(p.startingYield);
+        setCapacityStartStr(sc > 0 && Number.isFinite(sc) ? fmtNumericDisplay(sc) : "");
+        setUtilizationStartStr(
+          su >= 0 && su <= 100 && Number.isFinite(su) ? fmtNumericDisplay(su) : ""
+        );
+        setYieldStartStr(sy > 0 && Number.isFinite(sy) ? perUnitPriceStoredToInputString(sy) : "");
+        const caps = readTwoDriverSideFromCfg(cfg, projectionYears, "capacity", "");
+        setCapacityShape(caps.shape);
+        setCapacityGrowthStr(caps.rateStr);
+        setCapacityPhaseRows(caps.phaseRows);
+        setCapacityYearStrs(
+          caps.shape === "by_year"
+            ? caps.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, caps.yearStrs[y] ?? ""]))
+        );
+        const up = readUtilizationPathFromCfg(cfg, projectionYears);
+        setUtilShape(up.shape);
+        setUtilYearStrs(
+          up.shape === "by_year"
+            ? up.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, up.yearStrs[y] ?? ""]))
+        );
+        setUtilPhaseRows(up.phaseRows);
+        const ys = readTwoDriverSideFromCfg(cfg, projectionYears, "yield", "");
+        setYieldShape(ys.shape);
+        setYieldGrowthStr(ys.rateStr);
+        setYieldPhaseRows(ys.phaseRows);
+        setYieldYearStrs(
+          ys.shape === "by_year"
+            ? ys.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, ys.yearStrs[y] ?? ""]))
+        );
+        setCapacityUnitLabelStr(typeof p.capacityUnitLabel === "string" ? p.capacityUnitLabel : "");
+        setYieldBasis(p.yieldBasis === "monthly" ? "monthly" : "annual");
+      } else if (cfg?.forecastMethod === "contracts_acv") {
+        const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+        const sct = Number(p.startingContracts);
+        const sac = Number(p.startingAcv);
+        setContractsStartStr(sct > 0 && Number.isFinite(sct) ? fmtNumericDisplay(sct) : "");
+        setAcvStartStr(sac > 0 && Number.isFinite(sac) ? perUnitPriceStoredToInputString(sac) : "");
+        const cr = readTwoDriverSideFromCfg(cfg, projectionYears, "contract", "");
+        setContractShape(cr.shape);
+        setContractGrowthStr(cr.rateStr);
+        setContractPhaseRows(cr.phaseRows);
+        setContractYearStrs(
+          cr.shape === "by_year"
+            ? cr.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, cr.yearStrs[y] ?? ""]))
+        );
+        const av = readTwoDriverSideFromCfg(cfg, projectionYears, "acv", "");
+        setAcvShape(av.shape);
+        setAcvGrowthStr(av.rateStr);
+        setAcvPhaseRows(av.phaseRows);
+        setAcvYearStrs(
+          av.shape === "by_year"
+            ? av.yearStrs
+            : Object.fromEntries(projectionYears.map((y) => [y, av.yearStrs[y] ?? ""]))
+        );
+        setContractUnitLabelStr(typeof p.contractUnitLabel === "string" ? p.contractUnitLabel : "");
       } else {
         const method = cfg?.forecastMethod as string | undefined;
         const shouldClearPv =
@@ -1110,6 +2191,89 @@ export function RevenueForecastV1DirectForecastBlock(props: {
           setPriceGrowthStr("");
           setPricePhaseRows(defaultFullRangePhase(projectionYears, ""));
           setPriceYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+        }
+        const shouldClearCa =
+          forceReset ||
+          (cfg != null &&
+            cfg.forecastRole === "independent_driver" &&
+            method != null &&
+            method !== "customers_arpu");
+        if (shouldClearCa) {
+          setCustomersStartStr("");
+          setArpuStartStr("");
+          setCustomerUnitLabelStr("");
+          setCustomerShape("constant");
+          setCustomerGrowthStr("");
+          setCustomerPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setCustomerYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setArpuShape("constant");
+          setArpuGrowthStr("");
+          setArpuPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setArpuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setArpuBasis("annual");
+        }
+        const shouldClearLrpl =
+          forceReset ||
+          (cfg != null &&
+            cfg.forecastRole === "independent_driver" &&
+            method != null &&
+            method !== "locations_revenue_per_location");
+        if (shouldClearLrpl) {
+          setLocationsStartStr("");
+          setRevenuePerLocationStartStr("");
+          setLocationUnitLabelStr("");
+          setLocationShape("constant");
+          setLocationGrowthStr("");
+          setLocationPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setLocationYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setRevenuePerLocationShape("constant");
+          setRevenuePerLocationGrowthStr("");
+          setRevenuePerLocationPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setRevenuePerLocationYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setRevenuePerLocationBasis("annual");
+        }
+        const shouldClearCuy =
+          forceReset ||
+          (cfg != null &&
+            cfg.forecastRole === "independent_driver" &&
+            method != null &&
+            method !== "capacity_utilization_yield");
+        if (shouldClearCuy) {
+          setCapacityStartStr("");
+          setCapacityUnitLabelStr("");
+          setCapacityShape("constant");
+          setCapacityGrowthStr("");
+          setCapacityPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setCapacityYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setUtilizationStartStr("");
+          setUtilShape("constant");
+          setUtilPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setUtilYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setYieldStartStr("");
+          setYieldShape("constant");
+          setYieldGrowthStr("");
+          setYieldPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setYieldYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setYieldBasis("annual");
+        }
+        const shouldClearCacv =
+          forceReset ||
+          (cfg != null &&
+            cfg.forecastRole === "independent_driver" &&
+            method != null &&
+            method !== "contracts_acv");
+        if (shouldClearCacv) {
+          setContractsStartStr("");
+          setContractUnitLabelStr("");
+          setContractShape("constant");
+          setContractGrowthStr("");
+          setContractPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setContractYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+          setAcvStartStr("");
+          setAcvShape("constant");
+          setAcvGrowthStr("");
+          setAcvPhaseRows(defaultFullRangePhase(projectionYears, ""));
+          setAcvYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
         }
       }
     },
@@ -1164,6 +2328,81 @@ export function RevenueForecastV1DirectForecastBlock(props: {
         pricePhaseRows
       );
     }
+    if (sub === "customers_arpu") {
+      return buildCustomersArpuConfig(
+        rowId,
+        projectionYears,
+        customersStartStr,
+        arpuStartStr,
+        customerUnitLabelStr,
+        customerShape,
+        customerGrowthStr,
+        customerYearStrs,
+        customerPhaseRows,
+        arpuShape,
+        arpuGrowthStr,
+        arpuYearStrs,
+        arpuPhaseRows,
+        arpuBasis
+      );
+    }
+    if (sub === "locations_revenue_per_location") {
+      return buildLocationsRevenuePerLocationConfig(
+        rowId,
+        projectionYears,
+        locationsStartStr,
+        revenuePerLocationStartStr,
+        locationUnitLabelStr,
+        locationShape,
+        locationGrowthStr,
+        locationYearStrs,
+        locationPhaseRows,
+        revenuePerLocationShape,
+        revenuePerLocationGrowthStr,
+        revenuePerLocationYearStrs,
+        revenuePerLocationPhaseRows,
+        revenuePerLocationBasis
+      );
+    }
+    if (sub === "capacity_utilization_yield") {
+      return buildCapacityUtilizationYieldConfig(
+        rowId,
+        projectionYears,
+        capacityStartStr,
+        capacityUnitLabelStr,
+        capacityShape,
+        capacityGrowthStr,
+        capacityYearStrs,
+        capacityPhaseRows,
+        utilizationStartStr,
+        utilShape,
+        utilYearStrs,
+        utilPhaseRows,
+        yieldStartStr,
+        yieldShape,
+        yieldGrowthStr,
+        yieldYearStrs,
+        yieldPhaseRows,
+        yieldBasis
+      );
+    }
+    if (sub === "contracts_acv") {
+      return buildContractsAcvConfig(
+        rowId,
+        projectionYears,
+        contractsStartStr,
+        acvStartStr,
+        contractUnitLabelStr,
+        contractShape,
+        contractGrowthStr,
+        contractYearStrs,
+        contractPhaseRows,
+        acvShape,
+        acvGrowthStr,
+        acvYearStrs,
+        acvPhaseRows
+      );
+    }
     return buildConfigFromForm(
       sub,
       growthStr,
@@ -1204,6 +2443,57 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     priceGrowthStr,
     priceYearStrs,
     pricePhaseRows,
+    customersStartStr,
+    arpuStartStr,
+    customerUnitLabelStr,
+    customerShape,
+    customerGrowthStr,
+    customerYearStrs,
+    customerPhaseRows,
+    arpuShape,
+    arpuGrowthStr,
+    arpuYearStrs,
+    arpuPhaseRows,
+    locationsStartStr,
+    revenuePerLocationStartStr,
+    locationUnitLabelStr,
+    locationShape,
+    locationGrowthStr,
+    locationYearStrs,
+    locationPhaseRows,
+    revenuePerLocationShape,
+    revenuePerLocationGrowthStr,
+    revenuePerLocationYearStrs,
+    revenuePerLocationPhaseRows,
+    arpuBasis,
+    revenuePerLocationBasis,
+    capacityStartStr,
+    capacityUnitLabelStr,
+    capacityShape,
+    capacityGrowthStr,
+    capacityYearStrs,
+    capacityPhaseRows,
+    utilizationStartStr,
+    utilShape,
+    utilYearStrs,
+    utilPhaseRows,
+    yieldStartStr,
+    yieldShape,
+    yieldGrowthStr,
+    yieldYearStrs,
+    yieldPhaseRows,
+    yieldBasis,
+    contractsStartStr,
+    acvStartStr,
+    contractUnitLabelStr,
+    contractShape,
+    contractGrowthStr,
+    contractYearStrs,
+    contractPhaseRows,
+    acvShape,
+    acvGrowthStr,
+    acvYearStrs,
+    acvPhaseRows,
   ]);
 
   const phaseValidationMessage = useMemo(() => {
@@ -1225,6 +2515,58 @@ export function RevenueForecastV1DirectForecastBlock(props: {
         if (!ok) return "Complete the price growth setup";
       }
     }
+    if (sub === "customers_arpu") {
+      if (customerShape === "phases") {
+        const { ok } = validateGrowthPhases(draftsToPhases(customerPhaseRows), projectionYears);
+        if (!ok) return "Complete the customer growth setup";
+      }
+      if (arpuShape === "phases") {
+        const { ok } = validateGrowthPhases(draftsToPhases(arpuPhaseRows), projectionYears);
+        if (!ok) return "Complete the ARPU growth setup";
+      }
+    }
+    if (sub === "locations_revenue_per_location") {
+      if (locationShape === "phases") {
+        const { ok } = validateGrowthPhases(draftsToPhases(locationPhaseRows), projectionYears);
+        if (!ok) return "Complete the location growth setup";
+      }
+      if (revenuePerLocationShape === "phases") {
+        const { ok } = validateGrowthPhases(
+          draftsToPhases(revenuePerLocationPhaseRows),
+          projectionYears
+        );
+        if (!ok) return "Complete the revenue per location growth setup";
+      }
+    }
+    if (sub === "capacity_utilization_yield") {
+      if (capacityShape === "phases") {
+        const { ok } = validateGrowthPhases(draftsToPhases(capacityPhaseRows), projectionYears);
+        if (!ok) return "Complete the capacity growth setup";
+      }
+      if (utilShape === "phases") {
+        const phases: UtilizationPhaseV1[] = utilPhaseRows.map((d) => ({
+          startYear: d.startYear,
+          endYear: d.endYear,
+          utilizationPct: parseFloat(String(d.rateStr).replace(/,/g, "").trim()),
+        }));
+        const { ok } = validateUtilizationPhases(phases, projectionYears);
+        if (!ok) return "Complete the utilization setup";
+      }
+      if (yieldShape === "phases") {
+        const { ok } = validateGrowthPhases(draftsToPhases(yieldPhaseRows), projectionYears);
+        if (!ok) return "Complete the yield growth setup";
+      }
+    }
+    if (sub === "contracts_acv") {
+      if (contractShape === "phases") {
+        const { ok } = validateGrowthPhases(draftsToPhases(contractPhaseRows), projectionYears);
+        if (!ok) return "Complete the contract growth setup";
+      }
+      if (acvShape === "phases") {
+        const { ok } = validateGrowthPhases(draftsToPhases(acvPhaseRows), projectionYears);
+        if (!ok) return "Complete the ACV growth setup";
+      }
+    }
     return "";
   }, [
     sub,
@@ -1232,10 +2574,28 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     manualShape,
     volShape,
     priceShape,
+    customerShape,
+    arpuShape,
     histPhaseRows,
     manualPhaseRows,
     volPhaseRows,
     pricePhaseRows,
+    customerPhaseRows,
+    arpuPhaseRows,
+    locationShape,
+    revenuePerLocationShape,
+    locationPhaseRows,
+    revenuePerLocationPhaseRows,
+    capacityShape,
+    utilShape,
+    yieldShape,
+    capacityPhaseRows,
+    utilPhaseRows,
+    yieldPhaseRows,
+    contractShape,
+    acvShape,
+    contractPhaseRows,
+    acvPhaseRows,
     projectionYears,
   ]);
 
@@ -1279,13 +2639,145 @@ export function RevenueForecastV1DirectForecastBlock(props: {
       projectionYears,
     ]
   );
+  const customersArpuStatusLine = useMemo(
+    () =>
+      getCustomersArpuPanelStatus(
+        customersStartStr,
+        arpuStartStr,
+        customerShape,
+        customerGrowthStr,
+        customerYearStrs,
+        customerPhaseRows,
+        arpuShape,
+        arpuGrowthStr,
+        arpuYearStrs,
+        arpuPhaseRows,
+        projectionYears
+      ),
+    [
+      customersStartStr,
+      arpuStartStr,
+      customerShape,
+      customerGrowthStr,
+      customerYearStrs,
+      customerPhaseRows,
+      arpuShape,
+      arpuGrowthStr,
+      arpuYearStrs,
+      arpuPhaseRows,
+      projectionYears,
+    ]
+  );
+  const locationsRevenuePerLocationStatusLine = useMemo(
+    () =>
+      getLocationsRevenuePerLocationPanelStatus(
+        locationsStartStr,
+        revenuePerLocationStartStr,
+        locationShape,
+        locationGrowthStr,
+        locationYearStrs,
+        locationPhaseRows,
+        revenuePerLocationShape,
+        revenuePerLocationGrowthStr,
+        revenuePerLocationYearStrs,
+        revenuePerLocationPhaseRows,
+        projectionYears
+      ),
+    [
+      locationsStartStr,
+      revenuePerLocationStartStr,
+      locationShape,
+      locationGrowthStr,
+      locationYearStrs,
+      locationPhaseRows,
+      revenuePerLocationShape,
+      revenuePerLocationGrowthStr,
+      revenuePerLocationYearStrs,
+      revenuePerLocationPhaseRows,
+      projectionYears,
+    ]
+  );
+  const capacityUtilizationYieldStatusLine = useMemo(
+    () =>
+      getCapacityUtilizationYieldPanelStatus(
+        capacityStartStr,
+        utilizationStartStr,
+        yieldStartStr,
+        capacityShape,
+        capacityGrowthStr,
+        capacityYearStrs,
+        capacityPhaseRows,
+        utilShape,
+        utilYearStrs,
+        utilPhaseRows,
+        yieldShape,
+        yieldGrowthStr,
+        yieldYearStrs,
+        yieldPhaseRows,
+        projectionYears
+      ),
+    [
+      capacityStartStr,
+      utilizationStartStr,
+      yieldStartStr,
+      capacityShape,
+      capacityGrowthStr,
+      capacityYearStrs,
+      capacityPhaseRows,
+      utilShape,
+      utilYearStrs,
+      utilPhaseRows,
+      yieldShape,
+      yieldGrowthStr,
+      yieldYearStrs,
+      yieldPhaseRows,
+      projectionYears,
+    ]
+  );
+  const contractsAcvStatusLine = useMemo(
+    () =>
+      getContractsAcvPanelStatus(
+        contractsStartStr,
+        acvStartStr,
+        contractShape,
+        contractGrowthStr,
+        contractYearStrs,
+        contractPhaseRows,
+        acvShape,
+        acvGrowthStr,
+        acvYearStrs,
+        acvPhaseRows,
+        projectionYears
+      ),
+    [
+      contractsStartStr,
+      acvStartStr,
+      contractShape,
+      contractGrowthStr,
+      contractYearStrs,
+      contractPhaseRows,
+      acvShape,
+      acvGrowthStr,
+      acvYearStrs,
+      acvPhaseRows,
+      projectionYears,
+    ]
+  );
   const statusLine =
     sub === "price_volume"
       ? phaseValidationMessage || priceVolumeStatusLine
-      : (sub === "growth_from_historical" && histShape === "phases") ||
-          (sub === "growth_from_manual_start" && manualShape === "phases")
-        ? phaseValidationMessage || (formValid ? "Ready" : "Incomplete")
-        : validationStatus(sub, formValid, ux, hasHistoric, growthStr, startStr);
+      : sub === "customers_arpu"
+        ? phaseValidationMessage || customersArpuStatusLine
+        : sub === "locations_revenue_per_location"
+          ? phaseValidationMessage || locationsRevenuePerLocationStatusLine
+          : sub === "capacity_utilization_yield"
+            ? phaseValidationMessage || capacityUtilizationYieldStatusLine
+            : sub === "contracts_acv"
+              ? phaseValidationMessage || contractsAcvStatusLine
+              : (sub === "growth_from_historical" && histShape === "phases") ||
+                  (sub === "growth_from_manual_start" && manualShape === "phases")
+                ? phaseValidationMessage || (formValid ? "Ready" : "Incomplete")
+                : validationStatus(sub, formValid, ux, hasHistoric, growthStr, startStr);
 
   const forecastComplete = isDirectForecastConfigComplete(
     cfg,
@@ -1301,7 +2793,17 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     (sub === "growth_from_manual_start" && manualShape === "phases" && !formValid) ||
     (sub === "price_volume" &&
       (volShape === "phases" || priceShape === "phases") &&
+      !formValid) ||
+    (sub === "customers_arpu" &&
+      (customerShape === "phases" || arpuShape === "phases") &&
       !formValid)
+    || (sub === "locations_revenue_per_location" &&
+      (locationShape === "phases" || revenuePerLocationShape === "phases") &&
+      !formValid) ||
+    (sub === "capacity_utilization_yield" &&
+      (capacityShape === "phases" || utilShape === "phases" || yieldShape === "phases") &&
+      !formValid) ||
+    (sub === "contracts_acv" && (contractShape === "phases" || acvShape === "phases") && !formValid)
   ) {
     rowStatus = "incomplete";
   } else if (forecastComplete && !unsaved) rowStatus = "ready";
@@ -1316,8 +2818,14 @@ export function RevenueForecastV1DirectForecastBlock(props: {
   }, [allowGrowthFromHistorical, sub]);
 
   useEffect(() => {
+    lastAppliedFocusNonceRef.current = 0;
+  }, [rowId]);
+
+  useEffect(() => {
     if (focusNonce <= 0) return;
-    const t = requestAnimationFrame(() => firstRef.current?.focus());
+    if (focusNonce === lastAppliedFocusNonceRef.current) return;
+    lastAppliedFocusNonceRef.current = focusNonce;
+    const t = requestAnimationFrame(() => firstRef.current?.focus({ preventScroll: true }));
     return () => cancelAnimationFrame(t);
   }, [focusNonce, rowId]);
 
@@ -1348,6 +2856,57 @@ export function RevenueForecastV1DirectForecastBlock(props: {
       setPricePhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
       setVolYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
       setPriceYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+    } else if (id === "customers_arpu") {
+      setCustomersStartStr((c) => c || "1");
+      setArpuStartStr((a) => a || flatRaw || startRaw || "1");
+      setArpuBasis("annual");
+      setCustomerShape("constant");
+      setArpuShape("constant");
+      setCustomerGrowthStr((s) => s || gRaw || "");
+      setArpuGrowthStr((s) => s || gRaw || "");
+      setCustomerPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setArpuPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setCustomerYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+      setArpuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+    } else if (id === "locations_revenue_per_location") {
+      setLocationsStartStr((l) => l || "1");
+      setRevenuePerLocationStartStr((r) => r || flatRaw || startRaw || "1");
+      setRevenuePerLocationBasis("annual");
+      setLocationShape("constant");
+      setRevenuePerLocationShape("constant");
+      setLocationGrowthStr((s) => s || gRaw || "");
+      setRevenuePerLocationGrowthStr((s) => s || gRaw || "");
+      setLocationPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setRevenuePerLocationPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setLocationYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+      setRevenuePerLocationYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+    } else if (id === "capacity_utilization_yield") {
+      setCapacityStartStr((c) => c || "1");
+      setUtilizationStartStr((u) => u || "80");
+      setYieldStartStr((y) => y || flatRaw || startRaw || "1");
+      setYieldBasis("annual");
+      setCapacityShape("constant");
+      setUtilShape("constant");
+      setYieldShape("constant");
+      setCapacityGrowthStr((s) => s || gRaw || "");
+      setYieldGrowthStr((s) => s || gRaw || "");
+      setCapacityPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setUtilPhaseRows(defaultFullRangePhase(projectionYears, ""));
+      setYieldPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setCapacityYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+      setUtilYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setYieldYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+    } else if (id === "contracts_acv") {
+      setContractsStartStr((c) => c || "1");
+      setAcvStartStr((a) => a || flatRaw || startRaw || "1");
+      setContractShape("constant");
+      setAcvShape("constant");
+      setContractGrowthStr((s) => s || gRaw || "");
+      setAcvGrowthStr((s) => s || gRaw || "");
+      setContractPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setAcvPhaseRows(defaultFullRangePhase(projectionYears, gRaw || ""));
+      setContractYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
+      setAcvYearStrs(Object.fromEntries(projectionYears.map((y) => [y, gRaw || ""])));
     } else if (id === "flat_value") {
       setFlatStr((f) => f || startRaw || flatRaw || "");
     } else {
@@ -1388,18 +2947,211 @@ export function RevenueForecastV1DirectForecastBlock(props: {
       setVolStartStr(sv > 0 && Number.isFinite(sv) ? fmtNumericDisplay(sv) : "");
       setPriceStartStr(sp > 0 && Number.isFinite(sp) ? perUnitPriceStoredToInputString(sp) : "");
       setVolUnitLabelStr(typeof p.volumeUnitLabel === "string" ? p.volumeUnitLabel : "");
-      const vr = readPriceVolumeSideFromCfg(config, projectionYears, "volume", "");
+      const vr = readTwoDriverSideFromCfg(config, projectionYears, "volume", "");
       setVolShape(vr.shape);
       setVolGrowthStr(vr.rateStr);
       setVolPhaseRows(vr.phaseRows);
       if (vr.shape === "by_year") setVolYearStrs(vr.yearStrs);
       else setVolYearStrs(Object.fromEntries(projectionYears.map((y) => [y, vr.yearStrs[y] ?? ""])));
-      const pr = readPriceVolumeSideFromCfg(config, projectionYears, "price", "");
+      const pr = readTwoDriverSideFromCfg(config, projectionYears, "price", "");
       setPriceShape(pr.shape);
       setPriceGrowthStr(pr.rateStr);
       setPricePhaseRows(pr.phaseRows);
       if (pr.shape === "by_year") setPriceYearStrs(pr.yearStrs);
       else setPriceYearStrs(Object.fromEntries(projectionYears.map((y) => [y, pr.yearStrs[y] ?? ""])));
+      return;
+    }
+    if (sub === "customers_arpu") {
+      const { config, valid } = buildCustomersArpuConfig(
+        rowId,
+        projectionYears,
+        customersStartStr,
+        arpuStartStr,
+        customerUnitLabelStr,
+        customerShape,
+        customerGrowthStr,
+        customerYearStrs,
+        customerPhaseRows,
+        arpuShape,
+        arpuGrowthStr,
+        arpuYearStrs,
+        arpuPhaseRows,
+        arpuBasis
+      );
+      if (!valid) return;
+      setRevenueForecastRowV1(rowId, {
+        forecastRole: "independent_driver",
+        forecastMethod: config.forecastMethod,
+        forecastParameters: config.forecastParameters,
+      });
+      const p = (config.forecastParameters ?? {}) as Record<string, unknown>;
+      const sc = Number(p.startingCustomers);
+      const sa = Number(p.startingArpu);
+      setCustomersStartStr(sc > 0 && Number.isFinite(sc) ? fmtNumericDisplay(sc) : "");
+      setArpuStartStr(sa > 0 && Number.isFinite(sa) ? perUnitPriceStoredToInputString(sa) : "");
+      setCustomerUnitLabelStr(typeof p.customerUnitLabel === "string" ? p.customerUnitLabel : "");
+      setArpuBasis(p.arpuBasis === "monthly" ? "monthly" : "annual");
+      const cs = readTwoDriverSideFromCfg(config, projectionYears, "customer", "");
+      setCustomerShape(cs.shape);
+      setCustomerGrowthStr(cs.rateStr);
+      setCustomerPhaseRows(cs.phaseRows);
+      if (cs.shape === "by_year") setCustomerYearStrs(cs.yearStrs);
+      else setCustomerYearStrs(Object.fromEntries(projectionYears.map((y) => [y, cs.yearStrs[y] ?? ""])));
+      const as = readTwoDriverSideFromCfg(config, projectionYears, "arpu", "");
+      setArpuShape(as.shape);
+      setArpuGrowthStr(as.rateStr);
+      setArpuPhaseRows(as.phaseRows);
+      if (as.shape === "by_year") setArpuYearStrs(as.yearStrs);
+      else setArpuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, as.yearStrs[y] ?? ""])));
+      return;
+    }
+    if (sub === "locations_revenue_per_location") {
+      const { config, valid } = buildLocationsRevenuePerLocationConfig(
+        rowId,
+        projectionYears,
+        locationsStartStr,
+        revenuePerLocationStartStr,
+        locationUnitLabelStr,
+        locationShape,
+        locationGrowthStr,
+        locationYearStrs,
+        locationPhaseRows,
+        revenuePerLocationShape,
+        revenuePerLocationGrowthStr,
+        revenuePerLocationYearStrs,
+        revenuePerLocationPhaseRows,
+        revenuePerLocationBasis
+      );
+      if (!valid) return;
+      setRevenueForecastRowV1(rowId, {
+        forecastRole: "independent_driver",
+        forecastMethod: config.forecastMethod,
+        forecastParameters: config.forecastParameters,
+      });
+      const p = (config.forecastParameters ?? {}) as Record<string, unknown>;
+      const sl = Number(p.startingLocations);
+      const sr = Number(p.startingRevenuePerLocation);
+      setLocationsStartStr(sl > 0 && Number.isFinite(sl) ? fmtNumericDisplay(sl) : "");
+      setRevenuePerLocationStartStr(
+        sr > 0 && Number.isFinite(sr) ? perUnitPriceStoredToInputString(sr) : ""
+      );
+      setLocationUnitLabelStr(typeof p.locationUnitLabel === "string" ? p.locationUnitLabel : "");
+      setRevenuePerLocationBasis(p.revenuePerLocationBasis === "monthly" ? "monthly" : "annual");
+      const ls = readTwoDriverSideFromCfg(config, projectionYears, "location", "");
+      setLocationShape(ls.shape);
+      setLocationGrowthStr(ls.rateStr);
+      setLocationPhaseRows(ls.phaseRows);
+      if (ls.shape === "by_year") setLocationYearStrs(ls.yearStrs);
+      else setLocationYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ls.yearStrs[y] ?? ""])));
+      const rs = readTwoDriverSideFromCfg(config, projectionYears, "revenuePerLocation", "");
+      setRevenuePerLocationShape(rs.shape);
+      setRevenuePerLocationGrowthStr(rs.rateStr);
+      setRevenuePerLocationPhaseRows(rs.phaseRows);
+      if (rs.shape === "by_year") setRevenuePerLocationYearStrs(rs.yearStrs);
+      else {
+        setRevenuePerLocationYearStrs(
+          Object.fromEntries(projectionYears.map((y) => [y, rs.yearStrs[y] ?? ""]))
+        );
+      }
+      return;
+    }
+    if (sub === "capacity_utilization_yield") {
+      const { config, valid } = buildCapacityUtilizationYieldConfig(
+        rowId,
+        projectionYears,
+        capacityStartStr,
+        capacityUnitLabelStr,
+        capacityShape,
+        capacityGrowthStr,
+        capacityYearStrs,
+        capacityPhaseRows,
+        utilizationStartStr,
+        utilShape,
+        utilYearStrs,
+        utilPhaseRows,
+        yieldStartStr,
+        yieldShape,
+        yieldGrowthStr,
+        yieldYearStrs,
+        yieldPhaseRows,
+        yieldBasis
+      );
+      if (!valid) return;
+      setRevenueForecastRowV1(rowId, {
+        forecastRole: "independent_driver",
+        forecastMethod: config.forecastMethod,
+        forecastParameters: config.forecastParameters,
+      });
+      const p = (config.forecastParameters ?? {}) as Record<string, unknown>;
+      const sc = Number(p.startingCapacity);
+      const su = Number(p.startingUtilizationPct);
+      const sy = Number(p.startingYield);
+      setCapacityStartStr(sc > 0 && Number.isFinite(sc) ? fmtNumericDisplay(sc) : "");
+      setUtilizationStartStr(
+        su >= 0 && su <= 100 && Number.isFinite(su) ? fmtNumericDisplay(su) : ""
+      );
+      setYieldStartStr(sy > 0 && Number.isFinite(sy) ? perUnitPriceStoredToInputString(sy) : "");
+      setCapacityUnitLabelStr(typeof p.capacityUnitLabel === "string" ? p.capacityUnitLabel : "");
+      setYieldBasis(p.yieldBasis === "monthly" ? "monthly" : "annual");
+      const caps = readTwoDriverSideFromCfg(config, projectionYears, "capacity", "");
+      setCapacityShape(caps.shape);
+      setCapacityGrowthStr(caps.rateStr);
+      setCapacityPhaseRows(caps.phaseRows);
+      if (caps.shape === "by_year") setCapacityYearStrs(caps.yearStrs);
+      else setCapacityYearStrs(Object.fromEntries(projectionYears.map((y) => [y, caps.yearStrs[y] ?? ""])));
+      const up = readUtilizationPathFromCfg(config, projectionYears);
+      setUtilShape(up.shape);
+      if (up.shape === "by_year") setUtilYearStrs(up.yearStrs);
+      else setUtilYearStrs(Object.fromEntries(projectionYears.map((y) => [y, up.yearStrs[y] ?? ""])));
+      setUtilPhaseRows(up.phaseRows);
+      const ys = readTwoDriverSideFromCfg(config, projectionYears, "yield", "");
+      setYieldShape(ys.shape);
+      setYieldGrowthStr(ys.rateStr);
+      setYieldPhaseRows(ys.phaseRows);
+      if (ys.shape === "by_year") setYieldYearStrs(ys.yearStrs);
+      else setYieldYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ys.yearStrs[y] ?? ""])));
+      return;
+    }
+    if (sub === "contracts_acv") {
+      const { config, valid } = buildContractsAcvConfig(
+        rowId,
+        projectionYears,
+        contractsStartStr,
+        acvStartStr,
+        contractUnitLabelStr,
+        contractShape,
+        contractGrowthStr,
+        contractYearStrs,
+        contractPhaseRows,
+        acvShape,
+        acvGrowthStr,
+        acvYearStrs,
+        acvPhaseRows
+      );
+      if (!valid) return;
+      setRevenueForecastRowV1(rowId, {
+        forecastRole: "independent_driver",
+        forecastMethod: config.forecastMethod,
+        forecastParameters: config.forecastParameters,
+      });
+      const p = (config.forecastParameters ?? {}) as Record<string, unknown>;
+      const sct = Number(p.startingContracts);
+      const sac = Number(p.startingAcv);
+      setContractsStartStr(sct > 0 && Number.isFinite(sct) ? fmtNumericDisplay(sct) : "");
+      setAcvStartStr(sac > 0 && Number.isFinite(sac) ? perUnitPriceStoredToInputString(sac) : "");
+      setContractUnitLabelStr(typeof p.contractUnitLabel === "string" ? p.contractUnitLabel : "");
+      const cr = readTwoDriverSideFromCfg(config, projectionYears, "contract", "");
+      setContractShape(cr.shape);
+      setContractGrowthStr(cr.rateStr);
+      setContractPhaseRows(cr.phaseRows);
+      if (cr.shape === "by_year") setContractYearStrs(cr.yearStrs);
+      else setContractYearStrs(Object.fromEntries(projectionYears.map((y) => [y, cr.yearStrs[y] ?? ""])));
+      const av = readTwoDriverSideFromCfg(config, projectionYears, "acv", "");
+      setAcvShape(av.shape);
+      setAcvGrowthStr(av.rateStr);
+      setAcvPhaseRows(av.phaseRows);
+      if (av.shape === "by_year") setAcvYearStrs(av.yearStrs);
+      else setAcvYearStrs(Object.fromEntries(projectionYears.map((y) => [y, av.yearStrs[y] ?? ""])));
       return;
     }
 
@@ -1474,6 +3226,57 @@ export function RevenueForecastV1DirectForecastBlock(props: {
     priceGrowthStr,
     priceYearStrs,
     pricePhaseRows,
+    customersStartStr,
+    arpuStartStr,
+    customerUnitLabelStr,
+    customerShape,
+    customerGrowthStr,
+    customerYearStrs,
+    customerPhaseRows,
+    arpuShape,
+    arpuGrowthStr,
+    arpuYearStrs,
+    arpuPhaseRows,
+    arpuBasis,
+    locationsStartStr,
+    revenuePerLocationStartStr,
+    locationUnitLabelStr,
+    locationShape,
+    locationGrowthStr,
+    locationYearStrs,
+    locationPhaseRows,
+    revenuePerLocationShape,
+    revenuePerLocationGrowthStr,
+    revenuePerLocationYearStrs,
+    revenuePerLocationPhaseRows,
+    revenuePerLocationBasis,
+    capacityStartStr,
+    capacityUnitLabelStr,
+    capacityShape,
+    capacityGrowthStr,
+    capacityYearStrs,
+    capacityPhaseRows,
+    utilizationStartStr,
+    utilShape,
+    utilYearStrs,
+    utilPhaseRows,
+    yieldStartStr,
+    yieldShape,
+    yieldGrowthStr,
+    yieldYearStrs,
+    yieldPhaseRows,
+    yieldBasis,
+    contractsStartStr,
+    acvStartStr,
+    contractUnitLabelStr,
+    contractShape,
+    contractGrowthStr,
+    contractYearStrs,
+    contractPhaseRows,
+    acvShape,
+    acvGrowthStr,
+    acvYearStrs,
+    acvPhaseRows,
   ]);
 
   const reset = useCallback(() => {
@@ -1566,6 +3369,16 @@ export function RevenueForecastV1DirectForecastBlock(props: {
         <div className="font-semibold text-slate-100">
           {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
             ? `${DIRECT_METHOD_UX.price_volume.title} · ${GROWTH_PHASES_UX.title}`
+            : sub === "customers_arpu" && (customerShape === "phases" || arpuShape === "phases")
+              ? `${DIRECT_METHOD_UX.customers_arpu.title} · ${GROWTH_PHASES_UX.title}`
+            : sub === "locations_revenue_per_location" &&
+                (locationShape === "phases" || revenuePerLocationShape === "phases")
+              ? `${DIRECT_METHOD_UX.locations_revenue_per_location.title} · ${GROWTH_PHASES_UX.title}`
+            : sub === "capacity_utilization_yield" &&
+                (capacityShape === "phases" || utilShape === "phases" || yieldShape === "phases")
+              ? `${DIRECT_METHOD_UX.capacity_utilization_yield.title} · ${GROWTH_PHASES_UX.title}`
+            : sub === "contracts_acv" && (contractShape === "phases" || acvShape === "phases")
+              ? `${DIRECT_METHOD_UX.contracts_acv.title} · ${GROWTH_PHASES_UX.title}`
             : (sub === "growth_from_historical" && histShape === "phases") ||
                 (sub === "growth_from_manual_start" && manualShape === "phases")
               ? GROWTH_PHASES_UX.title
@@ -1574,6 +3387,16 @@ export function RevenueForecastV1DirectForecastBlock(props: {
         <p className="text-slate-400 leading-snug">
           {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
             ? `${DIRECT_METHOD_UX.price_volume.oneLine} ${GROWTH_PHASES_UX.oneLine}`
+            : sub === "customers_arpu" && (customerShape === "phases" || arpuShape === "phases")
+              ? `${DIRECT_METHOD_UX.customers_arpu.oneLine} ${GROWTH_PHASES_UX.oneLine}`
+            : sub === "locations_revenue_per_location" &&
+                (locationShape === "phases" || revenuePerLocationShape === "phases")
+              ? `${DIRECT_METHOD_UX.locations_revenue_per_location.oneLine} ${GROWTH_PHASES_UX.oneLine}`
+            : sub === "capacity_utilization_yield" &&
+                (capacityShape === "phases" || utilShape === "phases" || yieldShape === "phases")
+              ? `${DIRECT_METHOD_UX.capacity_utilization_yield.oneLine} ${GROWTH_PHASES_UX.oneLine}`
+            : sub === "contracts_acv" && (contractShape === "phases" || acvShape === "phases")
+              ? `${DIRECT_METHOD_UX.contracts_acv.oneLine} ${GROWTH_PHASES_UX.oneLine}`
             : (sub === "growth_from_historical" && histShape === "phases") ||
                 (sub === "growth_from_manual_start" && manualShape === "phases")
               ? GROWTH_PHASES_UX.oneLine
@@ -1584,6 +3407,16 @@ export function RevenueForecastV1DirectForecastBlock(props: {
           <span className="text-slate-300 font-mono text-[10px]">
             {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
               ? `${DIRECT_METHOD_UX.price_volume.formula} ${GROWTH_PHASES_UX.formula}`
+              : sub === "customers_arpu" && (customerShape === "phases" || arpuShape === "phases")
+                ? `${DIRECT_METHOD_UX.customers_arpu.formula} ${GROWTH_PHASES_UX.formula}`
+              : sub === "locations_revenue_per_location" &&
+                  (locationShape === "phases" || revenuePerLocationShape === "phases")
+                ? `${DIRECT_METHOD_UX.locations_revenue_per_location.formula} ${GROWTH_PHASES_UX.formula}`
+              : sub === "capacity_utilization_yield" &&
+                  (capacityShape === "phases" || utilShape === "phases" || yieldShape === "phases")
+                ? `${DIRECT_METHOD_UX.capacity_utilization_yield.formula} ${GROWTH_PHASES_UX.formula}`
+              : sub === "contracts_acv" && (contractShape === "phases" || acvShape === "phases")
+                ? `${DIRECT_METHOD_UX.contracts_acv.formula} ${GROWTH_PHASES_UX.formula}`
               : (sub === "growth_from_historical" && histShape === "phases") ||
                   (sub === "growth_from_manual_start" && manualShape === "phases")
                 ? GROWTH_PHASES_UX.formula
@@ -1595,6 +3428,16 @@ export function RevenueForecastV1DirectForecastBlock(props: {
           <span className="text-slate-300">
             {sub === "price_volume" && (volShape === "phases" || priceShape === "phases")
               ? `${DIRECT_METHOD_UX.price_volume.required} ${GROWTH_PHASES_UX.required}`
+              : sub === "customers_arpu" && (customerShape === "phases" || arpuShape === "phases")
+                ? `${DIRECT_METHOD_UX.customers_arpu.required} ${GROWTH_PHASES_UX.required}`
+              : sub === "locations_revenue_per_location" &&
+                  (locationShape === "phases" || revenuePerLocationShape === "phases")
+                ? `${DIRECT_METHOD_UX.locations_revenue_per_location.required} ${GROWTH_PHASES_UX.required}`
+              : sub === "capacity_utilization_yield" &&
+                  (capacityShape === "phases" || utilShape === "phases" || yieldShape === "phases")
+                ? `${DIRECT_METHOD_UX.capacity_utilization_yield.required} ${GROWTH_PHASES_UX.required}`
+              : sub === "contracts_acv" && (contractShape === "phases" || acvShape === "phases")
+                ? `${DIRECT_METHOD_UX.contracts_acv.required} ${GROWTH_PHASES_UX.required}`
               : (sub === "growth_from_historical" && histShape === "phases") ||
                   (sub === "growth_from_manual_start" && manualShape === "phases")
                 ? GROWTH_PHASES_UX.required
@@ -1613,6 +3456,9 @@ export function RevenueForecastV1DirectForecastBlock(props: {
             <p className="text-[11px] text-slate-400 leading-snug">
               Forecasts revenue as <span className="text-slate-300">units × price per unit</span>, each with its
               own growth pattern. Use when topline depends on how much you sell and the average realized price.
+            </p>
+            <p className="text-[10px] text-slate-500 -mt-2">
+              This method builds revenue from operational drivers (units × pricing).
             </p>
             <div className="flex flex-wrap gap-4 items-end">
               <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[8rem]">
@@ -1858,6 +3704,1197 @@ export function RevenueForecastV1DirectForecastBlock(props: {
                         <RevenueForecastDecimalInput
                           value={priceYearStrs[y] ?? ""}
                           onChange={(next) => setPriceYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {sub === "customers_arpu" ? (
+          <div className="w-full space-y-4">
+            <p className="text-[11px] text-slate-400 leading-snug">
+              Forecasts revenue as <span className="text-slate-300">customers × ARPU</span>, each with its own growth
+              pattern. ARPU means average revenue per user/customer/member/account.
+            </p>
+            <p className="text-[10px] text-slate-500 -mt-2">
+              This method builds revenue from user growth and monetization (ARPU).
+            </p>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[8rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting customers</span>
+                <RevenueForecastDecimalInput
+                  ref={firstRef}
+                  value={customersStartStr}
+                  onChange={setCustomersStartStr}
+                  className={inp}
+                  title="Plain customer count — not scaled by statement K/M"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 flex-1 min-w-[12rem] max-w-md">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">
+                  Customer unit label <span className="normal-case text-slate-600">(optional)</span>
+                </span>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  placeholder="users, subscribers, members, accounts"
+                  value={customerUnitLabelStr}
+                  onChange={(e) => setCustomerUnitLabelStr(e.target.value)}
+                  className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-full"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[9rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting ARPU</span>
+                <span className="flex items-center gap-1.5">
+                  <span className="text-slate-500 tabular-nums text-xs shrink-0 font-medium" aria-hidden>
+                    {currencySymbol}
+                  </span>
+                  <RevenueForecastDecimalInput
+                    value={arpuStartStr}
+                    onChange={setArpuStartStr}
+                    className={inp}
+                    title="Actual ARPU — not statement thousands/millions"
+                  />
+                </span>
+              </label>
+            </div>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[10rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">ARPU basis</span>
+                <select
+                  value={arpuBasis}
+                  onChange={(e) => setArpuBasis(e.target.value as MonetizationPeriodBasisV1)}
+                  className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2 w-full max-w-xs"
+                >
+                  <option value="annual">Annual</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <p className="text-[10px] text-slate-500 max-w-xl flex-1 pb-1 leading-snug">
+                If Monthly is selected, the model annualizes ARPU by multiplying by 12. If Annual is selected, no
+                further conversion is applied.
+              </p>
+            </div>
+            <p className="text-[10px] text-slate-600 leading-relaxed space-y-0.5">
+              <span className="block">
+                <span className="text-slate-500">Drivers ·</span> Starting customers = paying users / subscribers /
+                members / accounts (plain count, not K/M).
+              </span>
+              <span className="block">
+                Starting ARPU = actual revenue per user/customer/member/account ({currencySymbol} amount), not scaled
+                by the model&apos;s revenue K/M display.
+              </span>
+            </p>
+            {customerUnitLabelStr.trim() ? (
+              <p className="text-[10px] text-slate-600">
+                Customer unit: <span className="text-slate-400">{customerUnitLabelStr.trim()}</span>
+              </p>
+            ) : null}
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">Customer growth</label>
+              <select
+                value={customerShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = customerShape;
+                  setCustomerShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(customerPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setCustomerYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = customerGrowthStr.trim();
+                        setCustomerYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = customerGrowthStr.trim();
+                      setCustomerYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setCustomerPhaseRows(defaultFullRangePhase(projectionYears, customerGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (customerYearStrs[y0] ?? "").trim();
+                      const fallbackRate = customerGrowthStr.trim();
+                      setCustomerPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {customerShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={customerPhaseRows}
+                  setPhaseRows={setCustomerPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {customerShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput
+                    value={customerGrowthStr}
+                    onChange={setCustomerGrowthStr}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {customerShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={customerYearStrs[y] ?? ""}
+                          onChange={(next) => setCustomerYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">ARPU growth</label>
+              <select
+                value={arpuShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = arpuShape;
+                  setArpuShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(arpuPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setArpuYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = arpuGrowthStr.trim();
+                        setArpuYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = arpuGrowthStr.trim();
+                      setArpuYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setArpuPhaseRows(defaultFullRangePhase(projectionYears, arpuGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (arpuYearStrs[y0] ?? "").trim();
+                      const fallbackRate = arpuGrowthStr.trim();
+                      setArpuPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {arpuShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={arpuPhaseRows}
+                  setPhaseRows={setArpuPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {arpuShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput value={arpuGrowthStr} onChange={setArpuGrowthStr} className={inp} />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {arpuShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={arpuYearStrs[y] ?? ""}
+                          onChange={(next) => setArpuYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {sub === "locations_revenue_per_location" ? (
+          <div className="w-full space-y-4">
+            <p className="text-[11px] text-slate-400 leading-snug">
+              Forecasts revenue as{" "}
+              <span className="text-slate-300">locations × revenue per location</span>, each with its own growth
+              pattern.
+            </p>
+            <p className="text-[10px] text-slate-500 -mt-2">
+              Use this when revenue depends on footprint growth and average productivity per location.
+            </p>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[8rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting locations</span>
+                <RevenueForecastDecimalInput
+                  ref={firstRef}
+                  value={locationsStartStr}
+                  onChange={setLocationsStartStr}
+                  className={inp}
+                  title="Plain location count — not scaled by statement K/M"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 flex-1 min-w-[12rem] max-w-md">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">
+                  Location unit label <span className="normal-case text-slate-600">(optional)</span>
+                </span>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  placeholder="stores, branches, clinics, restaurants, gyms, sites"
+                  value={locationUnitLabelStr}
+                  onChange={(e) => setLocationUnitLabelStr(e.target.value)}
+                  className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-full"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[11rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">
+                  Starting revenue / location
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="text-slate-500 tabular-nums text-xs shrink-0 font-medium" aria-hidden>
+                    {currencySymbol}
+                  </span>
+                  <RevenueForecastDecimalInput
+                    value={revenuePerLocationStartStr}
+                    onChange={setRevenuePerLocationStartStr}
+                    className={inp}
+                    title="Actual revenue per location — not statement thousands/millions"
+                  />
+                </span>
+              </label>
+            </div>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[12rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">
+                  Revenue per location basis
+                </span>
+                <select
+                  value={revenuePerLocationBasis}
+                  onChange={(e) =>
+                    setRevenuePerLocationBasis(e.target.value as MonetizationPeriodBasisV1)
+                  }
+                  className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2 w-full max-w-xs"
+                >
+                  <option value="annual">Annual</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <p className="text-[10px] text-slate-500 max-w-xl flex-1 pb-1 leading-snug">
+                If Monthly is selected, the model annualizes revenue per location by multiplying by 12. If Annual is
+                selected, no further conversion is applied.
+              </p>
+            </div>
+            <p className="text-[10px] text-slate-600 leading-relaxed space-y-0.5">
+              <span className="block">
+                <span className="text-slate-500">Drivers ·</span> Starting locations = active stores / branches /
+                clinics / sites (plain count, not K/M).
+              </span>
+              <span className="block">
+                Starting revenue per location = actual revenue generated per location ({currencySymbol} amount), not
+                scaled by the model&apos;s revenue K/M display.
+              </span>
+            </p>
+            {locationUnitLabelStr.trim() ? (
+              <p className="text-[10px] text-slate-600">
+                Location unit: <span className="text-slate-400">{locationUnitLabelStr.trim()}</span>
+              </p>
+            ) : null}
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">Location growth</label>
+              <select
+                value={locationShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = locationShape;
+                  setLocationShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(locationPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setLocationYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = locationGrowthStr.trim();
+                        setLocationYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = locationGrowthStr.trim();
+                      setLocationYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setLocationPhaseRows(defaultFullRangePhase(projectionYears, locationGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (locationYearStrs[y0] ?? "").trim();
+                      const fallbackRate = locationGrowthStr.trim();
+                      setLocationPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {locationShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={locationPhaseRows}
+                  setPhaseRows={setLocationPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {locationShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput
+                    value={locationGrowthStr}
+                    onChange={setLocationGrowthStr}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {locationShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={locationYearStrs[y] ?? ""}
+                          onChange={(next) => setLocationYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">
+                Revenue per location growth
+              </label>
+              <select
+                value={revenuePerLocationShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = revenuePerLocationShape;
+                  setRevenuePerLocationShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(revenuePerLocationPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setRevenuePerLocationYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = revenuePerLocationGrowthStr.trim();
+                        setRevenuePerLocationYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = revenuePerLocationGrowthStr.trim();
+                      setRevenuePerLocationYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setRevenuePerLocationPhaseRows(
+                        defaultFullRangePhase(projectionYears, revenuePerLocationGrowthStr.trim())
+                      );
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (revenuePerLocationYearStrs[y0] ?? "").trim();
+                      const fallbackRate = revenuePerLocationGrowthStr.trim();
+                      setRevenuePerLocationPhaseRows(
+                        defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate)
+                      );
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {revenuePerLocationShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={revenuePerLocationPhaseRows}
+                  setPhaseRows={setRevenuePerLocationPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {revenuePerLocationShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput
+                    value={revenuePerLocationGrowthStr}
+                    onChange={setRevenuePerLocationGrowthStr}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {revenuePerLocationShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={revenuePerLocationYearStrs[y] ?? ""}
+                          onChange={(next) =>
+                            setRevenuePerLocationYearStrs((prev) => ({ ...prev, [y]: next }))
+                          }
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {sub === "capacity_utilization_yield" ? (
+          <div className="w-full space-y-4">
+            <p className="text-[11px] text-slate-400 leading-snug">
+              Forecasts revenue from{" "}
+              <span className="text-slate-300">available capacity</span>,{" "}
+              <span className="text-slate-300">expected utilization</span>, and{" "}
+              <span className="text-slate-300">revenue earned per utilized unit (yield)</span>.
+            </p>
+            <p className="text-[10px] text-slate-500 -mt-2">
+              Use this when revenue is limited by operational capacity rather than only by demand.
+            </p>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[8rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting capacity</span>
+                <RevenueForecastDecimalInput
+                  ref={firstRef}
+                  value={capacityStartStr}
+                  onChange={setCapacityStartStr}
+                  className={inp}
+                  title="Plain capacity count — not scaled by statement K/M"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 flex-1 min-w-[12rem] max-w-md">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">
+                  Capacity unit label <span className="normal-case text-slate-600">(optional)</span>
+                </span>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  placeholder="seats, rooms, MW, tons, slots, flights, hours, units"
+                  value={capacityUnitLabelStr}
+                  onChange={(e) => setCapacityUnitLabelStr(e.target.value)}
+                  className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-full"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[9rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting utilization</span>
+                <span className="flex items-center gap-1.5">
+                  <RevenueForecastDecimalInput
+                    value={utilizationStartStr}
+                    onChange={setUtilizationStartStr}
+                    className={inp}
+                    title="Target utilization as a level (0–100%), not a growth rate"
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </span>
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[11rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting yield</span>
+                <span className="flex items-center gap-1.5">
+                  <span className="text-slate-500 tabular-nums text-xs shrink-0 font-medium" aria-hidden>
+                    {currencySymbol}
+                  </span>
+                  <RevenueForecastDecimalInput
+                    value={yieldStartStr}
+                    onChange={setYieldStartStr}
+                    className={inp}
+                    title="Revenue per utilized unit — actual currency, not statement thousands/millions"
+                  />
+                </span>
+              </label>
+            </div>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[12rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Yield basis</span>
+                <select
+                  value={yieldBasis}
+                  onChange={(e) => setYieldBasis(e.target.value as MonetizationPeriodBasisV1)}
+                  className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2 w-full max-w-xs"
+                >
+                  <option value="annual">Annual</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <p className="text-[10px] text-slate-500 max-w-xl flex-1 pb-1 leading-snug">
+                Period basis applies to yield only. If Monthly is selected, the model annualizes yield by ×12. Capacity
+                and utilization stay natural levels each year.
+              </p>
+            </div>
+            <p className="text-[10px] text-slate-600 leading-relaxed space-y-0.5">
+              <span className="block">
+                <span className="text-slate-500">Drivers ·</span> Starting capacity = operational limit (plain count,
+                not K/M). Utilization = share of capacity used (0–100%), entered as a level, not compounded like revenue
+                growth.
+              </span>
+              <span className="block">
+                Starting yield = revenue per utilized unit ({currencySymbol} amount) at the basis you select — not scaled
+                by the model&apos;s revenue K/M display.
+              </span>
+            </p>
+            {capacityUnitLabelStr.trim() ? (
+              <p className="text-[10px] text-slate-600">
+                Capacity unit: <span className="text-slate-400">{capacityUnitLabelStr.trim()}</span>
+              </p>
+            ) : null}
+            <p className="text-[10px] text-slate-500 border border-slate-700/60 rounded-md px-2.5 py-2 bg-slate-950/40">
+              <span className="font-semibold text-slate-400">Formula · </span>
+              Revenue = Capacity × (Utilization ÷ 100) × Yield
+              {yieldBasis === "monthly" ? (
+                <span className="text-slate-500"> × 12 (monthly yield annualized)</span>
+              ) : null}
+              .
+            </p>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">Capacity growth</label>
+              <select
+                value={capacityShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = capacityShape;
+                  setCapacityShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(capacityPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setCapacityYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = capacityGrowthStr.trim();
+                        setCapacityYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = capacityGrowthStr.trim();
+                      setCapacityYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setCapacityPhaseRows(defaultFullRangePhase(projectionYears, capacityGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (capacityYearStrs[y0] ?? "").trim();
+                      const fallbackRate = capacityGrowthStr.trim();
+                      setCapacityPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {capacityShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={capacityPhaseRows}
+                  setPhaseRows={setCapacityPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {capacityShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput
+                    value={capacityGrowthStr}
+                    onChange={setCapacityGrowthStr}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {capacityShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={capacityYearStrs[y] ?? ""}
+                          onChange={(next) => setCapacityYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">
+                Utilization path (levels by year)
+              </label>
+              <p className="text-[10px] text-slate-600 -mt-1 mb-1 max-w-2xl">
+                Utilization is a <span className="text-slate-400">target % of capacity</span> each year — not a compounding
+                growth rate. Use constant, by-year targets, or phased targets.
+              </p>
+              <select
+                value={utilShape}
+                onChange={(e) => {
+                  const v = e.target.value as UtilizationPathShapeV1;
+                  const prev = utilShape;
+                  setUtilShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases: UtilizationPhaseV1[] = utilPhaseRows.map((d) => ({
+                        startYear: d.startYear,
+                        endYear: d.endYear,
+                        utilizationPct: parseFloat(String(d.rateStr).replace(/,/g, "").trim()),
+                      }));
+                      if (validateUtilizationPhases(phases, projectionYears).ok) {
+                        const r = expandUtilizationPhasesToLevelsByYear(phases, projectionYears);
+                        setUtilYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = utilizationStartStr.trim();
+                        setUtilYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = utilizationStartStr.trim();
+                      setUtilYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setUtilPhaseRows(defaultFullRangePhase(projectionYears, utilizationStartStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const first = (utilYearStrs[y0] ?? "").trim();
+                      const fallback = utilizationStartStr.trim();
+                      setUtilPhaseRows(defaultFullRangePhase(projectionYears, first || fallback));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant utilization</option>
+                <option value="phases">Phased utilization targets</option>
+                <option value="by_year">By year</option>
+              </select>
+              {utilShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={utilPhaseRows}
+                  setPhaseRows={setUtilPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                  rateColumnLabel="Utilization %"
+                  afterAddHint="New phase added — review years and utilization % if needed."
+                  fillRemainingTitle="Fills any missing forecast years using the last utilization target."
+                />
+              ) : null}
+              {utilShape === "constant" ? (
+                <p className="text-[10px] text-slate-500">
+                  Each forecast year uses the <span className="text-slate-400">starting utilization %</span> above.
+                </p>
+              ) : null}
+              {utilShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} utilization</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={utilYearStrs[y] ?? ""}
+                          onChange={(next) => setUtilYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">Yield growth</label>
+              <select
+                value={yieldShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = yieldShape;
+                  setYieldShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(yieldPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setYieldYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = yieldGrowthStr.trim();
+                        setYieldYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = yieldGrowthStr.trim();
+                      setYieldYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setYieldPhaseRows(defaultFullRangePhase(projectionYears, yieldGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (yieldYearStrs[y0] ?? "").trim();
+                      const fallbackRate = yieldGrowthStr.trim();
+                      setYieldPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {yieldShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={yieldPhaseRows}
+                  setPhaseRows={setYieldPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {yieldShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput
+                    value={yieldGrowthStr}
+                    onChange={setYieldGrowthStr}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {yieldShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={yieldYearStrs[y] ?? ""}
+                          onChange={(next) => setYieldYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {sub === "contracts_acv" ? (
+          <div className="w-full space-y-4">
+            <p className="text-[11px] text-slate-400 leading-snug">
+              Forecasts revenue as{" "}
+              <span className="text-slate-300">projected contract count × projected annual contract value (ACV)</span>,
+              each with its own growth pattern.
+            </p>
+            <p className="text-[10px] text-slate-500 -mt-2">
+              Use this when revenue is driven by enterprise or account contracts and ACV. ACV means{" "}
+              <span className="text-slate-400">Annual Contract Value</span> — annual revenue per contract — so no
+              monthly/annual basis selector is needed here (unlike ARPU / revenue-per-location methods).
+            </p>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[8rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting contracts</span>
+                <RevenueForecastDecimalInput
+                  ref={firstRef}
+                  value={contractsStartStr}
+                  onChange={setContractsStartStr}
+                  className={inp}
+                  title="Plain contract count — not scaled by statement K/M"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 flex-1 min-w-[12rem] max-w-md">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">
+                  Contract unit label <span className="normal-case text-slate-600">(optional)</span>
+                </span>
+                <input
+                  type="text"
+                  autoComplete="off"
+                  placeholder="contracts, enterprise accounts, customers, accounts, subscriptions, agreements"
+                  value={contractUnitLabelStr}
+                  onChange={(e) => setContractUnitLabelStr(e.target.value)}
+                  className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-full"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] text-slate-400 min-w-[11rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting ACV</span>
+                <span className="flex items-center gap-1.5">
+                  <span className="text-slate-500 tabular-nums text-xs shrink-0 font-medium" aria-hidden>
+                    {currencySymbol}
+                  </span>
+                  <RevenueForecastDecimalInput
+                    value={acvStartStr}
+                    onChange={setAcvStartStr}
+                    className={inp}
+                    title="Annual contract value per contract — actual currency, not K/M display"
+                  />
+                </span>
+              </label>
+            </div>
+            <p className="text-[10px] text-slate-600 leading-relaxed space-y-0.5">
+              <span className="block">
+                <span className="text-slate-500">Drivers ·</span> Starting contracts = count of active contracts /
+                accounts (plain number). ACV = <span className="text-slate-400">annual</span> revenue per contract (
+                {currencySymbol} per year), not per month.
+              </span>
+            </p>
+            {contractUnitLabelStr.trim() ? (
+              <p className="text-[10px] text-slate-600">
+                Contract unit: <span className="text-slate-400">{contractUnitLabelStr.trim()}</span>
+              </p>
+            ) : null}
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">
+                Contract growth
+              </label>
+              <select
+                value={contractShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = contractShape;
+                  setContractShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(contractPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setContractYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = contractGrowthStr.trim();
+                        setContractYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = contractGrowthStr.trim();
+                      setContractYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setContractPhaseRows(defaultFullRangePhase(projectionYears, contractGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (contractYearStrs[y0] ?? "").trim();
+                      const fallbackRate = contractGrowthStr.trim();
+                      setContractPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {contractShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={contractPhaseRows}
+                  setPhaseRows={setContractPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {contractShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput
+                    value={contractGrowthStr}
+                    onChange={setContractGrowthStr}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {contractShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={contractYearStrs[y] ?? ""}
+                          onChange={(next) => setContractYearStrs((prev) => ({ ...prev, [y]: next }))}
+                          className={inp}
+                        />
+                        <span className="text-slate-500">%</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 border-t border-slate-800/80 pt-3">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wide block mb-1">ACV growth</label>
+              <select
+                value={acvShape}
+                onChange={(e) => {
+                  const v = e.target.value as HistGrowthShapeV1;
+                  const prev = acvShape;
+                  setAcvShape(v);
+                  if (v === "by_year") {
+                    if (prev === "phases") {
+                      const phases = draftsToPhases(acvPhaseRows);
+                      if (validateGrowthPhases(phases, projectionYears).ok) {
+                        const r = expandPhasesToRatesByYear(phases, projectionYears);
+                        setAcvYearStrs(
+                          Object.fromEntries(
+                            projectionYears.map((y) => [
+                              y,
+                              r[y] != null && Number.isFinite(Number(r[y])) ? fmtNumericDisplay(Number(r[y])) : "",
+                            ])
+                          )
+                        );
+                      } else {
+                        const base = acvGrowthStr.trim();
+                        setAcvYearStrs((p) => {
+                          const n = { ...p };
+                          for (const y of projectionYears) if (!n[y]) n[y] = base;
+                          return n;
+                        });
+                      }
+                    } else {
+                      const base = acvGrowthStr.trim();
+                      setAcvYearStrs((p) => {
+                        const n = { ...p };
+                        for (const y of projectionYears) if (!n[y]) n[y] = base;
+                        return n;
+                      });
+                    }
+                  }
+                  if (v === "phases") {
+                    if (prev === "constant") {
+                      setAcvPhaseRows(defaultFullRangePhase(projectionYears, acvGrowthStr.trim()));
+                    } else if (prev === "by_year") {
+                      const y0 = projectionYears[0]!;
+                      const firstYearRate = (acvYearStrs[y0] ?? "").trim();
+                      const fallbackRate = acvGrowthStr.trim();
+                      setAcvPhaseRows(defaultFullRangePhase(projectionYears, firstYearRate || fallbackRate));
+                    }
+                  }
+                }}
+                className="w-full max-w-md rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant growth</option>
+                <option value="phases">Growth phases</option>
+                <option value="by_year">By year</option>
+              </select>
+              {acvShape === "phases" ? (
+                <GrowthPhaseEditor
+                  phaseRows={acvPhaseRows}
+                  setPhaseRows={setAcvPhaseRows}
+                  projectionYears={projectionYears}
+                  inp={inp}
+                />
+              ) : null}
+              {acvShape === "constant" ? (
+                <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <span className="text-slate-500 shrink-0">Growth %</span>
+                  <RevenueForecastDecimalInput
+                    value={acvGrowthStr}
+                    onChange={setAcvGrowthStr}
+                    className={inp}
+                  />
+                  <span className="text-slate-500 font-medium">%</span>
+                </label>
+              ) : null}
+              {acvShape === "by_year" ? (
+                <div className="flex flex-wrap gap-2 w-full">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex flex-col gap-0.5 text-[10px] text-slate-500">
+                      <span>{y} growth</span>
+                      <span className="flex items-center gap-1">
+                        <RevenueForecastDecimalInput
+                          value={acvYearStrs[y] ?? ""}
+                          onChange={(next) => setAcvYearStrs((prev) => ({ ...prev, [y]: next }))}
                           className={inp}
                         />
                         <span className="text-slate-500">%</span>

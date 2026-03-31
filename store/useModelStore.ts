@@ -37,6 +37,8 @@ import type {
   ForecastRevenueNodeV1,
 } from "@/types/revenue-forecast-v1";
 import { DEFAULT_REVENUE_FORECAST_CONFIG_V1 } from "@/types/revenue-forecast-v1";
+import type { CogsForecastConfigV1, CogsForecastLineConfigV1 } from "@/types/cogs-forecast-v1";
+import { DEFAULT_COGS_FORECAST_CONFIG_V1 } from "@/types/cogs-forecast-v1";
 import {
   cloneRevChildrenToForecastTree,
   addChildToForecastTree,
@@ -553,6 +555,8 @@ export type ProjectSnapshot = {
   revenueForecastConfigV1: RevenueForecastConfigV1;
   /** Forecast Drivers revenue hierarchy only; omitted in legacy saves → migrate from rev.children. */
   revenueForecastTreeV1?: ForecastRevenueNodeV1[];
+  /** Forecast Drivers COGS workspace config v1. */
+  cogsForecastConfigV1?: CogsForecastConfigV1;
   /** IS Build: COGS as % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' = one % for all years, 'custom' = per-year %. */
@@ -682,6 +686,8 @@ export type ModelState = {
   revenueForecastConfigV1: RevenueForecastConfigV1;
   /** Forecast Drivers revenue tree only (never mutates IS rev.children). */
   revenueForecastTreeV1: ForecastRevenueNodeV1[];
+  /** Forecast Drivers COGS config v1 (separate from revenue config). */
+  cogsForecastConfigV1: CogsForecastConfigV1;
   /** IS Build: COGS % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' | 'custom' per COGS line. */
@@ -901,6 +907,10 @@ export type ModelActions = {
   setRevenueProjectionInputs: (itemId: string, inputs: RevenueProjectionInputs) => void;
   /** Revenue forecast v1: set/update config for one row (role, method, parameters, reason). */
   setRevenueForecastRowV1: (rowId: string, patch: Partial<RevenueForecastRowConfigV1>) => void;
+  /** COGS forecast v1: set/update config for one COGS line. */
+  setCogsForecastLineV1: (lineId: string, patch: Partial<CogsForecastLineConfigV1>) => void;
+  /** Replace full COGS forecast v1 config. */
+  setCogsForecastConfigV1: (config: CogsForecastConfigV1) => void;
   /** IS Build: set COGS as % of revenue (0–100) for a projected revenue line. */
   setCogsPctForRevenueLine: (revenueLineId: string, pct: number) => void;
   setCogsPctModeForRevenueLine: (revenueLineId: string, mode: "constant" | "custom") => void;
@@ -1077,6 +1087,7 @@ const defaultState: ModelState = {
   revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
   revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
   revenueForecastTreeV1: [],
+  cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
   cogsPctByRevenueLine: {},
   cogsPctModeByRevenueLine: {},
   cogsPctByRevenueLineByYear: {},
@@ -1150,6 +1161,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     revenueProjectionConfig: state.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
     revenueForecastConfigV1: state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1,
     revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
+    cogsForecastConfigV1: state.cogsForecastConfigV1 ?? DEFAULT_COGS_FORECAST_CONFIG_V1,
     cogsPctByRevenueLine: state.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: state.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: state.cogsPctByRevenueLineByYear ?? {},
@@ -1258,6 +1270,7 @@ function applyProjectSnapshot(
     revenueProjectionConfig: snapshot.revenueProjectionConfig ?? DEFAULT_REVENUE_PROJECTION_CONFIG,
     revenueForecastConfigV1: { ...cfgSnap, rows: rowsSnap },
     revenueForecastTreeV1,
+    cogsForecastConfigV1: snapshot.cogsForecastConfigV1 ?? DEFAULT_COGS_FORECAST_CONFIG_V1,
     cogsPctByRevenueLine: snapshot.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: snapshot.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: snapshot.cogsPctByRevenueLineByYear ?? {},
@@ -1872,6 +1885,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
             revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
             revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
             revenueForecastTreeV1: [] as ForecastRevenueNodeV1[],
+            cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
             cogsPctByRevenueLine: {},
             cogsPctModeByRevenueLine: {},
             cogsPctByRevenueLineByYear: {},
@@ -4026,6 +4040,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       schedules: clearedSchedules,
       revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
       revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
+      cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
       cogsPctByRevenueLine: {},
       cogsPctModeByRevenueLine: {},
       cogsPctByRevenueLineByYear: {},
@@ -4083,6 +4098,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
       revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
       revenueForecastTreeV1: cloneRevChildrenToForecastTree(revT?.children ?? []),
+      cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
       cogsPctByRevenueLine: {},
       cogsPctModeByRevenueLine: {},
       cogsPctByRevenueLineByYear: {},
@@ -4625,6 +4641,33 @@ export const useModelStore = create<ModelState & ModelActions>()(
       };
     });
   },
+
+  setCogsForecastLineV1: (lineId, patch) => {
+    set((state) => {
+      const config = state.cogsForecastConfigV1 ?? DEFAULT_COGS_FORECAST_CONFIG_V1;
+      const existing = config.lines[lineId];
+      const next: CogsForecastLineConfigV1 = {
+        ...(existing ?? {
+          lineId,
+          linkedRevenueRowId: "",
+          lineLabel: lineId,
+        }),
+        ...patch,
+        lineId,
+      };
+      return {
+        cogsForecastConfigV1: {
+          ...config,
+          lines: { ...config.lines, [lineId]: next },
+        },
+      };
+    });
+  },
+
+  setCogsForecastConfigV1: (config) =>
+    set(() => ({
+      cogsForecastConfigV1: config ?? DEFAULT_COGS_FORECAST_CONFIG_V1,
+    })),
 
   setRevenueProjectionInputs: (itemId, inputs) => {
     set((state) => {

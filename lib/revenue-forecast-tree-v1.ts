@@ -67,6 +67,21 @@ export function findForecastNode(
   return null;
 }
 
+/** Each tree row id → parent row id (null for forest roots). Used for allocation → driver lookups. */
+export function buildForecastRevenueParentIdMap(
+  tree: ForecastRevenueNodeV1[]
+): Map<string, string | null> {
+  const m = new Map<string, string | null>();
+  const walk = (nodes: ForecastRevenueNodeV1[], parentId: string | null) => {
+    for (const n of nodes) {
+      m.set(n.id, parentId);
+      walk(n.children, n.id);
+    }
+  };
+  walk(tree, null);
+  return m;
+}
+
 /** Update display label for a node anywhere in the tree (immutable). */
 export function updateForecastTreeNodeLabel(
   nodes: ForecastRevenueNodeV1[],

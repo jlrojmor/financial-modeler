@@ -389,6 +389,62 @@ export function computeRevenueProjectionsV1(
 }
 
 /**
+ * Read-only: projected units sold per projection year for Price × Volume, using the same
+ * volume loop as `projectIndependentRow` (no revenue math; no circular use of revenue/price).
+ */
+export function projectPriceVolumeUnitsByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> | null {
+  const v0 = Number(params.startingVolume);
+  const p0 = Number(params.startingPricePerUnit);
+  if (!Number.isFinite(v0) || !Number.isFinite(p0) || v0 <= 0 || p0 <= 0) return null;
+  if (projectionYears.length === 0) return {};
+  const volResolved = resolvePrefixedGrowthRatesByYear(params, "volume", projectionYears);
+  const out: Record<string, number> = {};
+  let volPrev = v0;
+  for (let i = 0; i < projectionYears.length; i++) {
+    const year = projectionYears[i]!;
+    const volPct =
+      volResolved?.[year] != null && Number.isFinite(Number(volResolved[year]))
+        ? Number(volResolved[year])
+        : Number(params.volumeRatePercent) ?? 0;
+    const vol = volPrev * (1 + volPct / 100);
+    out[year] = vol;
+    volPrev = vol;
+  }
+  return out;
+}
+
+/**
+ * Read-only: projected customer count per projection year for Customers × ARPU, using the same
+ * customer loop as `projectIndependentRow` (no revenue math; no ARPU compounding here).
+ */
+export function projectCustomersArpuCustomersByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> | null {
+  const c0 = Number(params.startingCustomers);
+  const a0 = Number(params.startingArpu);
+  if (!Number.isFinite(c0) || !Number.isFinite(a0) || c0 <= 0 || a0 <= 0) return null;
+  if (projectionYears.length === 0) return {};
+  const customerResolved = resolvePrefixedGrowthRatesByYear(params, "customer", projectionYears);
+  const out: Record<string, number> = {};
+  let customerPrev = c0;
+  for (let i = 0; i < projectionYears.length; i++) {
+    const year = projectionYears[i]!;
+    const customerPct =
+      customerResolved?.[year] != null && Number.isFinite(Number(customerResolved[year]))
+        ? Number(customerResolved[year])
+        : Number(params.customerRatePercent) ?? 0;
+    const customers = customerPrev * (1 + customerPct / 100);
+    out[year] = customers;
+    customerPrev = customers;
+  }
+  return out;
+}
+
+/**
  * Read-only helper for preview UI: starting drivers and volume/price after the first
  * projection year's growth step. Matches the first loop iteration of
  * `projectIndependentRow` for `price_volume` (no change to stored forecast math).

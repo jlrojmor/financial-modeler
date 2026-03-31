@@ -1295,7 +1295,7 @@ function TrashIcon({ className }: { className?: string }) {
 const PHASE_ROW_GRID =
   "grid w-full min-w-[min(100%,520px)] grid-cols-[minmax(0,1fr)_minmax(0,1fr)_5.5rem_2.75rem] gap-x-3 gap-y-2 items-center";
 
-function GrowthPhaseEditor(props: {
+export function GrowthPhaseEditor(props: {
   phaseRows: PhaseDraftV1[];
   setPhaseRows: (fn: (prev: PhaseDraftV1[]) => PhaseDraftV1[]) => void;
   projectionYears: string[];

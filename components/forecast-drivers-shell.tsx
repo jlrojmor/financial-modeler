@@ -4,12 +4,13 @@ import { useCallback, useRef, useState, type ReactNode } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { ForecastDriversSubTab } from "@/store/useModelStore";
 import RevenueForecastV1Tab from "@/components/revenue-forecast-v1-tab";
+import CogsOpexForecastV1Tab from "@/components/cogs-opex-forecast-v1-tab";
 import ForecastHelperCard from "@/components/forecast-helper-card";
 import ForecastGuideModal from "@/components/forecast-guide-modal";
 
 const SUB_TABS: { id: ForecastDriversSubTab; label: string }[] = [
   { id: "revenue", label: "Revenue" },
-  { id: "operating_costs", label: "Operating Costs" },
+  { id: "operating_costs", label: "COGS & Operating Expenses" },
   { id: "wc_drivers", label: "Working Capital Drivers" },
   { id: "financing_taxes", label: "Financing / Taxes" },
 ];
@@ -133,10 +134,10 @@ export default function ForecastDriversShell({
         ))}
       </div>
       {subTab === "revenue" && <RevenueForecastV1Tab />}
-      {(subTab === "operating_costs" || subTab === "wc_drivers" || subTab === "financing_taxes") && (
+      {subTab === "operating_costs" && <CogsOpexForecastV1Tab />}
+      {(subTab === "wc_drivers" || subTab === "financing_taxes") && (
         <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-6 text-center">
           <p className="text-sm text-slate-400">
-            {subTab === "operating_costs" && "Operating Costs (COGS, SG&A, R&D) — coming in Phase 2."}
             {subTab === "wc_drivers" && "Working Capital Drivers — coming in Phase 2."}
             {subTab === "financing_taxes" && "Financing & Taxes — coming in Phase 2."}
           </p>

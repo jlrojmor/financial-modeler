@@ -970,16 +970,168 @@ export const REVENUE_GUIDE_SECTIONS: GuideSection[] = [
   ]),
 ];
 
+export const COGS_OPEX_GUIDE_SECTIONS: GuideSection[] = [
+  section("overview", "Overview", "COGS & Operating Expenses overview", [
+    {
+      type: "paragraph",
+      text: "This subsection is where cost-side forecasting is staged. In Phase 1, the app focuses on COGS detection and routing from historical structure. Historical values are read-only context and are not overwritten here.",
+    },
+    {
+      type: "list",
+      items: [
+        "Revenue remains read-only context in preview.",
+        "Detected COGS lines are surfaced for review and upcoming method setup.",
+        "Operating Expenses methods are intentionally deferred to a later phase.",
+      ],
+    },
+  ]),
+  section("what_is_cogs", "What is COGS?", "What is COGS?", [
+    {
+      type: "paragraph",
+      text: "COGS represents direct costs required to deliver revenue (for example materials, direct labor, delivery/fulfillment, hosting, infrastructure, or revenue-share type costs depending on the business model).",
+    },
+    {
+      type: "callout",
+      tone: "note",
+      title: "Modeling boundary",
+      text: "COGS should capture direct delivery economics. Indirect overhead, corporate costs, and most SG&A items should remain outside COGS unless your reporting structure clearly places them there.",
+    },
+  ]),
+  section("cogs_vs_opex", "COGS vs OpEx", "How COGS differs from Operating Expenses", [
+    {
+      type: "list",
+      items: [
+        "COGS: directly tied to producing/delivering revenue.",
+        "Operating Expenses: selling, corporate, R&D, and broader operating overhead.",
+        "Some labels can be ambiguous by company; use review flags before forcing a classification.",
+      ],
+    },
+  ]),
+  section("detection", "Historical detection", "How COGS lines are detected from historicals", [
+    {
+      type: "paragraph",
+      text: "Detection uses a conservative hybrid approach: strong COGS label matches first, then statement position context (below Revenue and before Gross Profit where available), with ambiguous lines routed to Review instead of forced classification.",
+    },
+    {
+      type: "list",
+      items: [
+        "Deterministic label patterns (e.g., cost of sales, fulfillment, hosting, direct labor).",
+        "Position-aware signals from the historical income statement layout.",
+        "Ambiguous, non-recurring, or likely schedule-derived items routed to Review.",
+      ],
+    },
+  ]),
+  section("what_to_forecast_here", "What to forecast here", "What should be forecasted here vs derived elsewhere", [
+    {
+      type: "list",
+      items: [
+        "Forecast here: recurring, direct cost lines that management treats as COGS drivers.",
+        "Likely derived elsewhere: depreciation/amortization, interest, and unusual one-off restructuring/impairment items.",
+        "When uncertain, keep the line in Review and confirm treatment before assigning a method.",
+      ],
+    },
+  ]),
+  section("methods", "COGS methods", "COGS forecasting methods", [
+    {
+      type: "paragraph",
+      text: "Each forecastable COGS line links to a revenue stream. Choose a method that matches how cost scales with that revenue: % of Revenue for margin-style economics, Cost per Unit when the linked revenue line is Price × Volume, or Cost per Customer when the linked line is Customers × ARPU.",
+    },
+  ]),
+  section("cogs_pct_revenue", "% of Revenue", "COGS · % of Revenue", [
+    {
+      type: "paragraph",
+      text: "Forecasts COGS as a percentage of the linked revenue line each year. Use when a stable margin assumption is more practical than unit economics, or when the revenue method is not unit-based.",
+    },
+  ]),
+  section("cogs_cost_per_unit", "Cost per Unit", "COGS · Cost per Unit", [
+    {
+      type: "paragraph",
+      text: "Forecasts COGS as linked revenue volume × a projected cost per unit each year: COGS(t) = Volume(t) × Cost per Unit(t). Volume is taken automatically from the linked revenue row’s Price × Volume driver (starting volume and volume growth). You only enter starting cost per unit and how that cost per unit grows (constant %, by year, or phases).",
+    },
+    {
+      type: "list",
+      items: [
+        "Use when the linked revenue line is Price × Volume and direct cost scales with units sold, produced, or delivered.",
+        "Do not use when the linked line is Customers × ARPU, Contracts × ACV, Locations × Revenue per Location, Capacity × Utilization × Yield, or other non–unit×price methods — those will get matching COGS methods later.",
+        "Required inputs: starting cost per unit (absolute currency per unit, not K/M statement scaling) and a growth pattern for cost per unit.",
+      ],
+    },
+    {
+      type: "paragraph",
+      text: "First forecast year: cost per unit after growth = Starting cost per unit × (1 + growth% for that year). Later years compound on the prior year’s projected cost per unit. Revenue and volume math are unchanged; COGS only reads the volume path from the revenue config.",
+    },
+    {
+      type: "paragraph",
+      text: "In the COGS & Operating Expenses preview, configured lines appear in the COGS table. The Cost per Unit Drivers block (when relevant) shows starting volume, starting cost per unit, and first–forecast-year volume and cost per unit for audit. Opening revenue bridge logic for gross profit consistency uses starting revenue volume × starting cost per unit as the COGS-side opening basis concept for those lines in preview (read-only; nothing is written back to revenue or historicals).",
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes",
+    },
+    {
+      type: "list",
+      items: [
+        "Re-entering or overriding volume in the COGS card — volume must stay in the revenue Price × Volume driver.",
+        "Entering cost per unit in K/M-scaled statement units instead of true currency per unit.",
+        "Choosing Cost per Unit when the linked revenue row is not Price × Volume (the method is gated in the selector; saved configs if the revenue method later changes may need a different COGS method).",
+        "Treating cost per unit as a gross margin percent — use % of Revenue if margin on revenue is the right story.",
+      ],
+    },
+  ]),
+  section("cogs_cost_per_customer", "Cost per Customer", "COGS · Cost per Customer", [
+    {
+      type: "paragraph",
+      text: "Forecasts COGS as linked revenue customer count × a projected cost per customer each year: COGS(t) = Customers(t) × Cost per Customer(t). Customer counts and growth follow the linked revenue row’s Customers × ARPU driver (starting customers and customer growth). You enter starting cost per customer and how that cost per customer grows (constant %, by year, or phases). Do not re-enter customers, ARPU, or ARPU growth in COGS.",
+    },
+    {
+      type: "list",
+      items: [
+        "Use when the linked revenue line is Customers × ARPU and direct cost scales with the customer or subscriber base.",
+        "Do not use when the linked line is Price × Volume, Contracts × ACV, Locations × Revenue per Location, Capacity × Utilization × Yield, or plain growth/manual-only revenue — those methods have their own matching COGS approaches.",
+        "Required inputs: starting cost per customer (absolute currency per customer, not K/M statement scaling) and a growth pattern for cost per customer.",
+      ],
+    },
+    {
+      type: "paragraph",
+      text: "ARPU basis (monthly vs annual) in Revenue affects how implied starting revenue and the “Implied Gross Margin at Start” context are displayed. Enter cost per customer in the same annual economic frame you intend for the model (for example, if ARPU is monthly and annualized for revenue, align cost per customer with that annualized view).",
+    },
+    {
+      type: "paragraph",
+      text: "First forecast year: cost per customer after growth = Starting cost per customer × (1 + growth % for that year). Later years compound on the prior year’s projected cost per customer. Revenue and customer math are unchanged; COGS only reads the customer path from the revenue config.",
+    },
+    {
+      type: "paragraph",
+      text: "In the COGS & Operating Expenses preview, configured lines appear in the COGS table. The Cost per Customer Drivers audit block (when relevant) shows starting customers, starting cost per customer, and first–forecast-year customers and cost per customer. For gross bridge consistency in preview, the COGS-side opening basis concept for this method is starting customers × starting cost per customer (read-only; nothing is written to revenue or historicals).",
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes",
+    },
+    {
+      type: "list",
+      items: [
+        "Re-entering customer counts or ARPU in the COGS card — those stay in Revenue.",
+        "Entering cost per customer using K/M-scaled statement units instead of true currency per customer.",
+        "Confusing cost per customer with % of revenue — use % of Revenue when margin on revenue is the right story.",
+        "Mismatching economic period: Revenue may annualize monthly ARPU while you enter cost per customer on a different implicit period — keep the frame consistent with how you read the implied margin context.",
+        "Using Cost per Customer when the linked revenue row is not Customers × ARPU (the method is gated in the selector; if the revenue method later changes, saved Cost per Customer configs remain editable but preview context may not resolve until drivers match).",
+      ],
+    },
+  ]),
+  section("review_items", "Review items", "Review / non-recurring items", [
+    {
+      type: "paragraph",
+      text: "Review Items flag lines that are ambiguous, potentially non-recurring, or likely schedule-driven. Treat these as routing decisions first, then forecast-method decisions second.",
+    },
+  ]),
+];
+
 export const FORECAST_GUIDE_CONTENT: Record<
   ForecastDriversSubTab,
   ForecastGuideTabBundle
 > = {
   revenue: { kind: "sections", sections: REVENUE_GUIDE_SECTIONS },
-  operating_costs: {
-    kind: "placeholder",
-    headline: "Operating Costs",
-    body: "A full guide for COGS, SG&A, and related drivers will be added here. For now, use Revenue to complete your topline forecast.",
-  },
+  operating_costs: { kind: "sections", sections: COGS_OPEX_GUIDE_SECTIONS },
   wc_drivers: {
     kind: "placeholder",
     headline: "Working Capital Drivers",

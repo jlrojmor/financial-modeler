@@ -445,6 +445,95 @@ export function projectCustomersArpuCustomersByYear(
 }
 
 /**
+ * Read-only: projected contract count per projection year for Contracts × ACV, using the same
+ * contract loop as `projectIndependentRow` (no revenue math; no ACV compounding here).
+ */
+export function projectContractsAcvContractsByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> | null {
+  const c0 = Number(params.startingContracts);
+  const a0 = Number(params.startingAcv);
+  if (!Number.isFinite(c0) || !Number.isFinite(a0) || c0 <= 0 || a0 <= 0) return null;
+  if (projectionYears.length === 0) return {};
+  const contractResolved = resolvePrefixedGrowthRatesByYear(params, "contract", projectionYears);
+  const out: Record<string, number> = {};
+  let contractPrev = c0;
+  for (let i = 0; i < projectionYears.length; i++) {
+    const year = projectionYears[i]!;
+    const contractPct =
+      contractResolved?.[year] != null && Number.isFinite(Number(contractResolved[year]))
+        ? Number(contractResolved[year])
+        : Number(params.contractRatePercent) ?? 0;
+    const contracts = contractPrev * (1 + contractPct / 100);
+    out[year] = contracts;
+    contractPrev = contracts;
+  }
+  return out;
+}
+
+/**
+ * Read-only: projected location count per projection year for Locations × Revenue per Location,
+ * using the same location loop as `projectIndependentRow` (no revenue math; no revenue-per-location compounding here).
+ */
+export function projectLocationsRevenuePerLocationLocationsByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> | null {
+  const l0 = Number(params.startingLocations);
+  const r0 = Number(params.startingRevenuePerLocation);
+  if (!Number.isFinite(l0) || !Number.isFinite(r0) || l0 <= 0 || r0 <= 0) return null;
+  if (projectionYears.length === 0) return {};
+  const locResolved = resolvePrefixedGrowthRatesByYear(params, "location", projectionYears);
+  const out: Record<string, number> = {};
+  let locPrev = l0;
+  for (let i = 0; i < projectionYears.length; i++) {
+    const year = projectionYears[i]!;
+    const locPct =
+      locResolved?.[year] != null && Number.isFinite(Number(locResolved[year]))
+        ? Number(locResolved[year])
+        : Number(params.locationRatePercent) ?? 0;
+    const locations = locPrev * (1 + locPct / 100);
+    out[year] = locations;
+    locPrev = locations;
+  }
+  return out;
+}
+
+/**
+ * Read-only: projected utilized units per year for Capacity × Utilization × Yield:
+ * UtilizedUnits(t) = Capacity(t) × Utilization(t) / 100, matching `projectIndependentRow`
+ * (no yield compounding or revenue math here).
+ */
+export function projectCapacityUtilizationYieldUtilizedUnitsByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> | null {
+  const cap0 = Number(params.startingCapacity);
+  const yld0 = Number(params.startingYield);
+  if (!Number.isFinite(cap0) || !Number.isFinite(yld0) || cap0 <= 0 || yld0 <= 0) return null;
+  const utilLevels = resolveUtilizationLevelsByYear(params, projectionYears);
+  if (!utilLevels) return null;
+  if (projectionYears.length === 0) return {};
+  const capResolved = resolvePrefixedGrowthRatesByYear(params, "capacity", projectionYears);
+  const out: Record<string, number> = {};
+  let capPrev = cap0;
+  for (let i = 0; i < projectionYears.length; i++) {
+    const year = projectionYears[i]!;
+    const utilPct = utilLevels[year];
+    if (utilPct == null || !Number.isFinite(utilPct)) return null;
+    const capPct =
+      capResolved?.[year] != null && Number.isFinite(Number(capResolved[year]))
+        ? Number(capResolved[year])
+        : Number(params.capacityRatePercent) ?? 0;
+    const cap = capPrev * (1 + capPct / 100);
+    out[year] = cap * (utilPct / 100);
+    capPrev = cap;
+  }
+  return out;
+}
+
+/**
  * Read-only helper for preview UI: starting drivers and volume/price after the first
  * projection year's growth step. Matches the first loop iteration of
  * `projectIndependentRow` for `price_volume` (no change to stored forecast math).

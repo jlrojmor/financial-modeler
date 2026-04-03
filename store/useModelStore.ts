@@ -39,6 +39,8 @@ import type {
 import { DEFAULT_REVENUE_FORECAST_CONFIG_V1 } from "@/types/revenue-forecast-v1";
 import type { CogsForecastConfigV1, CogsForecastLineConfigV1 } from "@/types/cogs-forecast-v1";
 import { DEFAULT_COGS_FORECAST_CONFIG_V1 } from "@/types/cogs-forecast-v1";
+import type { OpExForecastConfigV1, OpExForecastLineConfigV1 } from "@/types/opex-forecast-v1";
+import { DEFAULT_OPEX_FORECAST_CONFIG_V1 } from "@/types/opex-forecast-v1";
 import {
   cloneRevChildrenToForecastTree,
   addChildToForecastTree,
@@ -557,6 +559,8 @@ export type ProjectSnapshot = {
   revenueForecastTreeV1?: ForecastRevenueNodeV1[];
   /** Forecast Drivers COGS workspace config v1. */
   cogsForecastConfigV1?: CogsForecastConfigV1;
+  /** Forecast Drivers Operating Expenses Phase 1 (routing + direct methods). */
+  opexForecastConfigV1?: OpExForecastConfigV1;
   /** IS Build: COGS as % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' = one % for all years, 'custom' = per-year %. */
@@ -688,6 +692,8 @@ export type ModelState = {
   revenueForecastTreeV1: ForecastRevenueNodeV1[];
   /** Forecast Drivers COGS config v1 (separate from revenue config). */
   cogsForecastConfigV1: CogsForecastConfigV1;
+  /** Operating expenses forecast Phase 1. */
+  opexForecastConfigV1: OpExForecastConfigV1;
   /** IS Build: COGS % of revenue per projected revenue line id (0–100). Constant mode. */
   cogsPctByRevenueLine: Record<string, number>;
   /** IS Build: 'constant' | 'custom' per COGS line. */
@@ -911,6 +917,10 @@ export type ModelActions = {
   setCogsForecastLineV1: (lineId: string, patch: Partial<CogsForecastLineConfigV1>) => void;
   /** Replace full COGS forecast v1 config. */
   setCogsForecastConfigV1: (config: CogsForecastConfigV1) => void;
+  /** Operating expenses Phase 1: patch one line. */
+  setOpexForecastLineV1: (lineId: string, patch: Partial<OpExForecastLineConfigV1>) => void;
+  /** Replace full OpEx forecast v1 config. */
+  setOpexForecastConfigV1: (config: OpExForecastConfigV1) => void;
   /** IS Build: set COGS as % of revenue (0–100) for a projected revenue line. */
   setCogsPctForRevenueLine: (revenueLineId: string, pct: number) => void;
   setCogsPctModeForRevenueLine: (revenueLineId: string, mode: "constant" | "custom") => void;
@@ -1088,6 +1098,7 @@ const defaultState: ModelState = {
   revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
   revenueForecastTreeV1: [],
   cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
+  opexForecastConfigV1: DEFAULT_OPEX_FORECAST_CONFIG_V1,
   cogsPctByRevenueLine: {},
   cogsPctModeByRevenueLine: {},
   cogsPctByRevenueLineByYear: {},
@@ -1162,6 +1173,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     revenueForecastConfigV1: state.revenueForecastConfigV1 ?? DEFAULT_REVENUE_FORECAST_CONFIG_V1,
     revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
     cogsForecastConfigV1: state.cogsForecastConfigV1 ?? DEFAULT_COGS_FORECAST_CONFIG_V1,
+    opexForecastConfigV1: state.opexForecastConfigV1 ?? DEFAULT_OPEX_FORECAST_CONFIG_V1,
     cogsPctByRevenueLine: state.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: state.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: state.cogsPctByRevenueLineByYear ?? {},
@@ -1271,6 +1283,7 @@ function applyProjectSnapshot(
     revenueForecastConfigV1: { ...cfgSnap, rows: rowsSnap },
     revenueForecastTreeV1,
     cogsForecastConfigV1: snapshot.cogsForecastConfigV1 ?? DEFAULT_COGS_FORECAST_CONFIG_V1,
+    opexForecastConfigV1: snapshot.opexForecastConfigV1 ?? DEFAULT_OPEX_FORECAST_CONFIG_V1,
     cogsPctByRevenueLine: snapshot.cogsPctByRevenueLine ?? {},
     cogsPctModeByRevenueLine: snapshot.cogsPctModeByRevenueLine ?? {},
     cogsPctByRevenueLineByYear: snapshot.cogsPctByRevenueLineByYear ?? {},
@@ -1886,6 +1899,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
             revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
             revenueForecastTreeV1: [] as ForecastRevenueNodeV1[],
             cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
+            opexForecastConfigV1: DEFAULT_OPEX_FORECAST_CONFIG_V1,
             cogsPctByRevenueLine: {},
             cogsPctModeByRevenueLine: {},
             cogsPctByRevenueLineByYear: {},
@@ -4041,6 +4055,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       revenueProjectionConfig: DEFAULT_REVENUE_PROJECTION_CONFIG,
       revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
       cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
+      opexForecastConfigV1: DEFAULT_OPEX_FORECAST_CONFIG_V1,
       cogsPctByRevenueLine: {},
       cogsPctModeByRevenueLine: {},
       cogsPctByRevenueLineByYear: {},
@@ -4099,6 +4114,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       revenueForecastConfigV1: DEFAULT_REVENUE_FORECAST_CONFIG_V1,
       revenueForecastTreeV1: cloneRevChildrenToForecastTree(revT?.children ?? []),
       cogsForecastConfigV1: DEFAULT_COGS_FORECAST_CONFIG_V1,
+      opexForecastConfigV1: DEFAULT_OPEX_FORECAST_CONFIG_V1,
       cogsPctByRevenueLine: {},
       cogsPctModeByRevenueLine: {},
       cogsPctByRevenueLineByYear: {},
@@ -4667,6 +4683,38 @@ export const useModelStore = create<ModelState & ModelActions>()(
   setCogsForecastConfigV1: (config) =>
     set(() => ({
       cogsForecastConfigV1: config ?? DEFAULT_COGS_FORECAST_CONFIG_V1,
+    })),
+
+  setOpexForecastLineV1: (lineId, patch) => {
+    set((state) => {
+      const config = state.opexForecastConfigV1 ?? DEFAULT_OPEX_FORECAST_CONFIG_V1;
+      const existing = config.lines[lineId];
+      const base: OpExForecastLineConfigV1 =
+        existing ??
+        ({
+          lineId,
+          originalLineLabel: typeof patch.originalLineLabel === "string" ? patch.originalLineLabel : lineId,
+          routeStatus: "forecast_direct",
+          routeResolvedBy: "user",
+        } as OpExForecastLineConfigV1);
+      const next: OpExForecastLineConfigV1 = {
+        ...base,
+        ...patch,
+        lineId,
+      };
+      return {
+        opexForecastConfigV1: {
+          ...config,
+          version: 1,
+          lines: { ...config.lines, [lineId]: next },
+        },
+      };
+    });
+  },
+
+  setOpexForecastConfigV1: (config) =>
+    set(() => ({
+      opexForecastConfigV1: config ?? DEFAULT_OPEX_FORECAST_CONFIG_V1,
     })),
 
   setRevenueProjectionInputs: (itemId, inputs) => {

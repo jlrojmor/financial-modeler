@@ -34,6 +34,19 @@ import { useModelStore } from "@/store/useModelStore";
 
 type Unit = "units" | "thousands" | "millions";
 
+/** All node ids in the revenue forecast tree (for default-collapsed card state). */
+function collectAllRevenueForecastNodeIds(nodes: ForecastRevenueNodeV1[]): string[] {
+  const out: string[] = [];
+  const walk = (list: ForecastRevenueNodeV1[]) => {
+    for (const n of list) {
+      out.push(n.id);
+      if (n.children.length > 0) walk(n.children);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
 function allowGrowthFromHistoricalForNode(
   node: ForecastRevenueNodeV1,
   lastHistoricByRowId: Record<string, number> | undefined
@@ -168,10 +181,30 @@ export function RevenueForecastV1HierarchyEditor(props: {
 
   const [modal, setModal] = useState<ModalState>(null);
   /** Collapsed forecast cards (direct rows + derived “build from children” parents). */
-  const [collapsedForecastCards, setCollapsedForecastCards] = useState<Set<string>>(() => new Set());
+  const [collapsedForecastCards, setCollapsedForecastCards] = useState<Set<string>>(
+    () => new Set(collectAllRevenueForecastNodeIds(forest))
+  );
+  const didApplyInitialCollapseAll = useRef(false);
   const [directFocusNonce, setDirectFocusNonce] = useState<Record<string, number>>({});
   const [allocPctFocusNonce, setAllocPctFocusNonce] = useState<Record<string, number>>({});
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  /**
+   * Default every forecast card collapsed when the tree first becomes non-empty (covers async tree sync).
+   * Remounting the tab resets the ref so re-entry collapses all cards again.
+   */
+  useEffect(() => {
+    const ids = collectAllRevenueForecastNodeIds(forest);
+    if (ids.length === 0) {
+      didApplyInitialCollapseAll.current = false;
+      setCollapsedForecastCards(new Set());
+      return;
+    }
+    if (!didApplyInitialCollapseAll.current) {
+      didApplyInitialCollapseAll.current = true;
+      setCollapsedForecastCards(new Set(ids));
+    }
+  }, [forest]);
 
   const bumpDirectFocus = useCallback((rowId: string) => {
     setCollapsedForecastCards((prev) => {

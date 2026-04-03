@@ -7,11 +7,20 @@ import {
   buildForecastableCogsLinesFromRevenue,
   mergeForecastableLinesWithConfig,
   hasPersistedCogsCpcConfig,
+  hasPersistedCogsCplConfig,
+  hasPersistedCogsCpuuConfig,
+  hasPersistedCogsCptConfig,
   hasPersistedCogsPctConfig,
   hasPersistedCogsCpuConfig,
+  revenueRowUsesCapacityUtilizationYieldForCogsEligibility,
+  revenueRowUsesContractsAcvForCogsEligibility,
   revenueRowUsesCustomersArpuForCogsEligibility,
+  revenueRowUsesLocationsRevenuePerLocationForCogsEligibility,
   revenueRowUsesPriceVolumeForCogsEligibility,
+  resolveCapacityUtilizationYieldStartingDriversForCogsLinkedRow,
+  resolveContractsAcvStartingDriversForCogsLinkedRow,
   resolveCustomersArpuStartingDriversForCogsLinkedRow,
+  resolveLocationsRevenuePerLocationStartingDriversForCogsLinkedRow,
   resolvePriceVolumeStartingDriversForCogsLinkedRow,
   type ForecastableCogsLine,
 } from "@/lib/cogs-forecast-v1";
@@ -32,6 +41,7 @@ import {
   GROWTH_PHASE_MESSAGES,
   type GrowthPhaseV1,
 } from "@/lib/revenue-growth-phases-v1";
+import OperatingExpensesPhase1Panel from "@/components/operating-expenses-phase1-panel";
 
 type HistGrowthShapeV1 = "constant" | "phases" | "by_year";
 
@@ -70,6 +80,47 @@ function mapCogsCpcPhaseValidationErrors(errors: string[]): string[] {
     [GROWTH_PHASE_MESSAGES.needRate]: "Each phase needs a growth %.",
     [GROWTH_PHASE_MESSAGES.coverAll]: "Phases must cover all projection years in order.",
     [GROWTH_PHASE_MESSAGES.count]: "Use 1–4 cost per customer growth phases.",
+  };
+  return [...new Set(errors.map((e) => map[e] ?? e))];
+}
+
+function mapCogsCptPhaseValidationErrors(errors: string[]): string[] {
+  const map: Record<string, string> = {
+    [GROWTH_PHASE_MESSAGES.overlap]: "Cost per contract phases cannot overlap.",
+    [GROWTH_PHASE_MESSAGES.gaps]:
+      "Each phase must start after the previous phase ends, with no gaps or backward ranges.",
+    [GROWTH_PHASE_MESSAGES.needRate]: "Each phase needs a growth %.",
+    [GROWTH_PHASE_MESSAGES.coverAll]: "Phases must cover all projection years in order.",
+    [GROWTH_PHASE_MESSAGES.count]: "Use 1–4 cost per contract growth phases.",
+  };
+  return [...new Set(errors.map((e) => map[e] ?? e))];
+}
+
+function mapCogsCplPhaseValidationErrors(errors: string[]): string[] {
+  const map: Record<string, string> = {
+    [GROWTH_PHASE_MESSAGES.overlap]: "Cost per location phases cannot overlap.",
+    [GROWTH_PHASE_MESSAGES.gaps]:
+      "Each phase must start after the previous phase ends, with no gaps or backward ranges.",
+    [GROWTH_PHASE_MESSAGES.needRate]: "Each phase needs a growth %.",
+    [GROWTH_PHASE_MESSAGES.coverAll]: "Phases must cover all projection years in order.",
+    [GROWTH_PHASE_MESSAGES.count]: "Use 1–4 cost per location growth phases.",
+  };
+  return [...new Set(errors.map((e) => map[e] ?? e))];
+}
+
+/** Legacy configs omit `costPerCustomerBasis` → treat as annual (unchanged math). */
+function cpcBasisFromSavedParams(p: Record<string, unknown> | undefined): "monthly" | "annual" {
+  return p?.costPerCustomerBasis === "monthly" ? "monthly" : "annual";
+}
+
+function mapCogsCpuuPhaseValidationErrors(errors: string[]): string[] {
+  const map: Record<string, string> = {
+    [GROWTH_PHASE_MESSAGES.overlap]: "Cost per utilized unit phases cannot overlap.",
+    [GROWTH_PHASE_MESSAGES.gaps]:
+      "Each phase must start after the previous phase ends, with no gaps or backward ranges.",
+    [GROWTH_PHASE_MESSAGES.needRate]: "Each phase needs a growth %.",
+    [GROWTH_PHASE_MESSAGES.coverAll]: "Phases must cover all projection years in order.",
+    [GROWTH_PHASE_MESSAGES.count]: "Use 1–4 cost per utilized unit growth phases.",
   };
   return [...new Set(errors.map((e) => map[e] ?? e))];
 }
@@ -312,7 +363,7 @@ function buildSavedCpuSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projec
 }
 
 function buildDraftCpuSnapshot(
-  method: "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer",
+  method: "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer" | "cost_per_contract" | "cost_per_location",
   cpuShape: HistGrowthShapeV1,
   startingCostStr: string,
   growthRateStr: string,
@@ -384,6 +435,7 @@ function buildSavedCpcSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projec
     return JSON.stringify({
       method: "",
       shape: "constant",
+      costBasis: "annual",
       startingStr: "",
       growthRateStr: "",
       yearStrs: {} as Record<string, string>,
@@ -392,6 +444,7 @@ function buildSavedCpcSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projec
   }
   const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
   const pType = (p.growthPatternType as string | undefined) ?? "constant";
+  const costBasis = cpcBasisFromSavedParams(p);
   const startingStr =
     p.startingCostPerCustomer != null && Number.isFinite(Number(p.startingCostPerCustomer))
       ? fmtNumericDisplay(Number(p.startingCostPerCustomer))
@@ -409,6 +462,7 @@ function buildSavedCpcSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projec
     return JSON.stringify({
       method: "cost_per_customer",
       shape: "by_year",
+      costBasis,
       startingStr,
       growthRateStr,
       yearStrs,
@@ -430,6 +484,7 @@ function buildSavedCpcSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projec
     return JSON.stringify({
       method: "cost_per_customer",
       shape: "phases",
+      costBasis,
       startingStr,
       growthRateStr: "",
       yearStrs: {},
@@ -443,6 +498,7 @@ function buildSavedCpcSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projec
   return JSON.stringify({
     method: "cost_per_customer",
     shape: "constant",
+    costBasis,
     startingStr,
     growthRateStr: gr,
     yearStrs: {},
@@ -451,8 +507,9 @@ function buildSavedCpcSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projec
 }
 
 function buildDraftCpcSnapshot(
-  method: "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer",
+  method: "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer" | "cost_per_contract" | "cost_per_location",
   cpcShape: HistGrowthShapeV1,
+  cpcCostBasis: "monthly" | "annual",
   startingCpcStr: string,
   cpcGrowthRateStr: string,
   cpcYearStrs: Record<string, string>,
@@ -463,6 +520,7 @@ function buildDraftCpcSnapshot(
     return JSON.stringify({
       method: "",
       shape: "constant",
+      costBasis: "annual",
       startingStr: "",
       growthRateStr: "",
       yearStrs: {} as Record<string, string>,
@@ -483,6 +541,7 @@ function buildDraftCpcSnapshot(
     return JSON.stringify({
       method: "cost_per_customer",
       shape: "by_year",
+      costBasis: cpcCostBasis,
       startingStr: startingCanon,
       growthRateStr: fmtNumericDisplay(firstN),
       yearStrs: orderedYearStrs,
@@ -501,6 +560,7 @@ function buildDraftCpcSnapshot(
     return JSON.stringify({
       method: "cost_per_customer",
       shape: "phases",
+      costBasis: cpcCostBasis,
       startingStr: startingCanon,
       growthRateStr: "",
       yearStrs: {},
@@ -510,6 +570,424 @@ function buildDraftCpcSnapshot(
   const gr = parseNumericInput(cpcGrowthRateStr);
   return JSON.stringify({
     method: "cost_per_customer",
+    shape: "constant",
+    costBasis: cpcCostBasis,
+    startingStr: startingCanon,
+    growthRateStr: gr != null ? fmtNumericDisplay(gr) : "",
+    yearStrs: {},
+    phaseTuples: [],
+  });
+}
+
+function buildSavedCptSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projectionYears: string[]): string {
+  if (!cfg?.forecastMethod || cfg.forecastMethod !== "cost_per_contract") {
+    return JSON.stringify({
+      method: "",
+      shape: "constant",
+      startingStr: "",
+      growthRateStr: "",
+      yearStrs: {} as Record<string, string>,
+      phaseTuples: [] as Array<{ startYear: string; endYear: string; rateStr: string }>,
+    });
+  }
+  const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  const pType = (p.growthPatternType as string | undefined) ?? "constant";
+  const startingStr =
+    p.startingCostPerContract != null && Number.isFinite(Number(p.startingCostPerContract))
+      ? fmtNumericDisplay(Number(p.startingCostPerContract))
+      : "";
+  if (pType === "by_year") {
+    const by = (p.costPerContractRatesByYear ?? {}) as Record<string, number>;
+    const orderedEntries = projectionYears.map((y) => {
+      const raw = by[y];
+      const n = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;
+      return [y, fmtNumericDisplay(n)] as const;
+    });
+    const yearStrs = Object.fromEntries(orderedEntries);
+    const growthRateStr =
+      projectionYears.length > 0 ? (orderedEntries[0]?.[1] ?? "") : "";
+    return JSON.stringify({
+      method: "cost_per_contract",
+      shape: "by_year",
+      startingStr,
+      growthRateStr,
+      yearStrs,
+      phaseTuples: [],
+    });
+  }
+  if (pType === "phases") {
+    const raw = Array.isArray(p.costPerContractGrowthPhases)
+      ? (p.costPerContractGrowthPhases as GrowthPhaseV1[])
+      : [];
+    const phaseTuples = raw.map((ph) => ({
+      startYear: String(ph.startYear ?? ""),
+      endYear: String(ph.endYear ?? ""),
+      rateStr:
+        ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+          ? fmtNumericDisplay(Number(ph.ratePercent))
+          : "",
+    }));
+    return JSON.stringify({
+      method: "cost_per_contract",
+      shape: "phases",
+      startingStr,
+      growthRateStr: "",
+      yearStrs: {},
+      phaseTuples,
+    });
+  }
+  const gr =
+    p.costPerContractRatePercent != null && Number.isFinite(Number(p.costPerContractRatePercent))
+      ? fmtNumericDisplay(Number(p.costPerContractRatePercent))
+      : "";
+  return JSON.stringify({
+    method: "cost_per_contract",
+    shape: "constant",
+    startingStr,
+    growthRateStr: gr,
+    yearStrs: {},
+    phaseTuples: [],
+  });
+}
+
+function buildDraftCptSnapshot(
+  method: "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer" | "cost_per_contract" | "cost_per_location",
+  cptShape: HistGrowthShapeV1,
+  startingCptStr: string,
+  cptGrowthRateStr: string,
+  cptYearStrs: Record<string, string>,
+  cptPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): string {
+  if (!method || method !== "cost_per_contract") {
+    return JSON.stringify({
+      method: "",
+      shape: "constant",
+      startingStr: "",
+      growthRateStr: "",
+      yearStrs: {} as Record<string, string>,
+      phaseTuples: [] as Array<{ startYear: string; endYear: string; rateStr: string }>,
+    });
+  }
+  const startN = parseNumericInput(startingCptStr);
+  const startingCanon = startN != null ? fmtNumericDisplay(startN) : "";
+  if (cptShape === "by_year") {
+    const orderedYearStrs = Object.fromEntries(
+      projectionYears.map((y) => {
+        const n = parseNumericInput(cptYearStrs[y] ?? "") ?? 0;
+        return [y, fmtNumericDisplay(n)];
+      })
+    );
+    const firstN =
+      projectionYears.length > 0 ? parseNumericInput(cptYearStrs[projectionYears[0]!] ?? "") ?? 0 : 0;
+    return JSON.stringify({
+      method: "cost_per_contract",
+      shape: "by_year",
+      startingStr: startingCanon,
+      growthRateStr: fmtNumericDisplay(firstN),
+      yearStrs: orderedYearStrs,
+      phaseTuples: [],
+    });
+  }
+  if (cptShape === "phases") {
+    const phaseTuples = cptPhaseRows.map((r) => {
+      const pv = parseFloat(String(r.rateStr ?? "").replace(/,/g, "").trim());
+      return {
+        startYear: r.startYear,
+        endYear: r.endYear,
+        rateStr: Number.isFinite(pv) ? fmtNumericDisplay(pv) : "",
+      };
+    });
+    return JSON.stringify({
+      method: "cost_per_contract",
+      shape: "phases",
+      startingStr: startingCanon,
+      growthRateStr: "",
+      yearStrs: {},
+      phaseTuples,
+    });
+  }
+  const gr = parseNumericInput(cptGrowthRateStr);
+  return JSON.stringify({
+    method: "cost_per_contract",
+    shape: "constant",
+    startingStr: startingCanon,
+    growthRateStr: gr != null ? fmtNumericDisplay(gr) : "",
+    yearStrs: {},
+    phaseTuples: [],
+  });
+}
+
+function buildSavedCplSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projectionYears: string[]): string {
+  if (!cfg?.forecastMethod || cfg.forecastMethod !== "cost_per_location") {
+    return JSON.stringify({
+      method: "",
+      shape: "constant",
+      startingStr: "",
+      growthRateStr: "",
+      yearStrs: {} as Record<string, string>,
+      phaseTuples: [] as Array<{ startYear: string; endYear: string; rateStr: string }>,
+    });
+  }
+  const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  const pType = (p.growthPatternType as string | undefined) ?? "constant";
+  const startingStr =
+    p.startingCostPerLocation != null && Number.isFinite(Number(p.startingCostPerLocation))
+      ? fmtNumericDisplay(Number(p.startingCostPerLocation))
+      : "";
+  if (pType === "by_year") {
+    const by = (p.costPerLocationRatesByYear ?? {}) as Record<string, number>;
+    const orderedEntries = projectionYears.map((y) => {
+      const raw = by[y];
+      const n = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;
+      return [y, fmtNumericDisplay(n)] as const;
+    });
+    const yearStrs = Object.fromEntries(orderedEntries);
+    const growthRateStr =
+      projectionYears.length > 0 ? (orderedEntries[0]?.[1] ?? "") : "";
+    return JSON.stringify({
+      method: "cost_per_location",
+      shape: "by_year",
+      startingStr,
+      growthRateStr,
+      yearStrs,
+      phaseTuples: [],
+    });
+  }
+  if (pType === "phases") {
+    const raw = Array.isArray(p.costPerLocationGrowthPhases)
+      ? (p.costPerLocationGrowthPhases as GrowthPhaseV1[])
+      : [];
+    const phaseTuples = raw.map((ph) => ({
+      startYear: String(ph.startYear ?? ""),
+      endYear: String(ph.endYear ?? ""),
+      rateStr:
+        ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+          ? fmtNumericDisplay(Number(ph.ratePercent))
+          : "",
+    }));
+    return JSON.stringify({
+      method: "cost_per_location",
+      shape: "phases",
+      startingStr,
+      growthRateStr: "",
+      yearStrs: {},
+      phaseTuples,
+    });
+  }
+  const gr =
+    p.costPerLocationRatePercent != null && Number.isFinite(Number(p.costPerLocationRatePercent))
+      ? fmtNumericDisplay(Number(p.costPerLocationRatePercent))
+      : "";
+  return JSON.stringify({
+    method: "cost_per_location",
+    shape: "constant",
+    startingStr,
+    growthRateStr: gr,
+    yearStrs: {},
+    phaseTuples: [],
+  });
+}
+
+function buildDraftCplSnapshot(
+  method: "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer" | "cost_per_contract" | "cost_per_location",
+  cplShape: HistGrowthShapeV1,
+  startingCplStr: string,
+  cplGrowthRateStr: string,
+  cplYearStrs: Record<string, string>,
+  cplPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): string {
+  if (!method || method !== "cost_per_location") {
+    return JSON.stringify({
+      method: "",
+      shape: "constant",
+      startingStr: "",
+      growthRateStr: "",
+      yearStrs: {} as Record<string, string>,
+      phaseTuples: [] as Array<{ startYear: string; endYear: string; rateStr: string }>,
+    });
+  }
+  const startN = parseNumericInput(startingCplStr);
+  const startingCanon = startN != null ? fmtNumericDisplay(startN) : "";
+  if (cplShape === "by_year") {
+    const orderedYearStrs = Object.fromEntries(
+      projectionYears.map((y) => {
+        const n = parseNumericInput(cplYearStrs[y] ?? "") ?? 0;
+        return [y, fmtNumericDisplay(n)];
+      })
+    );
+    const firstN =
+      projectionYears.length > 0 ? parseNumericInput(cplYearStrs[projectionYears[0]!] ?? "") ?? 0 : 0;
+    return JSON.stringify({
+      method: "cost_per_location",
+      shape: "by_year",
+      startingStr: startingCanon,
+      growthRateStr: fmtNumericDisplay(firstN),
+      yearStrs: orderedYearStrs,
+      phaseTuples: [],
+    });
+  }
+  if (cplShape === "phases") {
+    const phaseTuples = cplPhaseRows.map((r) => {
+      const pv = parseFloat(String(r.rateStr ?? "").replace(/,/g, "").trim());
+      return {
+        startYear: r.startYear,
+        endYear: r.endYear,
+        rateStr: Number.isFinite(pv) ? fmtNumericDisplay(pv) : "",
+      };
+    });
+    return JSON.stringify({
+      method: "cost_per_location",
+      shape: "phases",
+      startingStr: startingCanon,
+      growthRateStr: "",
+      yearStrs: {},
+      phaseTuples,
+    });
+  }
+  const gr = parseNumericInput(cplGrowthRateStr);
+  return JSON.stringify({
+    method: "cost_per_location",
+    shape: "constant",
+    startingStr: startingCanon,
+    growthRateStr: gr != null ? fmtNumericDisplay(gr) : "",
+    yearStrs: {},
+    phaseTuples: [],
+  });
+}
+
+function buildSavedCpuuSnapshot(cfg: CogsForecastLineConfigV1 | undefined, projectionYears: string[]): string {
+  if (!cfg?.forecastMethod || cfg.forecastMethod !== "cost_per_utilized_unit") {
+    return JSON.stringify({
+      method: "",
+      shape: "constant",
+      startingStr: "",
+      growthRateStr: "",
+      yearStrs: {} as Record<string, string>,
+      phaseTuples: [] as Array<{ startYear: string; endYear: string; rateStr: string }>,
+    });
+  }
+  const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  const pType = (p.growthPatternType as string | undefined) ?? "constant";
+  const startingStr =
+    p.startingCostPerUtilizedUnit != null && Number.isFinite(Number(p.startingCostPerUtilizedUnit))
+      ? fmtNumericDisplay(Number(p.startingCostPerUtilizedUnit))
+      : "";
+  if (pType === "by_year") {
+    const by = (p.costPerUtilizedUnitRatesByYear ?? {}) as Record<string, number>;
+    const orderedEntries = projectionYears.map((y) => {
+      const raw = by[y];
+      const n = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;
+      return [y, fmtNumericDisplay(n)] as const;
+    });
+    const yearStrs = Object.fromEntries(orderedEntries);
+    const growthRateStr =
+      projectionYears.length > 0 ? (orderedEntries[0]?.[1] ?? "") : "";
+    return JSON.stringify({
+      method: "cost_per_utilized_unit",
+      shape: "by_year",
+      startingStr,
+      growthRateStr,
+      yearStrs,
+      phaseTuples: [],
+    });
+  }
+  if (pType === "phases") {
+    const raw = Array.isArray(p.costPerUtilizedUnitGrowthPhases)
+      ? (p.costPerUtilizedUnitGrowthPhases as GrowthPhaseV1[])
+      : [];
+    const phaseTuples = raw.map((ph) => ({
+      startYear: String(ph.startYear ?? ""),
+      endYear: String(ph.endYear ?? ""),
+      rateStr:
+        ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+          ? fmtNumericDisplay(Number(ph.ratePercent))
+          : "",
+    }));
+    return JSON.stringify({
+      method: "cost_per_utilized_unit",
+      shape: "phases",
+      startingStr,
+      growthRateStr: "",
+      yearStrs: {},
+      phaseTuples,
+    });
+  }
+  const gr =
+    p.costPerUtilizedUnitRatePercent != null && Number.isFinite(Number(p.costPerUtilizedUnitRatePercent))
+      ? fmtNumericDisplay(Number(p.costPerUtilizedUnitRatePercent))
+      : "";
+  return JSON.stringify({
+    method: "cost_per_utilized_unit",
+    shape: "constant",
+    startingStr,
+    growthRateStr: gr,
+    yearStrs: {},
+    phaseTuples: [],
+  });
+}
+
+function buildDraftCpuuSnapshot(
+  method: "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer" | "cost_per_contract" | "cost_per_location" | "cost_per_utilized_unit",
+  cpuuShape: HistGrowthShapeV1,
+  startingCpuuStr: string,
+  cpuuGrowthRateStr: string,
+  cpuuYearStrs: Record<string, string>,
+  cpuuPhaseRows: PhaseDraftV1[],
+  projectionYears: string[]
+): string {
+  if (!method || method !== "cost_per_utilized_unit") {
+    return JSON.stringify({
+      method: "",
+      shape: "constant",
+      startingStr: "",
+      growthRateStr: "",
+      yearStrs: {} as Record<string, string>,
+      phaseTuples: [] as Array<{ startYear: string; endYear: string; rateStr: string }>,
+    });
+  }
+  const startN = parseNumericInput(startingCpuuStr);
+  const startingCanon = startN != null ? fmtNumericDisplay(startN) : "";
+  if (cpuuShape === "by_year") {
+    const orderedYearStrs = Object.fromEntries(
+      projectionYears.map((y) => {
+        const n = parseNumericInput(cpuuYearStrs[y] ?? "") ?? 0;
+        return [y, fmtNumericDisplay(n)];
+      })
+    );
+    const firstN =
+      projectionYears.length > 0 ? parseNumericInput(cpuuYearStrs[projectionYears[0]!] ?? "") ?? 0 : 0;
+    return JSON.stringify({
+      method: "cost_per_utilized_unit",
+      shape: "by_year",
+      startingStr: startingCanon,
+      growthRateStr: fmtNumericDisplay(firstN),
+      yearStrs: orderedYearStrs,
+      phaseTuples: [],
+    });
+  }
+  if (cpuuShape === "phases") {
+    const phaseTuples = cpuuPhaseRows.map((r) => {
+      const pv = parseFloat(String(r.rateStr ?? "").replace(/,/g, "").trim());
+      return {
+        startYear: r.startYear,
+        endYear: r.endYear,
+        rateStr: Number.isFinite(pv) ? fmtNumericDisplay(pv) : "",
+      };
+    });
+    return JSON.stringify({
+      method: "cost_per_utilized_unit",
+      shape: "phases",
+      startingStr: startingCanon,
+      growthRateStr: "",
+      yearStrs: {},
+      phaseTuples,
+    });
+  }
+  const gr = parseNumericInput(cpuuGrowthRateStr);
+  return JSON.stringify({
+    method: "cost_per_utilized_unit",
     shape: "constant",
     startingStr: startingCanon,
     growthRateStr: gr != null ? fmtNumericDisplay(gr) : "",
@@ -563,6 +1041,26 @@ function ForecastableCogsLineCard({
   );
   const showCpuOption = allowCostPerUnit || cfg?.forecastMethod === "cost_per_unit";
   const showCpcOption = allowCostPerCustomer || cfg?.forecastMethod === "cost_per_customer";
+  const allowCostPerContract = useMemo(
+    () => revenueRowUsesContractsAcvForCogsEligibility(line.linkedRevenueRowId, revenueCfgRows, revenueTree),
+    [line.linkedRevenueRowId, revenueCfgRows, revenueTree, revenueRowsFingerprint]
+  );
+  const showCptOption = allowCostPerContract || cfg?.forecastMethod === "cost_per_contract";
+  const allowCostPerLocation = useMemo(
+    () => revenueRowUsesLocationsRevenuePerLocationForCogsEligibility(line.linkedRevenueRowId, revenueCfgRows, revenueTree),
+    [line.linkedRevenueRowId, revenueCfgRows, revenueTree, revenueRowsFingerprint]
+  );
+  const showCplOption = allowCostPerLocation || cfg?.forecastMethod === "cost_per_location";
+  const allowCostPerUtilizedUnit = useMemo(
+    () =>
+      revenueRowUsesCapacityUtilizationYieldForCogsEligibility(
+        line.linkedRevenueRowId,
+        revenueCfgRows,
+        revenueTree
+      ),
+    [line.linkedRevenueRowId, revenueCfgRows, revenueTree, revenueRowsFingerprint]
+  );
+  const showCpuuOption = allowCostPerUtilizedUnit || cfg?.forecastMethod === "cost_per_utilized_unit";
 
   const currencyCode = useModelStore((s) => s.meta?.currency ?? "USD");
   const pvStartingDrivers = useMemo(
@@ -580,11 +1078,44 @@ function ForecastableCogsLineCard({
     () => resolveCustomersArpuStartingDriversForCogsLinkedRow(line.linkedRevenueRowId, revenueCfgRows, revenueTree),
     [line.linkedRevenueRowId, revenueCfgRows, revenueTree, revenueRowsFingerprint]
   );
+  const cacvStartingDrivers = useMemo(
+    () => resolveContractsAcvStartingDriversForCogsLinkedRow(line.linkedRevenueRowId, revenueCfgRows, revenueTree),
+    [line.linkedRevenueRowId, revenueCfgRows, revenueTree, revenueRowsFingerprint]
+  );
+  const lrplStartingDrivers = useMemo(
+    () =>
+      resolveLocationsRevenuePerLocationStartingDriversForCogsLinkedRow(
+        line.linkedRevenueRowId,
+        revenueCfgRows,
+        revenueTree
+      ),
+    [line.linkedRevenueRowId, revenueCfgRows, revenueTree, revenueRowsFingerprint]
+  );
+  const cuyStartingDrivers = useMemo(
+    () =>
+      resolveCapacityUtilizationYieldStartingDriversForCogsLinkedRow(
+        line.linkedRevenueRowId,
+        revenueCfgRows,
+        revenueTree
+      ),
+    [line.linkedRevenueRowId, revenueCfgRows, revenueTree, revenueRowsFingerprint]
+  );
 
-  const [method, setMethod] = useState<"" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer">(() => {
+  const [method, setMethod] = useState<
+    | ""
+    | "pct_of_revenue"
+    | "cost_per_unit"
+    | "cost_per_customer"
+    | "cost_per_contract"
+    | "cost_per_location"
+    | "cost_per_utilized_unit"
+  >(() => {
     if (cfg?.forecastMethod === "pct_of_revenue") return "pct_of_revenue";
     if (cfg?.forecastMethod === "cost_per_unit") return "cost_per_unit";
     if (cfg?.forecastMethod === "cost_per_customer") return "cost_per_customer";
+    if (cfg?.forecastMethod === "cost_per_contract") return "cost_per_contract";
+    if (cfg?.forecastMethod === "cost_per_location") return "cost_per_location";
+    if (cfg?.forecastMethod === "cost_per_utilized_unit") return "cost_per_utilized_unit";
     return "";
   });
   const [shape, setShape] = useState<HistGrowthShapeV1>("constant");
@@ -601,13 +1132,35 @@ function ForecastableCogsLineCard({
     defaultFullRangePhase(projectionYears, "")
   );
   const [cpcShape, setCpcShape] = useState<HistGrowthShapeV1>("constant");
+  const [cpcCostBasis, setCpcCostBasis] = useState<"monthly" | "annual">("annual");
   const [startingCpcStr, setStartingCpcStr] = useState("");
   const [cpcGrowthRateStr, setCpcGrowthRateStr] = useState("");
   const [cpcYearStrs, setCpcYearStrs] = useState<Record<string, string>>({});
   const [cpcPhaseRows, setCpcPhaseRows] = useState<PhaseDraftV1[]>(() =>
     defaultFullRangePhase(projectionYears, "")
   );
-  const [cardExpanded, setCardExpanded] = useState(true);
+  const [cptShape, setCptShape] = useState<HistGrowthShapeV1>("constant");
+  const [startingCptStr, setStartingCptStr] = useState("");
+  const [cptGrowthRateStr, setCptGrowthRateStr] = useState("");
+  const [cptYearStrs, setCptYearStrs] = useState<Record<string, string>>({});
+  const [cptPhaseRows, setCptPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [cplShape, setCplShape] = useState<HistGrowthShapeV1>("constant");
+  const [startingCplStr, setStartingCplStr] = useState("");
+  const [cplGrowthRateStr, setCplGrowthRateStr] = useState("");
+  const [cplYearStrs, setCplYearStrs] = useState<Record<string, string>>({});
+  const [cplPhaseRows, setCplPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [cpuuShape, setCpuuShape] = useState<HistGrowthShapeV1>("constant");
+  const [startingCpuuStr, setStartingCpuuStr] = useState("");
+  const [cpuuGrowthRateStr, setCpuuGrowthRateStr] = useState("");
+  const [cpuuYearStrs, setCpuuYearStrs] = useState<Record<string, string>>({});
+  const [cpuuPhaseRows, setCpuuPhaseRows] = useState<PhaseDraftV1[]>(() =>
+    defaultFullRangePhase(projectionYears, "")
+  );
+  const [cardExpanded, setCardExpanded] = useState(false);
 
   const impliedMarginAtStart = useMemo(() => {
     if (!pvStartingDrivers) return null;
@@ -623,14 +1176,58 @@ function ForecastableCogsLineCard({
     if (!caStartingDrivers) return null;
     const c = parseNumericInput(startingCpcStr);
     if (c == null || !Number.isFinite(c) || c < 0) return null;
-    const arpuEff =
+    const annualRevPerCustomer =
       caStartingDrivers.arpuBasis === "monthly"
         ? caStartingDrivers.startingArpu * 12
         : caStartingDrivers.startingArpu;
-    if (!Number.isFinite(arpuEff) || arpuEff <= 0) return null;
-    const m = ((arpuEff - c) / arpuEff) * 100;
+    if (!Number.isFinite(annualRevPerCustomer) || annualRevPerCustomer <= 0) return null;
+    const annualCostPerCustomer = cpcCostBasis === "monthly" ? c * 12 : c;
+    const m = ((annualRevPerCustomer - annualCostPerCustomer) / annualRevPerCustomer) * 100;
+    return Number.isFinite(m)
+      ? {
+          enteredCost: c,
+          annualRevPerCustomer,
+          annualCostPerCustomer,
+          marginPct: m,
+        }
+      : null;
+  }, [caStartingDrivers, startingCpcStr, cpcCostBasis]);
+
+  const impliedGrossMarginCptAtStart = useMemo(() => {
+    if (!cacvStartingDrivers) return null;
+    const c = parseNumericInput(startingCptStr);
+    if (c == null || !Number.isFinite(c) || c < 0) return null;
+    const acv = cacvStartingDrivers.startingAcv;
+    if (!Number.isFinite(acv) || acv <= 0) return null;
+    const m = ((acv - c) / acv) * 100;
     return Number.isFinite(m) ? { startCost: c, marginPct: m } : null;
-  }, [caStartingDrivers, startingCpcStr]);
+  }, [cacvStartingDrivers, startingCptStr]);
+
+  const impliedGrossMarginCplAtStart = useMemo(() => {
+    if (!lrplStartingDrivers) return null;
+    const c = parseNumericInput(startingCplStr);
+    if (c == null || !Number.isFinite(c) || c < 0) return null;
+    const rpl = lrplStartingDrivers.startingRevenuePerLocation;
+    if (!Number.isFinite(rpl) || rpl <= 0) return null;
+    const effectiveRevPerLocation =
+      lrplStartingDrivers.revenuePerLocationBasis === "monthly" ? rpl * 12 : rpl;
+    if (!Number.isFinite(effectiveRevPerLocation) || effectiveRevPerLocation <= 0) return null;
+    const m = ((effectiveRevPerLocation - c) / effectiveRevPerLocation) * 100;
+    return Number.isFinite(m) ? { startCost: c, marginPct: m } : null;
+  }, [lrplStartingDrivers, startingCplStr]);
+
+  const impliedGrossMarginCpuuAtStart = useMemo(() => {
+    if (!cuyStartingDrivers) return null;
+    const c = parseNumericInput(startingCpuuStr);
+    if (c == null || !Number.isFinite(c) || c < 0) return null;
+    const eff =
+      cuyStartingDrivers.yieldBasis === "monthly"
+        ? cuyStartingDrivers.startingYield * 12
+        : cuyStartingDrivers.startingYield;
+    if (!Number.isFinite(eff) || eff <= 0) return null;
+    const m = ((eff - c) / eff) * 100;
+    return Number.isFinite(m) ? { startCost: c, marginPct: m } : null;
+  }, [cuyStartingDrivers, startingCpuuStr]);
 
   const savedUnifiedKey =
     cfg?.forecastMethod === "pct_of_revenue"
@@ -639,7 +1236,13 @@ function ForecastableCogsLineCard({
         ? `c:${buildSavedCpuSnapshot(cfg, projectionYears)}`
         : cfg?.forecastMethod === "cost_per_customer"
           ? `k:${buildSavedCpcSnapshot(cfg, projectionYears)}`
-          : "n:";
+          : cfg?.forecastMethod === "cost_per_contract"
+            ? `t:${buildSavedCptSnapshot(cfg, projectionYears)}`
+            : cfg?.forecastMethod === "cost_per_location"
+              ? `l:${buildSavedCplSnapshot(cfg, projectionYears)}`
+              : cfg?.forecastMethod === "cost_per_utilized_unit"
+                ? `u:${buildSavedCpuuSnapshot(cfg, projectionYears)}`
+                : "n:";
   const projectionYearsKey = projectionYears.join("|");
 
   const resetPctDefaults = () => {
@@ -657,19 +1260,254 @@ function ForecastableCogsLineCard({
   };
   const resetCpcDefaults = () => {
     setCpcShape("constant");
+    setCpcCostBasis("annual");
     setStartingCpcStr("");
     setCpcGrowthRateStr("");
     setCpcYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
     setCpcPhaseRows(defaultFullRangePhase(projectionYears, ""));
   };
+  const resetCptDefaults = () => {
+    setCptShape("constant");
+    setStartingCptStr("");
+    setCptGrowthRateStr("");
+    setCptYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+    setCptPhaseRows(defaultFullRangePhase(projectionYears, ""));
+  };
+  const resetCplDefaults = () => {
+    setCplShape("constant");
+    setStartingCplStr("");
+    setCplGrowthRateStr("");
+    setCplYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+    setCplPhaseRows(defaultFullRangePhase(projectionYears, ""));
+  };
+  const resetCpuuDefaults = () => {
+    setCpuuShape("constant");
+    setStartingCpuuStr("");
+    setCpuuGrowthRateStr("");
+    setCpuuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+    setCpuuPhaseRows(defaultFullRangePhase(projectionYears, ""));
+  };
 
   useEffect(() => {
     const fm = cfg?.forecastMethod;
     const nextP = (cfg?.forecastParameters ?? {}) as Record<string, unknown>;
-    if (fm === "cost_per_customer") {
-      setMethod("cost_per_customer");
+    if (fm === "cost_per_utilized_unit") {
+      setMethod("cost_per_utilized_unit");
       resetPctDefaults();
       resetCpuDefaults();
+      resetCpcDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      const pType = (nextP.growthPatternType as string | undefined) ?? "constant";
+      const startFmt =
+        nextP.startingCostPerUtilizedUnit != null && Number.isFinite(Number(nextP.startingCostPerUtilizedUnit))
+          ? fmtNumericDisplay(Number(nextP.startingCostPerUtilizedUnit))
+          : "";
+      if (pType === "phases") {
+        const raw = Array.isArray(nextP.costPerUtilizedUnitGrowthPhases)
+          ? (nextP.costPerUtilizedUnitGrowthPhases as GrowthPhaseV1[])
+          : [];
+        setCpuuShape("phases");
+        setStartingCpuuStr(startFmt);
+        setCpuuGrowthRateStr("");
+        setCpuuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+        setCpuuPhaseRows(
+          raw.length
+            ? raw.map((ph, i) => ({
+                id: `cpuu-ph-${line.lineId}-${i}`,
+                startYear: String(ph.startYear),
+                endYear: String(ph.endYear),
+                rateStr:
+                  ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+                    ? fmtNumericDisplay(Number(ph.ratePercent))
+                    : "",
+              }))
+            : defaultFullRangePhase(projectionYears, "")
+        );
+        return;
+      }
+      if (pType === "by_year") {
+        const by = (nextP.costPerUtilizedUnitRatesByYear ?? {}) as Record<string, number>;
+        setCpuuShape("by_year");
+        setStartingCpuuStr(startFmt);
+        setCpuuGrowthRateStr("");
+        setCpuuYearStrs(
+          Object.fromEntries(
+            projectionYears.map((y) => [
+              y,
+              by[y] != null && Number.isFinite(Number(by[y])) ? fmtNumericDisplay(Number(by[y])) : "",
+            ])
+          )
+        );
+        setCpuuPhaseRows(defaultFullRangePhase(projectionYears, ""));
+        return;
+      }
+      setCpuuShape("constant");
+      setStartingCpuuStr(startFmt);
+      setCpuuGrowthRateStr(
+        nextP.costPerUtilizedUnitRatePercent != null &&
+          Number.isFinite(Number(nextP.costPerUtilizedUnitRatePercent))
+          ? fmtNumericDisplay(Number(nextP.costPerUtilizedUnitRatePercent))
+          : ""
+      );
+      setCpuuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setCpuuPhaseRows(
+        defaultFullRangePhase(
+          projectionYears,
+          nextP.costPerUtilizedUnitRatePercent != null &&
+            Number.isFinite(Number(nextP.costPerUtilizedUnitRatePercent))
+            ? fmtNumericDisplay(Number(nextP.costPerUtilizedUnitRatePercent))
+            : ""
+        )
+      );
+      return;
+    }
+    if (fm === "cost_per_location") {
+      setMethod("cost_per_location");
+      resetPctDefaults();
+      resetCpuDefaults();
+      resetCpcDefaults();
+      resetCptDefaults();
+      resetCpuuDefaults();
+      const pType = (nextP.growthPatternType as string | undefined) ?? "constant";
+      const startFmt =
+        nextP.startingCostPerLocation != null && Number.isFinite(Number(nextP.startingCostPerLocation))
+          ? fmtNumericDisplay(Number(nextP.startingCostPerLocation))
+          : "";
+      if (pType === "phases") {
+        const raw = Array.isArray(nextP.costPerLocationGrowthPhases)
+          ? (nextP.costPerLocationGrowthPhases as GrowthPhaseV1[])
+          : [];
+        setCplShape("phases");
+        setStartingCplStr(startFmt);
+        setCplGrowthRateStr("");
+        setCplYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+        setCplPhaseRows(
+          raw.length
+            ? raw.map((ph, i) => ({
+                id: `cpl-ph-${line.lineId}-${i}`,
+                startYear: String(ph.startYear),
+                endYear: String(ph.endYear),
+                rateStr:
+                  ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+                    ? fmtNumericDisplay(Number(ph.ratePercent))
+                    : "",
+              }))
+            : defaultFullRangePhase(projectionYears, "")
+        );
+        return;
+      }
+      if (pType === "by_year") {
+        const by = (nextP.costPerLocationRatesByYear ?? {}) as Record<string, number>;
+        setCplShape("by_year");
+        setStartingCplStr(startFmt);
+        setCplGrowthRateStr("");
+        setCplYearStrs(
+          Object.fromEntries(
+            projectionYears.map((y) => [
+              y,
+              by[y] != null && Number.isFinite(Number(by[y])) ? fmtNumericDisplay(Number(by[y])) : "",
+            ])
+          )
+        );
+        setCplPhaseRows(defaultFullRangePhase(projectionYears, ""));
+        return;
+      }
+      setCplShape("constant");
+      setStartingCplStr(startFmt);
+      setCplGrowthRateStr(
+        nextP.costPerLocationRatePercent != null && Number.isFinite(Number(nextP.costPerLocationRatePercent))
+          ? fmtNumericDisplay(Number(nextP.costPerLocationRatePercent))
+          : ""
+      );
+      setCplYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setCplPhaseRows(
+        defaultFullRangePhase(
+          projectionYears,
+          nextP.costPerLocationRatePercent != null && Number.isFinite(Number(nextP.costPerLocationRatePercent))
+            ? fmtNumericDisplay(Number(nextP.costPerLocationRatePercent))
+            : ""
+        )
+      );
+      return;
+    }
+    if (fm === "cost_per_contract") {
+      setMethod("cost_per_contract");
+      resetPctDefaults();
+      resetCpuDefaults();
+      resetCpcDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
+      const pType = (nextP.growthPatternType as string | undefined) ?? "constant";
+      const startFmt =
+        nextP.startingCostPerContract != null && Number.isFinite(Number(nextP.startingCostPerContract))
+          ? fmtNumericDisplay(Number(nextP.startingCostPerContract))
+          : "";
+      if (pType === "phases") {
+        const raw = Array.isArray(nextP.costPerContractGrowthPhases)
+          ? (nextP.costPerContractGrowthPhases as GrowthPhaseV1[])
+          : [];
+        setCptShape("phases");
+        setStartingCptStr(startFmt);
+        setCptGrowthRateStr("");
+        setCptYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+        setCptPhaseRows(
+          raw.length
+            ? raw.map((ph, i) => ({
+                id: `cpt-ph-${line.lineId}-${i}`,
+                startYear: String(ph.startYear),
+                endYear: String(ph.endYear),
+                rateStr:
+                  ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+                    ? fmtNumericDisplay(Number(ph.ratePercent))
+                    : "",
+              }))
+            : defaultFullRangePhase(projectionYears, "")
+        );
+        return;
+      }
+      if (pType === "by_year") {
+        const by = (nextP.costPerContractRatesByYear ?? {}) as Record<string, number>;
+        setCptShape("by_year");
+        setStartingCptStr(startFmt);
+        setCptGrowthRateStr("");
+        setCptYearStrs(
+          Object.fromEntries(
+            projectionYears.map((y) => [
+              y,
+              by[y] != null && Number.isFinite(Number(by[y])) ? fmtNumericDisplay(Number(by[y])) : "",
+            ])
+          )
+        );
+        setCptPhaseRows(defaultFullRangePhase(projectionYears, ""));
+        return;
+      }
+      setCptShape("constant");
+      setStartingCptStr(startFmt);
+      setCptGrowthRateStr(
+        nextP.costPerContractRatePercent != null && Number.isFinite(Number(nextP.costPerContractRatePercent))
+          ? fmtNumericDisplay(Number(nextP.costPerContractRatePercent))
+          : ""
+      );
+      setCptYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setCptPhaseRows(
+        defaultFullRangePhase(
+          projectionYears,
+          nextP.costPerContractRatePercent != null && Number.isFinite(Number(nextP.costPerContractRatePercent))
+            ? fmtNumericDisplay(Number(nextP.costPerContractRatePercent))
+            : ""
+        )
+      );
+      return;
+    }
+    if (fm === "cost_per_customer") {
+      setMethod("cost_per_customer");
+      setCpcCostBasis(cpcBasisFromSavedParams(nextP));
+      resetPctDefaults();
+      resetCpuDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
       const pType = (nextP.growthPatternType as string | undefined) ?? "constant";
       const startFmt =
         nextP.startingCostPerCustomer != null && Number.isFinite(Number(nextP.startingCostPerCustomer))
@@ -736,6 +1574,9 @@ function ForecastableCogsLineCard({
       setMethod("cost_per_unit");
       resetPctDefaults();
       resetCpcDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
       const pType = (nextP.growthPatternType as string | undefined) ?? "constant";
       const startFmt =
         nextP.startingCostPerUnit != null && Number.isFinite(Number(nextP.startingCostPerUnit))
@@ -802,6 +1643,9 @@ function ForecastableCogsLineCard({
       setMethod("pct_of_revenue");
       resetCpuDefaults();
       resetCpcDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
       const pType = (nextP.growthPatternType as string | undefined) ?? "constant";
       if (pType === "phases") {
         const raw = Array.isArray(nextP.growthPhases) ? (nextP.growthPhases as GrowthPhaseV1[]) : [];
@@ -853,6 +1697,9 @@ function ForecastableCogsLineCard({
     resetPctDefaults();
     resetCpuDefaults();
     resetCpcDefaults();
+    resetCptDefaults();
+    resetCplDefaults();
+    resetCpuuDefaults();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- cfg read when savedUnifiedKey changes; omit cfg ref to avoid draft reset on store object churn
   }, [savedUnifiedKey, line.lineId, projectionYearsKey]);
 
@@ -903,6 +1750,57 @@ function ForecastableCogsLineCard({
   const cpcPhaseErrorLines = useMemo(
     () => (cpcShape === "phases" ? mapCogsCpcPhaseValidationErrors(cpcPhaseValidation.errors) : []),
     [cpcShape, cpcPhaseValidation.errors]
+  );
+
+  const parsedStartingCpt = parseNumericInput(startingCptStr);
+  const hasStartingCpt = parsedStartingCpt != null && parsedStartingCpt > 0;
+  const parsedCptGrowthRate = parseNumericInput(cptGrowthRateStr);
+  const hasCptConstantGrowth = parsedCptGrowthRate != null;
+  const cptByYearOk =
+    projectionYears.length > 0 &&
+    projectionYears.every((y) => parseNumericInput(cptYearStrs[y] ?? "") != null);
+  const cptPhaseValidation = useMemo(
+    () => validateGrowthPhases(draftsToPhases(cptPhaseRows), projectionYears),
+    [cptPhaseRows, projectionYears]
+  );
+  const cptPhaseOk = projectionYears.length > 0 && cptPhaseValidation.ok;
+  const cptPhaseErrorLines = useMemo(
+    () => (cptShape === "phases" ? mapCogsCptPhaseValidationErrors(cptPhaseValidation.errors) : []),
+    [cptShape, cptPhaseValidation.errors]
+  );
+
+  const parsedStartingCpl = parseNumericInput(startingCplStr);
+  const hasStartingCpl = parsedStartingCpl != null && parsedStartingCpl > 0;
+  const parsedCplGrowthRate = parseNumericInput(cplGrowthRateStr);
+  const hasCplConstantGrowth = parsedCplGrowthRate != null;
+  const cplByYearOk =
+    projectionYears.length > 0 &&
+    projectionYears.every((y) => parseNumericInput(cplYearStrs[y] ?? "") != null);
+  const cplPhaseValidation = useMemo(
+    () => validateGrowthPhases(draftsToPhases(cplPhaseRows), projectionYears),
+    [cplPhaseRows, projectionYears]
+  );
+  const cplPhaseOk = projectionYears.length > 0 && cplPhaseValidation.ok;
+  const cplPhaseErrorLines = useMemo(
+    () => (cplShape === "phases" ? mapCogsCplPhaseValidationErrors(cplPhaseValidation.errors) : []),
+    [cplShape, cplPhaseValidation.errors]
+  );
+
+  const parsedStartingCpuu = parseNumericInput(startingCpuuStr);
+  const hasStartingCpuu = parsedStartingCpuu != null && parsedStartingCpuu > 0;
+  const parsedCpuuGrowthRate = parseNumericInput(cpuuGrowthRateStr);
+  const hasCpuuConstantGrowth = parsedCpuuGrowthRate != null;
+  const cpuuByYearOk =
+    projectionYears.length > 0 &&
+    projectionYears.every((y) => parseNumericInput(cpuuYearStrs[y] ?? "") != null);
+  const cpuuPhaseValidation = useMemo(
+    () => validateGrowthPhases(draftsToPhases(cpuuPhaseRows), projectionYears),
+    [cpuuPhaseRows, projectionYears]
+  );
+  const cpuuPhaseOk = projectionYears.length > 0 && cpuuPhaseValidation.ok;
+  const cpuuPhaseErrorLines = useMemo(
+    () => (cpuuShape === "phases" ? mapCogsCpuuPhaseValidationErrors(cpuuPhaseValidation.errors) : []),
+    [cpuuShape, cpuuPhaseValidation.errors]
   );
 
   const buildCogsPctConfig = useMemo(() => {
@@ -997,6 +1895,7 @@ function ForecastableCogsLineCard({
     }
     const params: Record<string, unknown> = {};
     const start = hasStartingCpc ? parsedStartingCpc! : 0;
+    params.costPerCustomerBasis = cpcCostBasis;
     if (cpcShape === "constant") {
       params.growthPatternType = "constant";
       params.startingCostPerCustomer = start;
@@ -1046,6 +1945,178 @@ function ForecastableCogsLineCard({
     parsedCpcGrowthRate,
     cpcByYearOk,
     cpcPhaseOk,
+    cpcCostBasis,
+  ]);
+
+  const buildCogsCptConfig = useMemo(() => {
+    if (method !== "cost_per_contract") {
+      return { forecastMethod: undefined, forecastParameters: undefined, valid: true };
+    }
+    const params: Record<string, unknown> = {};
+    const start = hasStartingCpt ? parsedStartingCpt! : 0;
+    if (cptShape === "constant") {
+      params.growthPatternType = "constant";
+      params.startingCostPerContract = start;
+      params.costPerContractRatePercent = hasCptConstantGrowth ? parsedCptGrowthRate! : 0;
+    } else if (cptShape === "by_year") {
+      const costPerContractRatesByYear: Record<string, number> = {};
+      for (const y of projectionYears) costPerContractRatesByYear[y] = parseNumericInput(cptYearStrs[y] ?? "") ?? 0;
+      params.growthPatternType = "by_year";
+      params.startingCostPerContract = start;
+      params.costPerContractRatesByYear = costPerContractRatesByYear;
+      params.costPerContractRatePercent = projectionYears.length
+        ? costPerContractRatesByYear[projectionYears[0]] ?? 0
+        : 0;
+    } else {
+      const phases = draftsToPhases(cptPhaseRows);
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      params.growthPatternType = "phases";
+      params.startingCostPerContract = start;
+      params.costPerContractGrowthPhases = phases;
+      params.costPerContractRatePercent =
+        projectionYears.length > 0
+          ? expanded[projectionYears[0]] ?? phases[0]?.ratePercent ?? 0
+          : phases[0]?.ratePercent ?? 0;
+    }
+    return {
+      forecastMethod: "cost_per_contract" as const,
+      forecastParameters: params,
+      valid:
+        hasStartingCpt &&
+        (cptShape === "constant"
+          ? hasCptConstantGrowth
+          : cptShape === "by_year"
+            ? cptByYearOk
+            : cptPhaseOk),
+    };
+  }, [
+    method,
+    cptShape,
+    startingCptStr,
+    cptGrowthRateStr,
+    cptYearStrs,
+    cptPhaseRows,
+    projectionYears.join("|"),
+    hasStartingCpt,
+    parsedStartingCpt,
+    hasCptConstantGrowth,
+    parsedCptGrowthRate,
+    cptByYearOk,
+    cptPhaseOk,
+  ]);
+
+  const buildCogsCplConfig = useMemo(() => {
+    if (method !== "cost_per_location") {
+      return { forecastMethod: undefined, forecastParameters: undefined, valid: true };
+    }
+    const params: Record<string, unknown> = {};
+    const start = hasStartingCpl ? parsedStartingCpl! : 0;
+    if (cplShape === "constant") {
+      params.growthPatternType = "constant";
+      params.startingCostPerLocation = start;
+      params.costPerLocationRatePercent = hasCplConstantGrowth ? parsedCplGrowthRate! : 0;
+    } else if (cplShape === "by_year") {
+      const costPerLocationRatesByYear: Record<string, number> = {};
+      for (const y of projectionYears) costPerLocationRatesByYear[y] = parseNumericInput(cplYearStrs[y] ?? "") ?? 0;
+      params.growthPatternType = "by_year";
+      params.startingCostPerLocation = start;
+      params.costPerLocationRatesByYear = costPerLocationRatesByYear;
+      params.costPerLocationRatePercent = projectionYears.length
+        ? costPerLocationRatesByYear[projectionYears[0]] ?? 0
+        : 0;
+    } else {
+      const phases = draftsToPhases(cplPhaseRows);
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      params.growthPatternType = "phases";
+      params.startingCostPerLocation = start;
+      params.costPerLocationGrowthPhases = phases;
+      params.costPerLocationRatePercent =
+        projectionYears.length > 0
+          ? expanded[projectionYears[0]] ?? phases[0]?.ratePercent ?? 0
+          : phases[0]?.ratePercent ?? 0;
+    }
+    return {
+      forecastMethod: "cost_per_location" as const,
+      forecastParameters: params,
+      valid:
+        hasStartingCpl &&
+        (cplShape === "constant"
+          ? hasCplConstantGrowth
+          : cplShape === "by_year"
+            ? cplByYearOk
+            : cplPhaseOk),
+    };
+  }, [
+    method,
+    cplShape,
+    startingCplStr,
+    cplGrowthRateStr,
+    cplYearStrs,
+    cplPhaseRows,
+    projectionYears.join("|"),
+    hasStartingCpl,
+    parsedStartingCpl,
+    hasCplConstantGrowth,
+    parsedCplGrowthRate,
+    cplByYearOk,
+    cplPhaseOk,
+  ]);
+
+  const buildCogsCpuuConfig = useMemo(() => {
+    if (method !== "cost_per_utilized_unit") {
+      return { forecastMethod: undefined, forecastParameters: undefined, valid: true };
+    }
+    const params: Record<string, unknown> = {};
+    const start = hasStartingCpuu ? parsedStartingCpuu! : 0;
+    if (cpuuShape === "constant") {
+      params.growthPatternType = "constant";
+      params.startingCostPerUtilizedUnit = start;
+      params.costPerUtilizedUnitRatePercent = hasCpuuConstantGrowth ? parsedCpuuGrowthRate! : 0;
+    } else if (cpuuShape === "by_year") {
+      const costPerUtilizedUnitRatesByYear: Record<string, number> = {};
+      for (const y of projectionYears) costPerUtilizedUnitRatesByYear[y] = parseNumericInput(cpuuYearStrs[y] ?? "") ?? 0;
+      params.growthPatternType = "by_year";
+      params.startingCostPerUtilizedUnit = start;
+      params.costPerUtilizedUnitRatesByYear = costPerUtilizedUnitRatesByYear;
+      params.costPerUtilizedUnitRatePercent = projectionYears.length
+        ? costPerUtilizedUnitRatesByYear[projectionYears[0]] ?? 0
+        : 0;
+    } else {
+      const phases = draftsToPhases(cpuuPhaseRows);
+      const expanded = expandPhasesToRatesByYear(phases, projectionYears);
+      params.growthPatternType = "phases";
+      params.startingCostPerUtilizedUnit = start;
+      params.costPerUtilizedUnitGrowthPhases = phases;
+      params.costPerUtilizedUnitRatePercent =
+        projectionYears.length > 0
+          ? expanded[projectionYears[0]] ?? phases[0]?.ratePercent ?? 0
+          : phases[0]?.ratePercent ?? 0;
+    }
+    return {
+      forecastMethod: "cost_per_utilized_unit" as const,
+      forecastParameters: params,
+      valid:
+        hasStartingCpuu &&
+        (cpuuShape === "constant"
+          ? hasCpuuConstantGrowth
+          : cpuuShape === "by_year"
+            ? cpuuByYearOk
+            : cpuuPhaseOk),
+    };
+  }, [
+    method,
+    cpuuShape,
+    startingCpuuStr,
+    cpuuGrowthRateStr,
+    cpuuYearStrs,
+    cpuuPhaseRows,
+    projectionYears.join("|"),
+    hasStartingCpuu,
+    parsedStartingCpuu,
+    hasCpuuConstantGrowth,
+    parsedCpuuGrowthRate,
+    cpuuByYearOk,
+    cpuuPhaseOk,
   ]);
 
   const draftUnifiedKey = useMemo(() => {
@@ -1056,7 +2127,24 @@ function ForecastableCogsLineCard({
       return `c:${buildDraftCpuSnapshot(method, cpuShape, startingCostStr, growthRateStr, cpuYearStrs, cpuPhaseRows, projectionYears)}`;
     }
     if (method === "cost_per_customer") {
-      return `k:${buildDraftCpcSnapshot(method, cpcShape, startingCpcStr, cpcGrowthRateStr, cpcYearStrs, cpcPhaseRows, projectionYears)}`;
+      return `k:${buildDraftCpcSnapshot(method, cpcShape, cpcCostBasis, startingCpcStr, cpcGrowthRateStr, cpcYearStrs, cpcPhaseRows, projectionYears)}`;
+    }
+    if (method === "cost_per_contract") {
+      return `t:${buildDraftCptSnapshot(method, cptShape, startingCptStr, cptGrowthRateStr, cptYearStrs, cptPhaseRows, projectionYears)}`;
+    }
+    if (method === "cost_per_location") {
+      return `l:${buildDraftCplSnapshot(method, cplShape, startingCplStr, cplGrowthRateStr, cplYearStrs, cplPhaseRows, projectionYears)}`;
+    }
+    if (method === "cost_per_utilized_unit") {
+      return `u:${buildDraftCpuuSnapshot(
+        method,
+        cpuuShape,
+        startingCpuuStr,
+        cpuuGrowthRateStr,
+        cpuuYearStrs,
+        cpuuPhaseRows,
+        projectionYears
+      )}`;
     }
     return "n:";
   }, [
@@ -1071,17 +2159,36 @@ function ForecastableCogsLineCard({
     cpuYearStrs,
     cpuPhaseRows,
     cpcShape,
+    cpcCostBasis,
     startingCpcStr,
     cpcGrowthRateStr,
     cpcYearStrs,
     cpcPhaseRows,
+    cptShape,
+    startingCptStr,
+    cptGrowthRateStr,
+    cptYearStrs,
+    cptPhaseRows,
+    cplShape,
+    startingCplStr,
+    cplGrowthRateStr,
+    cplYearStrs,
+    cplPhaseRows,
+    cpuuShape,
+    startingCpuuStr,
+    cpuuGrowthRateStr,
+    cpuuYearStrs,
+    cpuuPhaseRows,
     projectionYears,
   ]);
 
   const hasSavedConfig =
     hasPersistedCogsPctConfig(cfg, projectionYears) ||
     hasPersistedCogsCpuConfig(cfg, projectionYears) ||
-    hasPersistedCogsCpcConfig(cfg, projectionYears);
+    hasPersistedCogsCpcConfig(cfg, projectionYears) ||
+    hasPersistedCogsCptConfig(cfg, projectionYears) ||
+    hasPersistedCogsCplConfig(cfg, projectionYears) ||
+    hasPersistedCogsCpuuConfig(cfg, projectionYears);
   const hasUnsavedChanges = draftUnifiedKey !== savedUnifiedKey;
 
   const canApply =
@@ -1091,7 +2198,13 @@ function ForecastableCogsLineCard({
         ? buildCogsCpuConfig.valid
         : method === "cost_per_customer"
           ? buildCogsCpcConfig.valid
-          : false;
+          : method === "cost_per_contract"
+            ? buildCogsCptConfig.valid
+            : method === "cost_per_location"
+              ? buildCogsCplConfig.valid
+              : method === "cost_per_utilized_unit"
+                ? buildCogsCpuuConfig.valid
+                : false;
   const applyDisabled = !canApply || !hasUnsavedChanges;
   const resetDisabled = !hasUnsavedChanges;
 
@@ -1104,10 +2217,30 @@ function ForecastableCogsLineCard({
       return `Cost per Unit · ${cogsPatternLabel(cpuShape)} · Revenue: ${line.lineLabel} (${revDriver})`;
     }
     if (method === "cost_per_customer") {
-      return `Cost per Customer · ${cogsPatternLabel(cpcShape)} · Revenue: ${line.lineLabel} (${revDriver})`;
+      return `Cost per Customer (${cpcCostBasis === "monthly" ? "monthly" : "annual"} cost) · ${cogsPatternLabel(cpcShape)} · Revenue: ${line.lineLabel} (${revDriver})`;
+    }
+    if (method === "cost_per_contract") {
+      return `Cost per Contract · ${cogsPatternLabel(cptShape)} · Revenue: ${line.lineLabel} (${revDriver})`;
+    }
+    if (method === "cost_per_location") {
+      return `Cost per Location · ${cogsPatternLabel(cplShape)} · Revenue: ${line.lineLabel} (${revDriver})`;
+    }
+    if (method === "cost_per_utilized_unit") {
+      return `Cost per Utilized Unit · ${cogsPatternLabel(cpuuShape)} · Revenue: ${line.lineLabel} (${revDriver})`;
     }
     return `No forecast method selected · Revenue: ${line.lineLabel} (${revDriver})`;
-  }, [method, shape, cpuShape, cpcShape, line.lineLabel, line.linkedRevenueMethod]);
+  }, [
+    method,
+    shape,
+    cpuShape,
+    cpcShape,
+    cpcCostBasis,
+    cptShape,
+    cplShape,
+    cpuuShape,
+    line.lineLabel,
+    line.linkedRevenueMethod,
+  ]);
 
   const toggleCardExpanded = () => setCardExpanded((v) => !v);
 
@@ -1148,15 +2281,193 @@ function ForecastableCogsLineCard({
       });
       return;
     }
+    if (method === "cost_per_contract") {
+      if (!buildCogsCptConfig.valid) return;
+      setCogsForecastLineV1(line.lineId, {
+        lineId: line.lineId,
+        linkedRevenueRowId: line.linkedRevenueRowId,
+        lineLabel: line.lineLabel,
+        linkedRevenueMethod: line.linkedRevenueMethod,
+        forecastMethod: buildCogsCptConfig.forecastMethod,
+        forecastParameters: buildCogsCptConfig.forecastParameters as Record<string, unknown> | undefined,
+      });
+      return;
+    }
+    if (method === "cost_per_location") {
+      if (!buildCogsCplConfig.valid) return;
+      setCogsForecastLineV1(line.lineId, {
+        lineId: line.lineId,
+        linkedRevenueRowId: line.linkedRevenueRowId,
+        lineLabel: line.lineLabel,
+        linkedRevenueMethod: line.linkedRevenueMethod,
+        forecastMethod: buildCogsCplConfig.forecastMethod,
+        forecastParameters: buildCogsCplConfig.forecastParameters as Record<string, unknown> | undefined,
+      });
+      return;
+    }
+    if (method === "cost_per_utilized_unit") {
+      if (!buildCogsCpuuConfig.valid) return;
+      setCogsForecastLineV1(line.lineId, {
+        lineId: line.lineId,
+        linkedRevenueRowId: line.linkedRevenueRowId,
+        lineLabel: line.lineLabel,
+        linkedRevenueMethod: line.linkedRevenueMethod,
+        forecastMethod: buildCogsCpuuConfig.forecastMethod,
+        forecastParameters: buildCogsCpuuConfig.forecastParameters as Record<string, unknown> | undefined,
+      });
+      return;
+    }
   };
 
   const reset = () => {
     const fm = cfg?.forecastMethod;
     const next = cfg?.forecastParameters as Record<string, unknown> | undefined;
-    if (fm === "cost_per_customer" && next) {
-      setMethod("cost_per_customer");
+    if (fm === "cost_per_location" && next) {
+      setMethod("cost_per_location");
       resetPctDefaults();
       resetCpuDefaults();
+      resetCpcDefaults();
+      resetCptDefaults();
+      resetCpuuDefaults();
+      const pType = (next.growthPatternType as string | undefined) ?? "constant";
+      const startFmt =
+        next.startingCostPerLocation != null && Number.isFinite(Number(next.startingCostPerLocation))
+          ? fmtNumericDisplay(Number(next.startingCostPerLocation))
+          : "";
+      if (pType === "phases") {
+        const raw = Array.isArray(next.costPerLocationGrowthPhases)
+          ? (next.costPerLocationGrowthPhases as GrowthPhaseV1[])
+          : [];
+        setCplShape("phases");
+        setStartingCplStr(startFmt);
+        setCplGrowthRateStr("");
+        setCplYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+        setCplPhaseRows(
+          raw.length
+            ? raw.map((ph, i) => ({
+                id: `cpl-ph-${line.lineId}-${i}-r`,
+                startYear: String(ph.startYear),
+                endYear: String(ph.endYear),
+                rateStr:
+                  ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+                    ? fmtNumericDisplay(Number(ph.ratePercent))
+                    : "",
+              }))
+            : defaultFullRangePhase(projectionYears, "")
+        );
+        return;
+      }
+      if (pType === "by_year") {
+        const by = (next.costPerLocationRatesByYear ?? {}) as Record<string, number>;
+        setCplShape("by_year");
+        setStartingCplStr(startFmt);
+        setCplGrowthRateStr("");
+        setCplYearStrs(
+          Object.fromEntries(
+            projectionYears.map((y) => [
+              y,
+              by[y] != null && Number.isFinite(Number(by[y])) ? fmtNumericDisplay(Number(by[y])) : "",
+            ])
+          )
+        );
+        setCplPhaseRows(defaultFullRangePhase(projectionYears, ""));
+        return;
+      }
+      setCplShape("constant");
+      setStartingCplStr(startFmt);
+      setCplGrowthRateStr(
+        next.costPerLocationRatePercent != null && Number.isFinite(Number(next.costPerLocationRatePercent))
+          ? fmtNumericDisplay(Number(next.costPerLocationRatePercent))
+          : ""
+      );
+      setCplYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setCplPhaseRows(
+        defaultFullRangePhase(
+          projectionYears,
+          next.costPerLocationRatePercent != null && Number.isFinite(Number(next.costPerLocationRatePercent))
+            ? fmtNumericDisplay(Number(next.costPerLocationRatePercent))
+            : ""
+        )
+      );
+      return;
+    }
+    if (fm === "cost_per_contract" && next) {
+      setMethod("cost_per_contract");
+      resetPctDefaults();
+      resetCpuDefaults();
+      resetCpcDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
+      const pType = (next.growthPatternType as string | undefined) ?? "constant";
+      const startFmt =
+        next.startingCostPerContract != null && Number.isFinite(Number(next.startingCostPerContract))
+          ? fmtNumericDisplay(Number(next.startingCostPerContract))
+          : "";
+      if (pType === "phases") {
+        const raw = Array.isArray(next.costPerContractGrowthPhases)
+          ? (next.costPerContractGrowthPhases as GrowthPhaseV1[])
+          : [];
+        setCptShape("phases");
+        setStartingCptStr(startFmt);
+        setCptGrowthRateStr("");
+        setCptYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+        setCptPhaseRows(
+          raw.length
+            ? raw.map((ph, i) => ({
+                id: `cpt-ph-${line.lineId}-${i}-r`,
+                startYear: String(ph.startYear),
+                endYear: String(ph.endYear),
+                rateStr:
+                  ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+                    ? fmtNumericDisplay(Number(ph.ratePercent))
+                    : "",
+              }))
+            : defaultFullRangePhase(projectionYears, "")
+        );
+        return;
+      }
+      if (pType === "by_year") {
+        const by = (next.costPerContractRatesByYear ?? {}) as Record<string, number>;
+        setCptShape("by_year");
+        setStartingCptStr(startFmt);
+        setCptGrowthRateStr("");
+        setCptYearStrs(
+          Object.fromEntries(
+            projectionYears.map((y) => [
+              y,
+              by[y] != null && Number.isFinite(Number(by[y])) ? fmtNumericDisplay(Number(by[y])) : "",
+            ])
+          )
+        );
+        setCptPhaseRows(defaultFullRangePhase(projectionYears, ""));
+        return;
+      }
+      setCptShape("constant");
+      setStartingCptStr(startFmt);
+      setCptGrowthRateStr(
+        next.costPerContractRatePercent != null && Number.isFinite(Number(next.costPerContractRatePercent))
+          ? fmtNumericDisplay(Number(next.costPerContractRatePercent))
+          : ""
+      );
+      setCptYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setCptPhaseRows(
+        defaultFullRangePhase(
+          projectionYears,
+          next.costPerContractRatePercent != null && Number.isFinite(Number(next.costPerContractRatePercent))
+            ? fmtNumericDisplay(Number(next.costPerContractRatePercent))
+            : ""
+        )
+      );
+      return;
+    }
+    if (fm === "cost_per_customer" && next) {
+      setMethod("cost_per_customer");
+      setCpcCostBasis(cpcBasisFromSavedParams(next));
+      resetPctDefaults();
+      resetCpuDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
       const pType = (next.growthPatternType as string | undefined) ?? "constant";
       const startFmt =
         next.startingCostPerCustomer != null && Number.isFinite(Number(next.startingCostPerCustomer))
@@ -1223,6 +2534,9 @@ function ForecastableCogsLineCard({
       setMethod("cost_per_unit");
       resetPctDefaults();
       resetCpcDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
       const pType = (next.growthPatternType as string | undefined) ?? "constant";
       const startFmt =
         next.startingCostPerUnit != null && Number.isFinite(Number(next.startingCostPerUnit))
@@ -1285,10 +2599,84 @@ function ForecastableCogsLineCard({
       );
       return;
     }
+    if (fm === "cost_per_utilized_unit" && next) {
+      setMethod("cost_per_utilized_unit");
+      resetPctDefaults();
+      resetCpuDefaults();
+      resetCpcDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      const pType = (next.growthPatternType as string | undefined) ?? "constant";
+      const startFmt =
+        next.startingCostPerUtilizedUnit != null && Number.isFinite(Number(next.startingCostPerUtilizedUnit))
+          ? fmtNumericDisplay(Number(next.startingCostPerUtilizedUnit))
+          : "";
+      if (pType === "phases") {
+        const raw = Array.isArray(next.costPerUtilizedUnitGrowthPhases)
+          ? (next.costPerUtilizedUnitGrowthPhases as GrowthPhaseV1[])
+          : [];
+        setCpuuShape("phases");
+        setStartingCpuuStr(startFmt);
+        setCpuuGrowthRateStr("");
+        setCpuuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+        setCpuuPhaseRows(
+          raw.length
+            ? raw.map((ph, i) => ({
+                id: `cpuu-ph-${line.lineId}-${i}-r`,
+                startYear: String(ph.startYear),
+                endYear: String(ph.endYear),
+                rateStr:
+                  ph.ratePercent != null && Number.isFinite(Number(ph.ratePercent))
+                    ? fmtNumericDisplay(Number(ph.ratePercent))
+                    : "",
+              }))
+            : defaultFullRangePhase(projectionYears, "")
+        );
+        return;
+      }
+      if (pType === "by_year") {
+        const by = (next.costPerUtilizedUnitRatesByYear ?? {}) as Record<string, number>;
+        setCpuuShape("by_year");
+        setStartingCpuuStr(startFmt);
+        setCpuuGrowthRateStr("");
+        setCpuuYearStrs(
+          Object.fromEntries(
+            projectionYears.map((y) => [
+              y,
+              by[y] != null && Number.isFinite(Number(by[y])) ? fmtNumericDisplay(Number(by[y])) : "",
+            ])
+          )
+        );
+        setCpuuPhaseRows(defaultFullRangePhase(projectionYears, ""));
+        return;
+      }
+      setCpuuShape("constant");
+      setStartingCpuuStr(startFmt);
+      setCpuuGrowthRateStr(
+        next.costPerUtilizedUnitRatePercent != null &&
+          Number.isFinite(Number(next.costPerUtilizedUnitRatePercent))
+          ? fmtNumericDisplay(Number(next.costPerUtilizedUnitRatePercent))
+          : ""
+      );
+      setCpuuYearStrs(Object.fromEntries(projectionYears.map((y) => [y, ""])));
+      setCpuuPhaseRows(
+        defaultFullRangePhase(
+          projectionYears,
+          next.costPerUtilizedUnitRatePercent != null &&
+            Number.isFinite(Number(next.costPerUtilizedUnitRatePercent))
+            ? fmtNumericDisplay(Number(next.costPerUtilizedUnitRatePercent))
+            : ""
+        )
+      );
+      return;
+    }
     if (fm === "pct_of_revenue" && next) {
       setMethod("pct_of_revenue");
       resetCpuDefaults();
       resetCpcDefaults();
+      resetCptDefaults();
+      resetCplDefaults();
+      resetCpuuDefaults();
       const pType = (next.growthPatternType as string | undefined) ?? "constant";
       if (pType === "by_year") {
         const by = (next.pctsByYear ?? {}) as Record<string, number>;
@@ -1340,6 +2728,9 @@ function ForecastableCogsLineCard({
     resetPctDefaults();
     resetCpuDefaults();
     resetCpcDefaults();
+    resetCptDefaults();
+    resetCplDefaults();
+    resetCpuuDefaults();
   };
 
   return (
@@ -1390,14 +2781,28 @@ function ForecastableCogsLineCard({
           <select
             value={method}
             className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
-            onChange={(e) =>
-              setMethod(e.target.value as "" | "pct_of_revenue" | "cost_per_unit" | "cost_per_customer")
-            }
+            onChange={(e) => {
+              const v = e.target.value as
+                | ""
+                | "pct_of_revenue"
+                | "cost_per_unit"
+                | "cost_per_customer"
+                | "cost_per_contract"
+                | "cost_per_location"
+                | "cost_per_utilized_unit";
+              setMethod(v);
+              if (v === "cost_per_customer" && caStartingDrivers) {
+                setCpcCostBasis(caStartingDrivers.arpuBasis === "monthly" ? "monthly" : "annual");
+              }
+            }}
           >
             <option value="">Select method</option>
             <option value="pct_of_revenue">% of Revenue</option>
             {showCpuOption ? <option value="cost_per_unit">Cost per Unit</option> : null}
             {showCpcOption ? <option value="cost_per_customer">Cost per Customer</option> : null}
+            {showCptOption ? <option value="cost_per_contract">Cost per Contract</option> : null}
+            {showCplOption ? <option value="cost_per_location">Cost per Location</option> : null}
+            {showCpuuOption ? <option value="cost_per_utilized_unit">Cost per Utilized Unit</option> : null}
           </select>
         </label>
       </div>
@@ -1413,7 +2818,30 @@ function ForecastableCogsLineCard({
           preview context may not resolve correctly until the revenue driver matches.
         </p>
       ) : null}
-      {method !== "pct_of_revenue" && method !== "cost_per_unit" && method !== "cost_per_customer" ? (
+      {!allowCostPerContract && cfg?.forecastMethod === "cost_per_contract" ? (
+        <p className="text-[11px] text-amber-300/90">
+          This line is saved as Cost per Contract, but the linked revenue row is no longer Contracts × ACV. Contract-driver
+          preview context may not resolve correctly until the revenue driver matches.
+        </p>
+      ) : null}
+      {!allowCostPerLocation && cfg?.forecastMethod === "cost_per_location" ? (
+        <p className="text-[11px] text-amber-300/90">
+          This line is saved as Cost per Location, but the linked revenue row is no longer Locations × Revenue per Location.
+          Location-driver preview context may not resolve correctly until the revenue driver matches.
+        </p>
+      ) : null}
+      {!allowCostPerUtilizedUnit && cfg?.forecastMethod === "cost_per_utilized_unit" ? (
+        <p className="text-[11px] text-amber-300/90">
+          This line is saved as Cost per Utilized Unit, but the linked revenue row is no longer Capacity × Utilization ×
+          Yield. Utilized-unit preview context may no longer resolve correctly until the revenue driver matches.
+        </p>
+      ) : null}
+      {method !== "pct_of_revenue" &&
+      method !== "cost_per_unit" &&
+      method !== "cost_per_customer" &&
+      method !== "cost_per_contract" &&
+      method !== "cost_per_location" &&
+      method !== "cost_per_utilized_unit" ? (
         <div className="rounded border border-slate-700 bg-slate-950/40 px-3 py-2 text-xs text-slate-500">
           Select a method to forecast this COGS line
         </div>
@@ -1658,6 +3086,9 @@ function ForecastableCogsLineCard({
                   <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting ARPU</dt>
                   <dd className="text-slate-100 tabular-nums mt-0.5">
                     {formatDriverAbsoluteCurrency(caStartingDrivers.startingArpu, currencyCode)}
+                    <span className="text-slate-500 font-normal">
+                      {caStartingDrivers.arpuBasis === "monthly" ? " / month" : " / year"}
+                    </span>
                   </dd>
                 </div>
                 <div>
@@ -1670,6 +3101,7 @@ function ForecastableCogsLineCard({
                   <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied starting revenue</dt>
                   <dd className="text-slate-100 tabular-nums mt-0.5">
                     {formatDriverAbsoluteCurrency(caStartingDrivers.impliedStartingRevenue, currencyCode)}
+                    <span className="block text-[10px] font-normal text-slate-500 mt-0.5">(annualized)</span>
                   </dd>
                 </div>
               </dl>
@@ -1691,17 +3123,34 @@ function ForecastableCogsLineCard({
             <div className="rounded border border-slate-700/90 bg-slate-950/35 px-3 py-2.5 space-y-2">
               <div className="text-xs font-semibold text-slate-200">Implied Gross Margin at Start</div>
               <p className="text-[10px] text-slate-500">
-                Read-only sanity check — uses annualized ARPU vs. cost per customer; not saved.
+                Read-only sanity check — margin uses annual revenue per customer vs. annual cost per customer; not saved.
               </p>
               <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
                 <div>
-                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / customer</dt>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Annual revenue / customer</dt>
                   <dd className="text-slate-100 tabular-nums mt-0.5">
-                    {formatDriverAbsoluteCurrency(impliedGrossMarginCpcAtStart.startCost, currencyCode)}
+                    {formatDriverAbsoluteCurrency(impliedGrossMarginCpcAtStart.annualRevPerCustomer, currencyCode)}
+                    <span className="text-slate-500 font-normal"> / year</span>
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied Gross Margin at Start</dt>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Annual cost / customer</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(impliedGrossMarginCpcAtStart.annualCostPerCustomer, currencyCode)}
+                    <span className="text-slate-500 font-normal"> / year</span>
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Entered starting cost</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(impliedGrossMarginCpcAtStart.enteredCost, currencyCode)}
+                    <span className="text-slate-500 font-normal">
+                      {cpcCostBasis === "monthly" ? " / month" : " / year"}
+                    </span>
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied gross margin</dt>
                   <dd className="text-slate-100 tabular-nums mt-0.5">
                     {formatDriverPercentOneDecimal(impliedGrossMarginCpcAtStart.marginPct)}
                   </dd>
@@ -1711,8 +3160,21 @@ function ForecastableCogsLineCard({
           ) : null}
 
           <div className="flex flex-wrap gap-3 items-end">
+            <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[10rem]">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Cost basis</span>
+              <select
+                value={cpcCostBasis}
+                onChange={(e) => setCpcCostBasis(e.target.value === "monthly" ? "monthly" : "annual")}
+                className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="monthly">Monthly</option>
+                <option value="annual">Annual</option>
+              </select>
+            </label>
             <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[11rem]">
-              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / customer</span>
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">
+                Starting cost / customer{cpcCostBasis === "monthly" ? " (Monthly)" : " (Annual)"}
+              </span>
               <RevenueForecastDecimalInput
                 value={startingCpcStr}
                 onChange={setStartingCpcStr}
@@ -1776,6 +3238,477 @@ function ForecastableCogsLineCard({
               {cpcPhaseErrorLines.length > 0 ? (
                 <ul className="text-[11px] text-amber-300/95 space-y-0.5 list-disc pl-4">
                   {cpcPhaseErrorLines.map((msg) => (
+                    <li key={msg}>{msg}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {method === "cost_per_contract" ? (
+        <>
+          <div className="rounded border border-slate-700 bg-slate-950/40 px-3 py-2 space-y-1">
+            <div className="text-xs font-semibold text-slate-200">Cost per Contract</div>
+            <div className="text-[11px] text-slate-400">
+              Forecasts COGS as linked revenue contracts × projected cost per contract.
+            </div>
+            <div className="text-[11px] text-slate-500">COGS(t) = Contracts(t) × Cost per Contract(t)</div>
+          </div>
+
+          {cacvStartingDrivers ? (
+            <div className="rounded border border-slate-700 bg-slate-950/50 px-3 py-2.5 space-y-2">
+              <div className="text-xs font-semibold text-slate-200">Revenue Driver Context</div>
+              <p className="text-[10px] text-slate-500 leading-snug">
+                Read-only · from the linked Contracts × ACV revenue driver (not duplicated into COGS config).
+              </p>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting contracts</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverVolumeCount(cacvStartingDrivers.startingContracts)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting ACV</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(cacvStartingDrivers.startingAcv, currencyCode)}
+                  </dd>
+                </div>
+                <div className="sm:col-span-2">
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied starting revenue</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(cacvStartingDrivers.impliedStartingRevenue, currencyCode)}
+                  </dd>
+                </div>
+              </dl>
+              <div className="border-t border-slate-800/90 pt-2 space-y-1 text-[10px] text-slate-500 leading-snug">
+                <p>
+                  <span className="text-slate-400">Contracts are inherited from Revenue.</span> Forecast only the cost per
+                  contract here.
+                </p>
+                <p>ACV is shown as context only and remains controlled by Revenue. ACV means annual contract value.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded border border-slate-800 bg-slate-950/30 px-3 py-2 text-[11px] text-slate-500">
+              Linked Revenue driver context unavailable.
+            </div>
+          )}
+
+          {impliedGrossMarginCptAtStart ? (
+            <div className="rounded border border-slate-700/90 bg-slate-950/35 px-3 py-2.5 space-y-2">
+              <div className="text-xs font-semibold text-slate-200">Implied Gross Margin at Start</div>
+              <p className="text-[10px] text-slate-500">
+                Read-only sanity check — (Starting ACV − cost per contract) / Starting ACV; not saved.
+              </p>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / contract</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(impliedGrossMarginCptAtStart.startCost, currencyCode)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied Gross Margin at Start</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverPercentOneDecimal(impliedGrossMarginCptAtStart.marginPct)}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap gap-3 items-end">
+            <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[11rem]">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / contract</span>
+              <RevenueForecastDecimalInput
+                value={startingCptStr}
+                onChange={setStartingCptStr}
+                className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-28 text-right"
+              />
+            </label>
+            <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[10rem]">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Cost / contract growth</span>
+              <select
+                value={cptShape}
+                onChange={(e) => setCptShape(e.target.value as HistGrowthShapeV1)}
+                className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant</option>
+                <option value="by_year">By year</option>
+                <option value="phases">Phases</option>
+              </select>
+            </label>
+            {cptShape === "constant" ? (
+              <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[8rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">YoY %</span>
+                <span className="flex items-center gap-1">
+                  <RevenueForecastDecimalInput
+                    value={cptGrowthRateStr}
+                    onChange={setCptGrowthRateStr}
+                    className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-24 text-right"
+                  />
+                  <span className="text-slate-500">%</span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+          {cptShape === "by_year" ? (
+            <div className="flex flex-wrap gap-2">
+              {projectionYears.map((y) => (
+                <label key={`cpt-${y}`} className="text-[10px] text-slate-500 flex flex-col gap-0.5">
+                  <span>{y} growth %</span>
+                  <span className="flex items-center gap-1">
+                    <RevenueForecastDecimalInput
+                      value={cptYearStrs[y] ?? ""}
+                      onChange={(n) => setCptYearStrs((p2) => ({ ...p2, [y]: n }))}
+                      className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-24 text-right"
+                    />
+                    <span>%</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+          {cptShape === "phases" ? (
+            <div className="space-y-2">
+              <GrowthPhaseEditor
+                phaseRows={cptPhaseRows}
+                setPhaseRows={setCptPhaseRows}
+                projectionYears={projectionYears}
+                inp={COGS_PHASE_INP}
+                rateColumnLabel="YoY %"
+                afterAddHint="New phase added — review years and growth % if needed."
+                fillRemainingTitle="Fills any missing forecast years using the last YoY %."
+              />
+              {cptPhaseErrorLines.length > 0 ? (
+                <ul className="text-[11px] text-amber-300/95 space-y-0.5 list-disc pl-4">
+                  {cptPhaseErrorLines.map((msg) => (
+                    <li key={msg}>{msg}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {method === "cost_per_location" ? (
+        <>
+          <div className="rounded border border-slate-700 bg-slate-950/40 px-3 py-2 space-y-1">
+            <div className="text-xs font-semibold text-slate-200">Cost per Location</div>
+            <div className="text-[11px] text-slate-400">
+              Forecasts COGS as linked revenue locations × projected cost per location.
+            </div>
+            <div className="text-[11px] text-slate-500">COGS(t) = Locations(t) × Cost per Location(t)</div>
+          </div>
+
+          {lrplStartingDrivers ? (
+            <div className="rounded border border-slate-700 bg-slate-950/50 px-3 py-2.5 space-y-2">
+              <div className="text-xs font-semibold text-slate-200">Revenue Driver Context</div>
+              <p className="text-[10px] text-slate-500 leading-snug">
+                Read-only · from the linked Locations × Revenue per Location driver (not duplicated into COGS config).
+              </p>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting locations</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverVolumeCount(lrplStartingDrivers.startingLocations)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting revenue per location</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(lrplStartingDrivers.startingRevenuePerLocation, currencyCode)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Revenue per location basis</dt>
+                  <dd className="text-slate-100 mt-0.5">
+                    {lrplStartingDrivers.revenuePerLocationBasis === "monthly" ? "Monthly" : "Annual"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied starting revenue</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(lrplStartingDrivers.impliedStartingRevenue, currencyCode)}
+                  </dd>
+                </div>
+              </dl>
+              <div className="border-t border-slate-800/90 pt-2 space-y-1 text-[10px] text-slate-500 leading-snug">
+                <p>
+                  <span className="text-slate-400">Locations are inherited from Revenue.</span> Forecast only the cost per
+                  location here.
+                </p>
+                <p>Revenue per location is shown as context only and remains controlled by Revenue.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded border border-slate-800 bg-slate-950/30 px-3 py-2 text-[11px] text-slate-500">
+              Linked Revenue driver context unavailable.
+            </div>
+          )}
+
+          {impliedGrossMarginCplAtStart ? (
+            <div className="rounded border border-slate-700/90 bg-slate-950/35 px-3 py-2.5 space-y-2">
+              <div className="text-xs font-semibold text-slate-200">Implied Gross Margin at Start</div>
+              <p className="text-[10px] text-slate-500">
+                Read-only sanity check — (Effective revenue per location − cost per location) / Effective revenue per
+                location; not saved. Effective revenue per location annualizes monthly revenue per location.
+              </p>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / location</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(impliedGrossMarginCplAtStart.startCost, currencyCode)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied Gross Margin at Start</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverPercentOneDecimal(impliedGrossMarginCplAtStart.marginPct)}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap gap-3 items-end">
+            <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[11rem]">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / location</span>
+              <RevenueForecastDecimalInput
+                value={startingCplStr}
+                onChange={setStartingCplStr}
+                className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-28 text-right"
+              />
+            </label>
+            <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[10rem]">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Cost / location growth</span>
+              <select
+                value={cplShape}
+                onChange={(e) => setCplShape(e.target.value as HistGrowthShapeV1)}
+                className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant</option>
+                <option value="by_year">By year</option>
+                <option value="phases">Phases</option>
+              </select>
+            </label>
+            {cplShape === "constant" ? (
+              <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[8rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">YoY %</span>
+                <span className="flex items-center gap-1">
+                  <RevenueForecastDecimalInput
+                    value={cplGrowthRateStr}
+                    onChange={setCplGrowthRateStr}
+                    className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-24 text-right"
+                  />
+                  <span className="text-slate-500">%</span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+          {cplShape === "by_year" ? (
+            <div className="flex flex-wrap gap-2">
+              {projectionYears.map((y) => (
+                <label key={`cpl-${y}`} className="text-[10px] text-slate-500 flex flex-col gap-0.5">
+                  <span>{y} growth %</span>
+                  <span className="flex items-center gap-1">
+                    <RevenueForecastDecimalInput
+                      value={cplYearStrs[y] ?? ""}
+                      onChange={(n) => setCplYearStrs((p2) => ({ ...p2, [y]: n }))}
+                      className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-24 text-right"
+                    />
+                    <span>%</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+          {cplShape === "phases" ? (
+            <div className="space-y-2">
+              <GrowthPhaseEditor
+                phaseRows={cplPhaseRows}
+                setPhaseRows={setCplPhaseRows}
+                projectionYears={projectionYears}
+                inp={COGS_PHASE_INP}
+                rateColumnLabel="YoY %"
+                afterAddHint="New phase added — review years and growth % if needed."
+                fillRemainingTitle="Fills any missing forecast years using the last YoY %."
+              />
+              {cplPhaseErrorLines.length > 0 ? (
+                <ul className="text-[11px] text-amber-300/95 space-y-0.5 list-disc pl-4">
+                  {cplPhaseErrorLines.map((msg) => (
+                    <li key={msg}>{msg}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {method === "cost_per_utilized_unit" ? (
+        <>
+          <div className="rounded border border-slate-700 bg-slate-950/40 px-3 py-2 space-y-1">
+            <div className="text-xs font-semibold text-slate-200">Cost per Utilized Unit</div>
+            <div className="text-[11px] text-slate-400">
+              Forecasts COGS as linked revenue utilized units × projected cost per utilized unit.
+            </div>
+            <div className="text-[11px] text-slate-500">COGS(t) = Utilized Units(t) × Cost per Utilized Unit(t)</div>
+          </div>
+
+          {cuyStartingDrivers ? (
+            <div className="rounded border border-slate-700 bg-slate-950/50 px-3 py-2.5 space-y-2">
+              <div className="text-xs font-semibold text-slate-200">Revenue Driver Context</div>
+              <p className="text-[10px] text-slate-500 leading-snug">
+                Read-only · from the linked Capacity × Utilization × Yield revenue driver (not duplicated into COGS
+                config).
+              </p>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting capacity</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverVolumeCount(cuyStartingDrivers.startingCapacity)}
+                    {cuyStartingDrivers.capacityUnitLabel ? (
+                      <span className="text-slate-500 font-normal"> · {cuyStartingDrivers.capacityUnitLabel}</span>
+                    ) : null}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting utilization %</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverPercentOneDecimal(cuyStartingDrivers.startingUtilizationPct)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting utilized units</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverVolumeCount(cuyStartingDrivers.startingUtilizedUnits)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting yield</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(cuyStartingDrivers.startingYield, currencyCode)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Yield basis</dt>
+                  <dd className="text-slate-100 mt-0.5">
+                    {cuyStartingDrivers.yieldBasis === "monthly" ? "Monthly" : "Annual"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied starting revenue</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(cuyStartingDrivers.impliedStartingRevenue, currencyCode)}
+                  </dd>
+                </div>
+              </dl>
+              <div className="border-t border-slate-800/90 pt-2 space-y-1 text-[10px] text-slate-500 leading-snug">
+                <p>
+                  <span className="text-slate-400">Capacity and utilization are inherited from Revenue.</span> Forecast
+                  only the cost per utilized unit here.
+                </p>
+                <p>Yield is shown as context only and remains controlled by Revenue.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded border border-slate-800 bg-slate-950/30 px-3 py-2 text-[11px] text-slate-500">
+              Linked Revenue driver context unavailable.
+            </div>
+          )}
+
+          {impliedGrossMarginCpuuAtStart ? (
+            <div className="rounded border border-slate-700/90 bg-slate-950/35 px-3 py-2.5 space-y-2">
+              <div className="text-xs font-semibold text-slate-200">Implied Gross Margin at Start</div>
+              <p className="text-[10px] text-slate-500">
+                Read-only sanity check — (Effective yield − cost per utilized unit) / Effective yield; not saved.
+                Effective yield annualizes monthly yield.
+              </p>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / utilized unit</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverAbsoluteCurrency(impliedGrossMarginCpuuAtStart.startCost, currencyCode)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] text-slate-500 uppercase tracking-wide">Implied Gross Margin at Start</dt>
+                  <dd className="text-slate-100 tabular-nums mt-0.5">
+                    {formatDriverPercentOneDecimal(impliedGrossMarginCpuuAtStart.marginPct)}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap gap-3 items-end">
+            <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[11rem]">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Starting cost / utilized unit</span>
+              <RevenueForecastDecimalInput
+                value={startingCpuuStr}
+                onChange={setStartingCpuuStr}
+                className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-28 text-right"
+              />
+            </label>
+            <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[10rem]">
+              <span className="text-[10px] text-slate-500 uppercase tracking-wide">Cost / utilized unit growth</span>
+              <select
+                value={cpuuShape}
+                onChange={(e) => setCpuuShape(e.target.value as HistGrowthShapeV1)}
+                className="rounded border border-slate-600 bg-slate-800 text-xs text-slate-200 px-2 py-2"
+              >
+                <option value="constant">Constant</option>
+                <option value="by_year">By year</option>
+                <option value="phases">Phases</option>
+              </select>
+            </label>
+            {cpuuShape === "constant" ? (
+              <label className="text-[11px] text-slate-400 flex flex-col gap-1 min-w-[8rem]">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wide">YoY %</span>
+                <span className="flex items-center gap-1">
+                  <RevenueForecastDecimalInput
+                    value={cpuuGrowthRateStr}
+                    onChange={setCpuuGrowthRateStr}
+                    className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-24 text-right"
+                  />
+                  <span className="text-slate-500">%</span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+          {cpuuShape === "by_year" ? (
+            <div className="flex flex-wrap gap-2">
+              {projectionYears.map((y) => (
+                <label key={`cpuu-${y}`} className="text-[10px] text-slate-500 flex flex-col gap-0.5">
+                  <span>{y} growth %</span>
+                  <span className="flex items-center gap-1">
+                    <RevenueForecastDecimalInput
+                      value={cpuuYearStrs[y] ?? ""}
+                      onChange={(n) => setCpuuYearStrs((p2) => ({ ...p2, [y]: n }))}
+                      className="rounded border border-slate-600 bg-slate-900 text-xs text-slate-100 px-2 py-1.5 w-24 text-right"
+                    />
+                    <span>%</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+          {cpuuShape === "phases" ? (
+            <div className="space-y-2">
+              <GrowthPhaseEditor
+                phaseRows={cpuuPhaseRows}
+                setPhaseRows={setCpuuPhaseRows}
+                projectionYears={projectionYears}
+                inp={COGS_PHASE_INP}
+                rateColumnLabel="YoY %"
+                afterAddHint="New phase added — review years and growth % if needed."
+                fillRemainingTitle="Fills any missing forecast years using the last YoY %."
+              />
+              {cpuuPhaseErrorLines.length > 0 ? (
+                <ul className="text-[11px] text-amber-300/95 space-y-0.5 list-disc pl-4">
+                  {cpuuPhaseErrorLines.map((msg) => (
                     <li key={msg}>{msg}</li>
                   ))}
                 </ul>
@@ -1943,6 +3876,8 @@ export default function CogsOpexForecastV1Tab() {
           </div>
         )}
       </section>
+
+      <OperatingExpensesPhase1Panel />
     </div>
   );
 }

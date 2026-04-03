@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import {
@@ -22,25 +22,51 @@ import {
   getPriceVolumeFirstForecastYearDrivers,
   getRevenuePerLocationAnnualizationMultiplier,
   getYieldAnnualizationMultiplier,
+  projectContractsAcvContractsByYear,
   projectCustomersArpuCustomersByYear,
+  projectCapacityUtilizationYieldUtilizedUnitsByYear,
+  projectLocationsRevenuePerLocationLocationsByYear,
   projectPriceVolumeUnitsByYear,
 } from "@/lib/revenue-projection-engine-v1";
 import type { ForecastRevenueNodeV1 } from "@/types/revenue-forecast-v1";
 import { getRevenueForecastConfigV1RowsFingerprint } from "@/lib/revenue-forecast-v1-fingerprint";
 import { detectCogsLinesFromIncomeStatement } from "@/lib/cogs-line-detection";
+import { collectOperatingExpenseLeafLines } from "@/lib/opex-line-ingest";
+import {
+  projectOpExLineForecastByYear,
+  getOpExLineLastHistoricalValue,
+} from "@/lib/opex-forecast-projection-v1";
+import { getOpExForecastConfigFingerprint } from "@/lib/opex-forecast-fingerprint";
 import {
   buildForecastableCogsLinesFromRevenue,
+  computeCogsCostPerContractForecastByYear,
   computeCogsCostPerCustomerForecastByYear,
+  computeCogsCostPerLocationForecastByYear,
   computeCogsCostPerUnitForecastByYear,
+  computeCogsCostPerUtilizedUnitForecastByYear,
   getCogsForecastConfigLinesFingerprint,
   hasPersistedCogsCpcConfig,
+  parseCostPerCustomerBasisFromParams,
+  startingCostPerCustomerStoredToAnnual,
+  hasPersistedCogsCplConfig,
+  hasPersistedCogsCpuuConfig,
+  hasPersistedCogsCptConfig,
   hasPersistedCogsCpuConfig,
   hasPersistedCogsLineForecast,
+  projectCostPerContractByYear,
   projectCostPerCustomerByYear,
+  projectCostPerLocationByYear,
   projectCostPerUnitByYear,
+  projectCostPerUtilizedUnitByYear,
+  resolveCapacityUtilizationYieldParamsForCogsLinkedRow,
+  resolveContractsAcvParamsForCogsLinkedRow,
   resolveCustomersArpuParamsForCogsLinkedRow,
+  resolveLocationsRevenuePerLocationParamsForCogsLinkedRow,
+  resolveCogsCostPerContractGrowthPctByYear,
   resolveCogsCostPerCustomerGrowthPctByYear,
+  resolveCogsCostPerLocationGrowthPctByYear,
   resolveCogsCostPerUnitGrowthPctByYear,
+  resolveCogsCostPerUtilizedUnitGrowthPctByYear,
   resolveCogsPctOfRevenueByYear,
 } from "@/lib/cogs-forecast-v1";
 
@@ -115,6 +141,76 @@ function formatAccounting(
   });
   const withUnit = `${formatted}${unitLabel ? ` ${unitLabel}` : ""}`;
   return displayValue < 0 ? `(${withUnit})` : withUnit;
+}
+
+/** Preview UI only — not persisted. Reset when Forecast Drivers sub-tab changes. */
+const REVENUE_PREVIEW_SECTION_DEFAULTS = {
+  revenue_main: true,
+  revenue_price_volume: false,
+  revenue_customers_arpu: false,
+  revenue_locations_rpl: false,
+  revenue_capacity_utilization_yield: false,
+  revenue_contracts_acv: false,
+  revenue_opening_bridge: false,
+  revenue_growth: false,
+} as const;
+
+type RevenuePreviewSectionKey = keyof typeof REVENUE_PREVIEW_SECTION_DEFAULTS;
+
+const COGS_PREVIEW_SECTION_DEFAULTS = {
+  cogs_revenue_context: false,
+  cogs_core_pnl: true,
+  cogs_opex_summary: true,
+  cogs_opex_detail: false,
+  cogs_opex_routed: false,
+  cogs_detail: false,
+  cogs_driver_diagnostics: false,
+  cogs_historical_context: false,
+  cogs_review_items: false,
+} as const;
+
+type CogsPreviewSectionKey = keyof typeof COGS_PREVIEW_SECTION_DEFAULTS;
+
+function PreviewCollapsibleHeader(props: {
+  expanded: boolean;
+  onToggle: () => void;
+  title: string;
+  subtitle?: ReactNode;
+}) {
+  const { expanded, onToggle, title, subtitle } = props;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="flex w-full items-start gap-2 text-left rounded-sm px-0.5 py-0.5 -mx-0.5 hover:bg-slate-800/45"
+    >
+      <span className="text-slate-400 text-[11px] shrink-0 w-3.5 leading-5 tabular-nums" aria-hidden>
+        {expanded ? "▼" : "▶"}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-semibold text-slate-100">{title}</span>
+        {subtitle ? <span className="block text-[11px] text-slate-500 mt-0.5 leading-snug">{subtitle}</span> : null}
+      </span>
+    </button>
+  );
+}
+
+/** COGS preview year tables: fixed layout + explicit label col so year columns align across sections. */
+const COGS_PREVIEW_LABEL_COL_PX = 280;
+const COGS_PREVIEW_YEAR_TABLE_CLASS = "w-full table-fixed border-collapse text-xs";
+const COGS_PREVIEW_LABEL_TH_CLASS =
+  "px-3.5 py-2.5 text-left font-semibold text-slate-300 align-top";
+const COGS_PREVIEW_LABEL_TD_CLASS = "min-w-0 px-3.5 py-2.5 align-top";
+
+function CogsPreviewYearColgroup({ years }: { years: string[] }) {
+  return (
+    <colgroup>
+      <col style={{ width: COGS_PREVIEW_LABEL_COL_PX }} />
+      {years.map((y) => (
+        <col key={y} />
+      ))}
+    </colgroup>
+  );
 }
 
 /** Preview-only: indentation follows DFS tree depth only (not method/role). */
@@ -225,6 +321,11 @@ export default function ISBuildPreview() {
     () => getCogsForecastConfigLinesFingerprint(cogsForecastConfigV1),
     [cogsForecastConfigV1]
   );
+  const opexForecastConfigV1 = useModelStore((s) => s.opexForecastConfigV1);
+  const opexForecastLinesFingerprint = useMemo(
+    () => getOpExForecastConfigFingerprint(opexForecastConfigV1),
+    [opexForecastConfigV1]
+  );
   /** Nested row params (e.g. arpuBasis) must invalidate memos even if parent object identity were stable. */
   const revenueForecastV1RowsFingerprint = useModelStore((s) =>
     getRevenueForecastConfigV1RowsFingerprint(s.revenueForecastConfigV1)
@@ -324,8 +425,29 @@ export default function ISBuildPreview() {
   }, [incomeStatement, revenueProjectionConfig, revenueForecastTreeV1]);
 
   // UI state: section and row expansion (visual only, does not affect calculations or Excel export)
-  const [revenueSectionOpen, setRevenueSectionOpen] = useState(true);
-  const [revenueMethodSectionOpen, setRevenueMethodSectionOpen] = useState(true);
+  const [revenuePreviewSections, setRevenuePreviewSections] = useState(() => ({
+    ...REVENUE_PREVIEW_SECTION_DEFAULTS,
+  }));
+  const [cogsPreviewSections, setCogsPreviewSections] = useState(() => ({
+    ...COGS_PREVIEW_SECTION_DEFAULTS,
+  }));
+
+  useEffect(() => {
+    if (forecastDriversSubTab === "revenue") {
+      setRevenuePreviewSections({ ...REVENUE_PREVIEW_SECTION_DEFAULTS });
+    }
+    if (forecastDriversSubTab === "operating_costs") {
+      setCogsPreviewSections({ ...COGS_PREVIEW_SECTION_DEFAULTS });
+    }
+  }, [forecastDriversSubTab]);
+
+  const toggleRevenuePreviewSection = (key: RevenuePreviewSectionKey) => {
+    setRevenuePreviewSections((s) => ({ ...s, [key]: !s[key] }));
+  };
+  const toggleCogsPreviewSection = (key: CogsPreviewSectionKey) => {
+    setCogsPreviewSections((s) => ({ ...s, [key]: !s[key] }));
+  };
+
   const [collapsedRowIds, setCollapsedRowIds] = useState<Set<string>>(new Set());
 
   const historicalYears = useMemo(() => meta?.years?.historical ?? [], [meta]);
@@ -1173,6 +1295,39 @@ export default function ISBuildPreview() {
         const custByY = revParams ? projectCustomersArpuCustomersByYear(revParams, projectionYears) : null;
         const cogsParams = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
         out[line.lineId] = computeCogsCostPerCustomerForecastByYear(cogsParams, custByY, projectionYears);
+        continue;
+      }
+      if (cfg.forecastMethod === "cost_per_contract") {
+        const revParams = resolveContractsAcvParamsForCogsLinkedRow(
+          line.linkedRevenueRowId,
+          rowsCfg,
+          revenueForecastTreeV1 ?? []
+        );
+        const ctrByY = revParams ? projectContractsAcvContractsByYear(revParams, projectionYears) : null;
+        const cogsParams = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+        out[line.lineId] = computeCogsCostPerContractForecastByYear(cogsParams, ctrByY, projectionYears);
+        continue;
+      }
+      if (cfg.forecastMethod === "cost_per_location") {
+        const revParams = resolveLocationsRevenuePerLocationParamsForCogsLinkedRow(
+          line.linkedRevenueRowId,
+          rowsCfg,
+          revenueForecastTreeV1 ?? []
+        );
+        const locByY = revParams ? projectLocationsRevenuePerLocationLocationsByYear(revParams, projectionYears) : null;
+        const cogsParams = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+        out[line.lineId] = computeCogsCostPerLocationForecastByYear(cogsParams, locByY, projectionYears);
+        continue;
+      }
+      if (cfg.forecastMethod === "cost_per_utilized_unit") {
+        const revParams = resolveCapacityUtilizationYieldParamsForCogsLinkedRow(
+          line.linkedRevenueRowId,
+          rowsCfg,
+          revenueForecastTreeV1 ?? []
+        );
+        const uuByY = revParams ? projectCapacityUtilizationYieldUtilizedUnitsByYear(revParams, projectionYears) : null;
+        const cogsParams = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+        out[line.lineId] = computeCogsCostPerUtilizedUnitForecastByYear(cogsParams, uuByY, projectionYears);
       }
     }
     return out;
@@ -1251,6 +1406,7 @@ export default function ISBuildPreview() {
       lineLabel: string;
       linkedRevenueLabel: string;
       arpuBasisLabel: string;
+      costPerCustomerBasis: "monthly" | "annual";
       startingCustomers: number;
       startingCostPerCustomer: number;
       firstYearCustomers: number | null;
@@ -1267,11 +1423,14 @@ export default function ISBuildPreview() {
       if (!Number.isFinite(sc) || !Number.isFinite(sa) || sc <= 0 || sa <= 0) continue;
       const custByY = projectCustomersArpuCustomersByYear(revP, projectionYears);
       const cogsP = (lc.forecastParameters ?? {}) as Record<string, unknown>;
-      const cpcStart = Number(cogsP.startingCostPerCustomer);
-      if (!Number.isFinite(cpcStart) || cpcStart <= 0) continue;
+      const cpcBasis = parseCostPerCustomerBasisFromParams(cogsP);
+      const cpcStartStored = Number(cogsP.startingCostPerCustomer);
+      if (!Number.isFinite(cpcStartStored) || cpcStartStored <= 0) continue;
+      const cpcStartAnnual = startingCostPerCustomerStoredToAnnual(cpcStartStored, cpcBasis);
+      if (!Number.isFinite(cpcStartAnnual) || cpcStartAnnual <= 0) continue;
       const growth = resolveCogsCostPerCustomerGrowthPctByYear(cogsP, projectionYears);
       if (Object.keys(growth).length === 0) continue;
-      const cpcByY = projectCostPerCustomerByYear(cpcStart, growth, projectionYears);
+      const cpcByY = projectCostPerCustomerByYear(cpcStartAnnual, growth, projectionYears);
       const first = getCustomersArpuFirstForecastYearDrivers(revP, projectionYears);
       const arpuBasisLabel = first?.arpuBasis === "monthly" ? "Monthly" : "Annual";
       out.push({
@@ -1279,10 +1438,179 @@ export default function ISBuildPreview() {
         lineLabel: line.lineLabel,
         linkedRevenueLabel: line.lineLabel,
         arpuBasisLabel,
+        costPerCustomerBasis: cpcBasis,
         startingCustomers: sc,
-        startingCostPerCustomer: cpcStart,
+        startingCostPerCustomer: cpcStartStored,
         firstYearCustomers: custByY?.[fy] ?? null,
         firstYearCostPerCustomer: cpcByY[fy] ?? null,
+      });
+    }
+    return out;
+  }, [
+    forecastableCogsLines,
+    cogsForecastLinesFingerprint,
+    projectionYears,
+    revenueForecastConfigV1,
+    revenueForecastV1RowsFingerprint,
+    revenueForecastTreeV1,
+  ]);
+
+  const costPerContractDriverAuditRows = useMemo(() => {
+    if (projectionYears.length === 0) return [];
+    const fy = projectionYears[0]!;
+    const rowsCfg = revenueForecastConfigV1?.rows ?? {};
+    const tree = revenueForecastTreeV1 ?? [];
+    const out: Array<{
+      lineId: string;
+      lineLabel: string;
+      linkedRevenueLabel: string;
+      startingContracts: number;
+      startingCostPerContract: number;
+      firstYearContracts: number | null;
+      firstYearCostPerContract: number | null;
+    }> = [];
+    for (const line of forecastableCogsLines) {
+      const lc = cogsForecastConfigV1?.lines?.[line.lineId];
+      if (!lc || lc.forecastMethod !== "cost_per_contract" || !hasPersistedCogsCptConfig(lc, projectionYears))
+        continue;
+      const revP = resolveContractsAcvParamsForCogsLinkedRow(line.linkedRevenueRowId, rowsCfg, tree);
+      if (!revP) continue;
+      const sc = Number(revP.startingContracts);
+      const sa = Number(revP.startingAcv);
+      if (!Number.isFinite(sc) || !Number.isFinite(sa) || sc <= 0 || sa <= 0) continue;
+      const ctrByY = projectContractsAcvContractsByYear(revP, projectionYears);
+      const cogsP = (lc.forecastParameters ?? {}) as Record<string, unknown>;
+      const cptStart = Number(cogsP.startingCostPerContract);
+      if (!Number.isFinite(cptStart) || cptStart <= 0) continue;
+      const growth = resolveCogsCostPerContractGrowthPctByYear(cogsP, projectionYears);
+      if (Object.keys(growth).length === 0) continue;
+      const cptByY = projectCostPerContractByYear(cptStart, growth, projectionYears);
+      out.push({
+        lineId: line.lineId,
+        lineLabel: line.lineLabel,
+        linkedRevenueLabel: line.lineLabel,
+        startingContracts: sc,
+        startingCostPerContract: cptStart,
+        firstYearContracts: ctrByY?.[fy] ?? null,
+        firstYearCostPerContract: cptByY[fy] ?? null,
+      });
+    }
+    return out;
+  }, [
+    forecastableCogsLines,
+    cogsForecastLinesFingerprint,
+    projectionYears,
+    revenueForecastConfigV1,
+    revenueForecastV1RowsFingerprint,
+    revenueForecastTreeV1,
+  ]);
+
+  const costPerLocationDriverAuditRows = useMemo(() => {
+    if (projectionYears.length === 0) return [];
+    const fy = projectionYears[0]!;
+    const rowsCfg = revenueForecastConfigV1?.rows ?? {};
+    const tree = revenueForecastTreeV1 ?? [];
+    const out: Array<{
+      lineId: string;
+      lineLabel: string;
+      linkedRevenueLabel: string;
+      rplBasisLabel: string;
+      startingLocations: number;
+      startingCostPerLocation: number;
+      firstYearLocations: number | null;
+      firstYearCostPerLocation: number | null;
+    }> = [];
+    for (const line of forecastableCogsLines) {
+      const lc = cogsForecastConfigV1?.lines?.[line.lineId];
+      if (!lc || lc.forecastMethod !== "cost_per_location" || !hasPersistedCogsCplConfig(lc, projectionYears))
+        continue;
+      const revP = resolveLocationsRevenuePerLocationParamsForCogsLinkedRow(line.linkedRevenueRowId, rowsCfg, tree);
+      if (!revP) continue;
+      const sl = Number(revP.startingLocations);
+      const sr = Number(revP.startingRevenuePerLocation);
+      if (!Number.isFinite(sl) || !Number.isFinite(sr) || sl <= 0 || sr <= 0) continue;
+      const locByY = projectLocationsRevenuePerLocationLocationsByYear(revP, projectionYears);
+      const cogsP = (lc.forecastParameters ?? {}) as Record<string, unknown>;
+      const cplStart = Number(cogsP.startingCostPerLocation);
+      if (!Number.isFinite(cplStart) || cplStart <= 0) continue;
+      const growth = resolveCogsCostPerLocationGrowthPctByYear(cogsP, projectionYears);
+      if (Object.keys(growth).length === 0) continue;
+      const cplByY = projectCostPerLocationByYear(cplStart, growth, projectionYears);
+      const first = getLocationsRevenuePerLocationFirstForecastYearDrivers(revP, projectionYears);
+      const rplBasisLabel = first?.revenuePerLocationBasis === "monthly" ? "Monthly" : "Annual";
+      out.push({
+        lineId: line.lineId,
+        lineLabel: line.lineLabel,
+        linkedRevenueLabel: line.lineLabel,
+        rplBasisLabel,
+        startingLocations: sl,
+        startingCostPerLocation: cplStart,
+        firstYearLocations: locByY?.[fy] ?? null,
+        firstYearCostPerLocation: cplByY[fy] ?? null,
+      });
+    }
+    return out;
+  }, [
+    forecastableCogsLines,
+    cogsForecastLinesFingerprint,
+    projectionYears,
+    revenueForecastConfigV1,
+    revenueForecastV1RowsFingerprint,
+    revenueForecastTreeV1,
+  ]);
+
+  const costPerUtilizedUnitDriverAuditRows = useMemo(() => {
+    if (projectionYears.length === 0) return [];
+    const fy = projectionYears[0]!;
+    const rowsCfg = revenueForecastConfigV1?.rows ?? {};
+    const tree = revenueForecastTreeV1 ?? [];
+    const out: Array<{
+      lineId: string;
+      lineLabel: string;
+      linkedRevenueLabel: string;
+      yieldBasisLabel: string;
+      capacityUnitSecondary: string | null;
+      startingUtilizedUnits: number;
+      startingCostPerUtilizedUnit: number;
+      firstYearUtilizedUnits: number | null;
+      firstYearCostPerUtilizedUnit: number | null;
+    }> = [];
+    for (const line of forecastableCogsLines) {
+      const lc = cogsForecastConfigV1?.lines?.[line.lineId];
+      if (!lc || lc.forecastMethod !== "cost_per_utilized_unit" || !hasPersistedCogsCpuuConfig(lc, projectionYears))
+        continue;
+      const revP = resolveCapacityUtilizationYieldParamsForCogsLinkedRow(line.linkedRevenueRowId, rowsCfg, tree);
+      if (!revP) continue;
+      const cap0 = Number(revP.startingCapacity);
+      const y0 = Number(revP.startingYield);
+      const u0 = Number(revP.startingUtilizationPct);
+      if (!Number.isFinite(cap0) || !Number.isFinite(y0) || cap0 <= 0 || y0 <= 0) continue;
+      if (!Number.isFinite(u0) || u0 < 0 || u0 > 100) continue;
+      const startingUtilizedUnits = cap0 * (u0 / 100);
+      const uuByY = projectCapacityUtilizationYieldUtilizedUnitsByYear(revP, projectionYears);
+      const cogsP = (lc.forecastParameters ?? {}) as Record<string, unknown>;
+      const cpuuStart = Number(cogsP.startingCostPerUtilizedUnit);
+      if (!Number.isFinite(cpuuStart) || cpuuStart <= 0) continue;
+      const growth = resolveCogsCostPerUtilizedUnitGrowthPctByYear(cogsP, projectionYears);
+      if (Object.keys(growth).length === 0) continue;
+      const cpuuByY = projectCostPerUtilizedUnitByYear(cpuuStart, growth, projectionYears);
+      const first = getCapacityUtilizationYieldFirstForecastYearDrivers(revP, projectionYears);
+      const yieldBasisLabel = first?.yieldBasis === "monthly" ? "Monthly" : "Annual";
+      const rawLabel = revP.capacityUnitLabel;
+      const capLabel =
+        typeof rawLabel === "string" && rawLabel.trim() !== "" ? rawLabel.trim() : null;
+      const capacityUnitSecondary =
+        capLabel != null ? `${capLabel} · ${yieldBasisLabel} yield` : `${yieldBasisLabel} yield`;
+      out.push({
+        lineId: line.lineId,
+        lineLabel: line.lineLabel,
+        linkedRevenueLabel: line.lineLabel,
+        yieldBasisLabel,
+        capacityUnitSecondary,
+        startingUtilizedUnits,
+        startingCostPerUtilizedUnit: cpuuStart,
+        firstYearUtilizedUnits: uuByY?.[fy] ?? null,
+        firstYearCostPerUtilizedUnit: cpuuByY[fy] ?? null,
       });
     }
     return out;
@@ -1312,6 +1640,270 @@ export default function ISBuildPreview() {
     return out;
   }, [projectionYears, forecastableCogsLines, cogsValueByLineByYear]);
 
+  const ingestedOpexLines = useMemo(
+    () => collectOperatingExpenseLeafLines(incomeStatement ?? []),
+    [incomeStatement]
+  );
+
+  const revenueTotalByForecastYear = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const y of projectionYears) {
+      const v = projectedValues.rev?.[y];
+      if (v != null && Number.isFinite(Number(v))) out[y] = Number(v);
+    }
+    return out;
+  }, [projectedValues, projectionYears]);
+
+  const opexLastHistByLineId = useMemo(() => {
+    const out: Record<string, number | null> = {};
+    for (const row of ingestedOpexLines) {
+      out[row.lineId] = getOpExLineLastHistoricalValue(
+        row.lineId,
+        incomeStatement ?? [],
+        lastHistoricYear,
+        allStatements,
+        sbcBreakdowns,
+        danaBreakdowns
+      );
+    }
+    return out;
+  }, [ingestedOpexLines, incomeStatement, lastHistoricYear, allStatements, sbcBreakdowns, danaBreakdowns]);
+
+  const opexProjectedByLineId = useMemo(() => {
+    const out: Record<string, Record<string, number>> = {};
+    for (const row of ingestedOpexLines) {
+      const cfg = opexForecastConfigV1?.lines?.[row.lineId];
+      if (!cfg || cfg.routeStatus !== "forecast_direct") continue;
+      const lh = opexLastHistByLineId[row.lineId];
+      out[row.lineId] = projectOpExLineForecastByYear(cfg, {
+        projectionYears,
+        revenueTotalByYear: revenueTotalByForecastYear,
+        lastHistValue: lh != null && Number.isFinite(lh) ? lh : null,
+      });
+    }
+    return out;
+  }, [
+    ingestedOpexLines,
+    opexForecastLinesFingerprint,
+    projectionYears,
+    revenueTotalByForecastYear,
+    opexLastHistByLineId,
+    opexForecastConfigV1,
+  ]);
+
+  const totalDirectOpexByYear = useMemo(() => {
+    const out: Record<string, number | null> = {};
+    for (const y of years) {
+      if (y.endsWith("A")) {
+        let sum = 0;
+        let has = false;
+        for (const row of ingestedOpexLines) {
+          const cfg = opexForecastConfigV1?.lines?.[row.lineId];
+          if (cfg?.routeStatus !== "forecast_direct") continue;
+          const r = findRowInTree(incomeStatement ?? [], row.lineId);
+          if (!r) continue;
+          const v = getRowHistoricalActual(row.lineId, r, y);
+          if (v != null && Number.isFinite(v)) {
+            sum += v;
+            has = true;
+          }
+        }
+        out[y] = has ? sum : null;
+      } else {
+        let sum = 0;
+        let has = false;
+        for (const row of ingestedOpexLines) {
+          const cfg = opexForecastConfigV1?.lines?.[row.lineId];
+          if (cfg?.routeStatus !== "forecast_direct") continue;
+          const v = opexProjectedByLineId[row.lineId]?.[y];
+          if (v != null && Number.isFinite(v)) {
+            sum += v;
+            has = true;
+          }
+        }
+        out[y] = has ? sum : null;
+      }
+    }
+    return out;
+  }, [
+    years,
+    ingestedOpexLines,
+    opexForecastLinesFingerprint,
+    incomeStatement,
+    getRowHistoricalActual,
+    opexProjectedByLineId,
+    opexForecastConfigV1,
+  ]);
+
+  const operatingExpensesIsRollupByYear = useMemo(() => {
+    const opExRow = incomeStatement?.find((r) => r.id === "operating_expenses");
+    const out: Record<string, number | null> = {};
+    if (!opExRow) return out;
+    for (const y of years) {
+      if (!y.endsWith("A")) {
+        out[y] = null;
+        continue;
+      }
+      const v = computeRowValue(
+        opExRow,
+        y,
+        incomeStatement ?? [],
+        incomeStatement ?? [],
+        allStatements,
+        sbcBreakdowns,
+        danaBreakdowns
+      );
+      out[y] = typeof v === "number" && Number.isFinite(v) ? v : null;
+    }
+    return out;
+  }, [years, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns]);
+
+  const ebitIsRowByYear = useMemo(() => {
+    const ebitRow = incomeStatement?.find((r) => r.id === "ebit");
+    const out: Record<string, number | null> = {};
+    if (!ebitRow) return out;
+    for (const y of years) {
+      if (!y.endsWith("A")) {
+        out[y] = null;
+        continue;
+      }
+      const v = computeRowValue(
+        ebitRow,
+        y,
+        incomeStatement ?? [],
+        incomeStatement ?? [],
+        allStatements,
+        sbcBreakdowns,
+        danaBreakdowns
+      );
+      out[y] = typeof v === "number" && Number.isFinite(v) ? v : null;
+    }
+    return out;
+  }, [years, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns]);
+
+  /** Preview-only: first column that is not a historical actuals year (visual separator for Core P&L + COGS %). */
+  const firstForecastColumnIndex = useMemo(
+    () => years.findIndex((y) => !y.endsWith("A")),
+    [years]
+  );
+
+  /**
+   * Preview-only consolidated Revenue / COGS / GP / GM — read-only from IS actuals + existing forecast projections.
+   * Does not change forecast engines or stored config.
+   */
+  const coreIncomeStatementPreviewByYear = useMemo(() => {
+    const revRow = incomeStatement?.find((r) => r.id === "rev");
+    const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+    return years.map((y) => {
+      const isHist = y.endsWith("A");
+      let revenue: number | null = null;
+      if (isHist) {
+        if (revRow) {
+          const v = getRowValueForYear("rev", y, revRow);
+          revenue = Number.isFinite(v) ? v : null;
+        }
+      } else {
+        const raw = projectedValues.rev?.[y];
+        revenue = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : null;
+      }
+      let cogs: number | null = null;
+      if (isHist) {
+        if (cogsRow) {
+          const v = getRowValueForYear("cogs", y, cogsRow);
+          cogs = Number.isFinite(v) ? v : null;
+        }
+      } else {
+        const t = totalCogsByYear[y];
+        cogs = t != null && Number.isFinite(t) ? t : null;
+      }
+      const gp =
+        revenue != null && cogs != null && Number.isFinite(revenue) && Number.isFinite(cogs)
+          ? revenue - cogs
+          : null;
+      const gmPct =
+        gp != null && revenue != null && Number.isFinite(revenue) && revenue !== 0
+          ? (gp / revenue) * 100
+          : null;
+      return { y, isHist, revenue, cogs, gp, gmPct };
+    });
+  }, [years, incomeStatement, projectedValues, totalCogsByYear, getRowValueForYear]);
+
+  /** Hist: reported EBIT. Forecast: GP − Phase 1 direct OpEx only (excludes schedule-routed lines). */
+  const opexSummaryOperatingIncomeByYear = useMemo(() => {
+    const out: Record<string, number | null> = {};
+    for (let i = 0; i < years.length; i++) {
+      const y = years[i]!;
+      const core = coreIncomeStatementPreviewByYear[i];
+      if (!core) {
+        out[y] = null;
+        continue;
+      }
+      if (y.endsWith("A")) {
+        const e = ebitIsRowByYear[y];
+        out[y] = e != null && Number.isFinite(e) ? e : null;
+      } else {
+        const opex = totalDirectOpexByYear[y];
+        const gp = core.gp;
+        if (gp != null && opex != null && Number.isFinite(gp) && Number.isFinite(opex)) {
+          out[y] = gp - opex;
+        } else {
+          out[y] = null;
+        }
+      }
+    }
+    return out;
+  }, [years, coreIncomeStatementPreviewByYear, totalDirectOpexByYear, ebitIsRowByYear]);
+
+  /** Preview-only: COGS(line) / Revenue(linked line) for a column; historical uses IS rows when both exist. */
+  const getCogsPctOfLinkedRevenue = (
+    line: { lineId: string; linkedRevenueRowId: string; lineLabel: string },
+    y: string
+  ): number | null => {
+    const linkedRow =
+      findRowInTree(incomeStatement ?? [], line.linkedRevenueRowId) ??
+      ({
+        id: line.linkedRevenueRowId,
+        label: line.lineLabel,
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      } as Row);
+    if (y.endsWith("A")) {
+      const rev = getRowHistoricalActual(line.linkedRevenueRowId, linkedRow, y);
+      const cogsIsRow = findRowInTree(incomeStatement ?? [], line.lineId);
+      const cogs = cogsIsRow ? getRowHistoricalActual(line.lineId, cogsIsRow, y) : null;
+      if (rev == null || cogs == null || !Number.isFinite(rev) || rev === 0 || !Number.isFinite(cogs)) {
+        return null;
+      }
+      return (cogs / rev) * 100;
+    }
+    const rev = Number(projectedValues[line.linkedRevenueRowId]?.[y]);
+    const cogs = cogsValueByLineByYear[line.lineId]?.[y];
+    if (cogs == null || !Number.isFinite(cogs)) return null;
+    if (!Number.isFinite(rev) || rev === 0) return null;
+    return (cogs / rev) * 100;
+  };
+
+  const getTotalCogsPctOfRevenue = (y: string): number | null => {
+    if (y.endsWith("A")) {
+      const revRow = incomeStatement?.find((r) => r.id === "rev");
+      const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+      if (!revRow || !cogsRow) return null;
+      const rev = getRowHistoricalActual("rev", revRow, y);
+      const cogs = getRowHistoricalActual("cogs", cogsRow, y);
+      if (rev == null || cogs == null || !Number.isFinite(rev) || rev === 0 || !Number.isFinite(cogs)) {
+        return null;
+      }
+      return (cogs / rev) * 100;
+    }
+    const rev = Number(projectedValues.rev?.[y]);
+    const cogs = totalCogsByYear[y];
+    if (cogs == null || !Number.isFinite(cogs)) return null;
+    if (!Number.isFinite(rev) || rev === 0) return null;
+    return (cogs / rev) * 100;
+  };
+
   if (forecastDriversSubTab === "operating_costs") {
     return (
       <section className="h-full w-full rounded-xl border border-slate-800 bg-slate-950/50 flex flex-col overflow-hidden">
@@ -1328,24 +1920,38 @@ export default function ISBuildPreview() {
               </p>
             </div>
             <div className="text-xs text-slate-500">
-              COGS phase preview · Years: <span className="text-slate-300">{years.length}</span>
+              COGS & OpEx preview · Years: <span className="text-slate-300">{years.length}</span>
             </div>
           </div>
         </div>
         <div className="flex-1 overflow-y-auto overflow-x-auto p-4 space-y-4">
           <div className="rounded-md border border-slate-700 bg-slate-900/40">
-            <div className="px-3 py-2 border-b border-slate-800 text-sm font-semibold text-slate-100">
-              Revenue (read-only context)
+            <div className="px-3.5 py-2 border-b border-slate-800">
+              <PreviewCollapsibleHeader
+                expanded={cogsPreviewSections.cogs_revenue_context}
+                onToggle={() => toggleCogsPreviewSection("cogs_revenue_context")}
+                title="Revenue (read-only context)"
+              />
             </div>
-            <table className="w-full border-collapse text-xs">
+            {cogsPreviewSections.cogs_revenue_context ? (
+            <table className={COGS_PREVIEW_YEAR_TABLE_CLASS}>
+              <CogsPreviewYearColgroup years={years} />
               <thead>
                 <tr className="border-b border-slate-800">
-                  <th className="w-[280px] px-3.5 py-2.5 text-left font-semibold text-slate-300">Line Item</th>
-                  {years.map((y) => (
-                    <th key={y} className="px-3.5 py-2.5 text-right font-semibold text-slate-400">
-                      {y}
-                    </th>
-                  ))}
+                  <th className={COGS_PREVIEW_LABEL_TH_CLASS}>Line Item</th>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    return (
+                      <th
+                        key={y}
+                        className={`px-3.5 py-2.5 text-right font-semibold text-slate-400 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/50" : ""}`}
+                      >
+                        {y}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
@@ -1354,7 +1960,9 @@ export default function ISBuildPreview() {
                     if (isRevenuePreviewRowHiddenByAncestorCollapse(index, revenueRows, collapsedRowIds)) return null;
                     return (
                       <tr key={`cogs-tab-rev-${row.id}`} className="border-b border-slate-900">
-                        <td className={`px-3.5 py-2.5 ${depth === 0 ? "text-slate-100 font-semibold" : "text-slate-300"}`}>
+                        <td
+                          className={`${COGS_PREVIEW_LABEL_TD_CLASS} ${depth === 0 ? "text-slate-100 font-semibold" : "text-slate-300"}`}
+                        >
                           <RevenuePreviewLineLabelCell
                             depth={depth}
                             hasDescendants={false}
@@ -1363,12 +1971,18 @@ export default function ISBuildPreview() {
                             label={row.label}
                           />
                         </td>
-                        {years.map((y) => {
+                        {years.map((y, yi) => {
+                          const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
                           const val = y.endsWith("A")
                             ? getRowValueForYear(row.id, y, row)
                             : projectedValues[row.id]?.[y] ?? null;
                           return (
-                            <td key={`${row.id}-${y}`} className="px-3.5 py-2.5 text-right tabular-nums text-slate-300">
+                            <td
+                              key={`${row.id}-${y}`}
+                              className={`px-3.5 py-2.5 text-right tabular-nums text-slate-300 ${
+                                isFirstForecast ? "border-l border-slate-600/90" : ""
+                              } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/40" : ""}`}
+                            >
                               {val != null && Number.isFinite(Number(val))
                                 ? formatAccounting(Number(val), unit, showDecimals)
                                 : "—"}
@@ -1381,300 +1995,114 @@ export default function ISBuildPreview() {
                 )}
               </tbody>
             </table>
-          </div>
-
-          {costPerUnitDriverAuditRows.length > 0 ? (
-            <div className="rounded-md border border-slate-700 bg-slate-900/40">
-              <div className="px-3 py-2 border-b border-slate-800 text-sm font-semibold text-slate-100">
-                Cost per Unit Drivers
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-xs min-w-[720px]">
-                  <thead>
-                    <tr className="border-b border-slate-800">
-                      <th className="px-3 py-2.5 text-left font-semibold text-slate-300">Line</th>
-                      <th className="px-3 py-2.5 text-left font-semibold text-slate-300">Linked revenue line</th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">Starting volume</th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">Starting cost / unit</th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">
-                        First forecast-year volume
-                      </th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">
-                        First forecast-year cost / unit
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {costPerUnitDriverAuditRows.map((r) => (
-                      <tr key={r.lineId} className="border-b border-slate-900">
-                        <td className="px-3 py-2 text-slate-200">{r.lineLabel}</td>
-                        <td className="px-3 py-2 text-slate-400">{r.linkedRevenueLabel}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200">
-                          {formatVolumeDriverCount(r.startingVolume)}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200">
-                          {formatAbsolutePricePerUnit(r.startingCostPerUnit, currencyCode)}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200">
-                          {r.firstYearVolume != null && Number.isFinite(r.firstYearVolume)
-                            ? formatVolumeDriverCount(r.firstYearVolume)
-                            : "—"}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200">
-                          {r.firstYearCostPerUnit != null && Number.isFinite(r.firstYearCostPerUnit)
-                            ? formatAbsolutePricePerUnit(r.firstYearCostPerUnit, currencyCode)
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : null}
-
-          {costPerCustomerDriverAuditRows.length > 0 ? (
-            <div className="rounded-md border border-slate-700 bg-slate-900/40">
-              <div className="px-3 py-2 border-b border-slate-800 text-sm font-semibold text-slate-100">
-                Cost per Customer Drivers
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-xs min-w-[840px]">
-                  <thead>
-                    <tr className="border-b border-slate-800">
-                      <th className="px-3 py-2.5 text-left font-semibold text-slate-300">Line</th>
-                      <th className="px-3 py-2.5 text-left font-semibold text-slate-300">Linked revenue line</th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">Starting customers</th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">Starting cost / customer</th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">
-                        First forecast-year customers
-                      </th>
-                      <th className="px-3 py-2.5 text-right font-semibold text-slate-300">
-                        First forecast-year cost / customer
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {costPerCustomerDriverAuditRows.map((r) => (
-                      <tr key={r.lineId} className="border-b border-slate-900">
-                        <td className="px-3 py-2 text-slate-200 align-top">
-                          <div>{r.lineLabel}</div>
-                          <div className="text-[10px] text-slate-500 mt-0.5">
-                            Customers · {r.arpuBasisLabel} ARPU
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 text-slate-400 align-top">{r.linkedRevenueLabel}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200 align-top">
-                          {formatVolumeDriverCount(r.startingCustomers)}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200 align-top">
-                          {formatAbsolutePricePerUnit(r.startingCostPerCustomer, currencyCode)}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200 align-top">
-                          {r.firstYearCustomers != null && Number.isFinite(r.firstYearCustomers)
-                            ? formatVolumeDriverCount(r.firstYearCustomers)
-                            : "—"}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-200 align-top">
-                          {r.firstYearCostPerCustomer != null && Number.isFinite(r.firstYearCostPerCustomer)
-                            ? formatAbsolutePricePerUnit(r.firstYearCostPerCustomer, currencyCode)
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : null}
-
-          {openingBasisCheck ? (
-            <div className="rounded-md border border-slate-700 bg-slate-900/40 p-3 space-y-2">
-              <h3 className="text-sm font-bold text-slate-100">Opening Revenue Bridge Check</h3>
-              <table className="w-full border-collapse text-xs">
-                <tbody>
-                  <tr className="border-b border-slate-800">
-                    <td className="py-2 text-slate-300">
-                      Last Historical Revenue ({lastHistoricYear ?? "—"})
-                    </td>
-                    <td className="py-2 text-right tabular-nums text-slate-100">
-                      {formatAccounting(openingBasisCheck.totalHistorical, unit, showDecimals)}
-                    </td>
-                  </tr>
-                  <tr className="border-b border-slate-800">
-                    <td className="py-2 text-slate-300">Sum of Opening Base Inputs (pre-growth)</td>
-                    <td className="py-2 text-right tabular-nums text-slate-100">
-                      {formatAccounting(openingBasisCheck.startingBaseSum, unit, showDecimals)}
-                    </td>
-                  </tr>
-                  <tr className="border-b border-slate-800">
-                    <td className="py-2 text-slate-300">Difference</td>
-                    <td className="py-2 text-right tabular-nums text-slate-100">
-                      {formatAccounting(openingBasisCheck.difference, unit, showDecimals)}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2 text-slate-400">
-                      Status (tolerance: {openingBasisCheck.tolerance})
-                    </td>
-                    <td
-                      className={`py-2 text-right font-semibold ${
-                        openingBasisCheck.reconciled ? "text-emerald-300" : "text-amber-300"
-                      }`}
-                    >
-                      {openingBasisCheck.reconciled ? "Reconciled" : "Not Reconciled"}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-
-          <div className="rounded-md border border-slate-700 bg-slate-900/40">
-            <div className="px-3 py-2 border-b border-slate-800 text-sm font-semibold text-slate-100">COGS</div>
-            <table className="w-full border-collapse text-xs">
-              <thead>
-                <tr className="border-b border-slate-800">
-                  <th className="w-[280px] px-3.5 py-2.5 text-left font-semibold text-slate-300">Line Item</th>
-                  {years.map((y) => (
-                    <th key={`cogs-h-${y}`} className="px-3.5 py-2.5 text-right font-semibold text-slate-400">
-                      {y}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {forecastableCogsLines.length === 0 ? (
-                  <tr>
-                    <td colSpan={1 + years.length} className="px-3 py-5 text-center text-slate-500">
-                      No forecastable COGS lines yet.
-                    </td>
-                  </tr>
-                ) : (
-                  forecastableCogsLines.map((line) => (
-                    <tr key={line.lineId} className="border-b border-slate-900">
-                      <td className="px-3.5 py-2.5 text-slate-300">
-                        <div>{line.lineLabel}</div>
-                        <div className="text-[10px] text-slate-500">Linked to revenue: {line.lineLabel}</div>
-                      </td>
-                      {years.map((y) => {
-                        if (y.endsWith("A")) {
-                          return (
-                            <td key={`${line.lineId}-${y}`} className="px-3.5 py-2.5 text-right tabular-nums text-slate-500">
-                              —
-                            </td>
-                          );
-                        }
-                        const val = cogsValueByLineByYear[line.lineId]?.[y];
-                        return (
-                          <td key={`${line.lineId}-${y}`} className="px-3.5 py-2.5 text-right tabular-nums text-slate-300">
-                            {val != null && Number.isFinite(Number(val))
-                              ? formatAccounting(Number(val), unit, showDecimals)
-                              : "—"}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))
-                )}
-                <tr className="border-t border-slate-700">
-                  <td className="px-3.5 py-2.5 font-semibold text-slate-200">Total COGS</td>
-                  {years.map((y) => {
-                    const total = y.endsWith("A") ? null : totalCogsByYear[y];
-                    return (
-                      <td key={`total-cogs-${y}`} className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
-                        {total != null ? formatAccounting(total, unit, showDecimals) : "—"}
-                      </td>
-                    );
-                  })}
-                </tr>
-              </tbody>
-            </table>
-            {forecastableCogsLines.length > 0 && cogsConfiguredLineCount < forecastableCogsLines.length ? (
-              <div className="px-3 pb-2 text-[10px] text-amber-300/90">
-                {forecastableCogsLines.length - cogsConfiguredLineCount} of {forecastableCogsLines.length} forecastable COGS lines are still unconfigured.
-              </div>
             ) : null}
           </div>
 
-          {detectedCogsOnly.length > 0 ? (
-            <div className="rounded-md border border-slate-700 bg-slate-900/40 p-3">
-              <h3 className="text-sm font-semibold text-slate-100 mb-2">Historical COGS Context</h3>
-              <div className="space-y-1.5 text-xs">
-                {detectedCogsOnly.map((line) => (
-                  <p key={`ctx-${line.sourceHistoricalLineId}`} className="text-slate-400">
-                    <span className="text-slate-300">{line.lineLabel}</span> — {line.detectionReason}
-                  </p>
-                ))}
-              </div>
+          <div className="rounded-md border border-slate-800 bg-slate-900/50">
+            <div className="px-3.5 py-2 border-b border-slate-800">
+              <PreviewCollapsibleHeader
+                expanded={cogsPreviewSections.cogs_core_pnl}
+                onToggle={() => toggleCogsPreviewSection("cogs_core_pnl")}
+                title="Revenue, COGS & Gross Margin"
+                subtitle="Read-only summary · Actuals from historical statements; forecasts from Revenue and COGS forecast drivers."
+              />
             </div>
-          ) : null}
-
-          {detectedCogsReview.length > 0 ? (
-            <div className="rounded-md border border-slate-700 bg-slate-900/40 p-3">
-              <h3 className="text-sm font-semibold text-slate-100 mb-2">Review Items</h3>
-              <div className="space-y-1.5 text-xs">
-                {detectedCogsReview.map((line) => (
-                  <p key={`review-${line.sourceHistoricalLineId}`} className="text-slate-400">
-                    <span className="text-slate-300">{line.lineLabel}</span> — {line.detectionReason}
-                  </p>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          <div className="rounded-md border border-slate-700 bg-slate-900/40">
-            <div className="px-3 py-2 border-b border-slate-800 text-sm font-semibold text-slate-100">
-              Gross Profit
-            </div>
-            <table className="w-full border-collapse text-xs">
-              <tbody>
-                <tr>
-                  <td className="w-[280px] px-3.5 py-2.5 text-slate-300">Revenue less configured COGS</td>
-                  {years.map((y) => {
-                    const revenue = y.endsWith("A") ? null : Number(projectedValues.rev?.[y]);
-                    const totalCogs = y.endsWith("A") ? null : totalCogsByYear[y];
-                    const gp =
-                      revenue != null && Number.isFinite(revenue) && totalCogs != null
-                        ? revenue - totalCogs
-                        : null;
+            {cogsPreviewSections.cogs_core_pnl ? (
+            <>
+            <table className={COGS_PREVIEW_YEAR_TABLE_CLASS}>
+              <CogsPreviewYearColgroup years={years} />
+              <thead>
+                <tr className="border-b border-slate-800">
+                  <th className={COGS_PREVIEW_LABEL_TH_CLASS}> </th>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
                     return (
-                      <td key={`gp-${y}`} className="px-3.5 py-2.5 text-right tabular-nums text-slate-300">
-                        {gp != null ? formatAccounting(gp, unit, showDecimals) : "—"}
+                      <th
+                        key={`core-pl-h-${y}`}
+                        className={`px-3.5 py-2.5 text-right font-semibold text-slate-400 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/50" : ""}`}
+                      >
+                        <span className="block">{y}</span>
+                        <span className="block text-[9px] font-normal text-slate-500 mt-0.5">
+                          {y.endsWith("A") ? "Actual" : "Forecast"}
+                        </span>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-slate-900">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>Revenue</td>
+                  {coreIncomeStatementPreviewByYear.map((col, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    return (
+                      <td
+                        key={`core-rev-${col.y}`}
+                        className={`px-3.5 py-2.5 text-right tabular-nums text-slate-200 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(col.y)} ${col.isHist ? "bg-slate-950/40" : ""}`}
+                      >
+                        {col.revenue != null && Number.isFinite(col.revenue)
+                          ? formatAccounting(col.revenue, unit, showDecimals)
+                          : "—"}
                       </td>
                     );
                   })}
                 </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div className="rounded-md border border-slate-700 bg-slate-900/40">
-            <div className="px-3 py-2 border-b border-slate-800 text-sm font-semibold text-slate-100">
-              Gross Margin %
-            </div>
-            <table className="w-full border-collapse text-xs">
-              <tbody>
-                <tr>
-                  <td className="w-[280px] px-3.5 py-2.5 text-slate-300">Gross Profit / Revenue</td>
-                  {years.map((y) => {
-                    const revenue = y.endsWith("A") ? null : Number(projectedValues.rev?.[y]);
-                    const totalCogs = y.endsWith("A") ? null : totalCogsByYear[y];
-                    const gp =
-                      revenue != null && Number.isFinite(revenue) && totalCogs != null
-                        ? revenue - totalCogs
-                        : null;
-                    const gm =
-                      gp != null && revenue != null && Number.isFinite(revenue) && revenue !== 0
-                        ? (gp / revenue) * 100
-                        : null;
+                <tr className="border-b border-slate-900">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>COGS</td>
+                  {coreIncomeStatementPreviewByYear.map((col, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
                     return (
-                      <td key={`gm-${y}`} className="px-3.5 py-2.5 text-right tabular-nums text-slate-300">
-                        {gm != null
+                      <td
+                        key={`core-cogs-${col.y}`}
+                        className={`px-3.5 py-2.5 text-right tabular-nums text-slate-200 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(col.y)} ${col.isHist ? "bg-slate-950/40" : ""}`}
+                      >
+                        {col.cogs != null && Number.isFinite(col.cogs)
+                          ? formatAccounting(col.cogs, unit, showDecimals)
+                          : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-900">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>Gross Profit</td>
+                  {coreIncomeStatementPreviewByYear.map((col, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    return (
+                      <td
+                        key={`core-gp-${col.y}`}
+                        className={`px-3.5 py-2.5 text-right tabular-nums text-slate-200 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(col.y)} ${col.isHist ? "bg-slate-950/40" : ""}`}
+                      >
+                        {col.gp != null && Number.isFinite(col.gp)
+                          ? formatAccounting(col.gp, unit, showDecimals)
+                          : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-900">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>Gross Margin %</td>
+                  {coreIncomeStatementPreviewByYear.map((col, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    return (
+                      <td
+                        key={`core-gm-${col.y}`}
+                        className={`px-3.5 py-2.5 text-right tabular-nums text-slate-200 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(col.y)} ${col.isHist ? "bg-slate-950/40" : ""}`}
+                      >
+                        {col.gmPct != null && Number.isFinite(col.gmPct)
                           ? `${new Intl.NumberFormat(undefined, {
                               minimumFractionDigits: 1,
                               maximumFractionDigits: 1,
-                            }).format(gm)}%`
+                            }).format(col.gmPct)}%`
                           : "—"}
                       </td>
                     );
@@ -1682,7 +2110,763 @@ export default function ISBuildPreview() {
                 </tr>
               </tbody>
             </table>
+            </>
+            ) : null}
           </div>
+
+          <div className="rounded-md border border-slate-700 bg-slate-900/40">
+            <div className="px-3.5 py-2 border-b border-slate-800">
+              <PreviewCollapsibleHeader
+                expanded={cogsPreviewSections.cogs_opex_summary}
+                onToggle={() => toggleCogsPreviewSection("cogs_opex_summary")}
+                title="Operating expenses & operating income"
+                subtitle={
+                  <span>
+                    Historical: reported IS totals where available. Forecast: Phase 1 direct OpEx only (lines routed to
+                    &quot;forecast here&quot;); schedule-derived and review routes are excluded from the forecast
+                    subtotal.
+                  </span>
+                }
+              />
+            </div>
+            {cogsPreviewSections.cogs_opex_summary ? (
+            <table className={COGS_PREVIEW_YEAR_TABLE_CLASS}>
+              <CogsPreviewYearColgroup years={years} />
+              <thead>
+                <tr className="border-b border-slate-800">
+                  <th className={COGS_PREVIEW_LABEL_TH_CLASS}> </th>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    return (
+                      <th
+                        key={`opex-sum-h-${y}`}
+                        className={`px-3.5 py-2.5 text-right font-semibold text-slate-400 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/50" : ""}`}
+                      >
+                        {y}
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-slate-900">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>
+                    Operating expenses (reported)
+                  </td>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    const v = y.endsWith("A") ? operatingExpensesIsRollupByYear[y] : null;
+                    return (
+                      <td
+                        key={`opex-rpt-${y}`}
+                        className={`px-3.5 py-2.5 text-right tabular-nums text-slate-300 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/40" : ""}`}
+                      >
+                        {v != null && Number.isFinite(v) ? formatAccounting(v, unit, showDecimals) : y.endsWith("A") ? "—" : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-900">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>
+                    Direct OpEx (Phase 1)
+                    <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                      Sum of lines forecast in drivers · actuals = same routed lines only
+                    </div>
+                  </td>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    const v = totalDirectOpexByYear[y];
+                    return (
+                      <td
+                        key={`opex-dir-${y}`}
+                        className={`px-3.5 py-2.5 text-right tabular-nums text-slate-300 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/40" : ""}`}
+                      >
+                        {v != null && Number.isFinite(v) ? formatAccounting(v, unit, showDecimals) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-b border-slate-900">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>
+                    Operating income (EBIT)
+                    <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                      Historical: IS EBIT. Forecast: Gross profit − direct OpEx (Phase 1).
+                    </div>
+                  </td>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    const v = opexSummaryOperatingIncomeByYear[y];
+                    const core = coreIncomeStatementPreviewByYear[yi];
+                    const rev = core?.revenue ?? null;
+                    const om =
+                      v != null && rev != null && Number.isFinite(v) && Number.isFinite(rev) && rev !== 0
+                        ? (v / rev) * 100
+                        : null;
+                    return (
+                      <td
+                        key={`opex-ebit-${y}`}
+                        className={`px-3.5 py-2.5 text-right align-top tabular-nums text-slate-200 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/40" : ""}`}
+                      >
+                        <div>{v != null && Number.isFinite(v) ? formatAccounting(v, unit, showDecimals) : "—"}</div>
+                        <div className="text-[10px] text-slate-500 mt-0.5">
+                          {om != null && Number.isFinite(om)
+                            ? `${new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(om)}% op. margin`
+                            : "—"}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
+            </table>
+            ) : null}
+          </div>
+
+          <div className="rounded-md border border-slate-700 bg-slate-900/40">
+            <div className="px-3.5 py-2 border-b border-slate-800">
+              <PreviewCollapsibleHeader
+                expanded={cogsPreviewSections.cogs_opex_detail}
+                onToggle={() => toggleCogsPreviewSection("cogs_opex_detail")}
+                title="Operating expenses detail (direct)"
+                subtitle="Preview-only % of revenue uses total revenue. Excludes schedule / review routes."
+              />
+            </div>
+            {cogsPreviewSections.cogs_opex_detail ? (
+            <table className={COGS_PREVIEW_YEAR_TABLE_CLASS}>
+              <CogsPreviewYearColgroup years={years} />
+              <thead>
+                <tr className="border-b border-slate-800">
+                  <th className={COGS_PREVIEW_LABEL_TH_CLASS}>Line item</th>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    return (
+                      <th
+                        key={`opex-d-h-${y}`}
+                        className={`px-3.5 py-2.5 text-right font-semibold text-slate-400 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/50" : ""}`}
+                      >
+                        {y}
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {ingestedOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "forecast_direct")
+                  .length === 0 ? (
+                  <tr>
+                    <td colSpan={1 + years.length} className="px-3.5 py-5 text-center text-slate-500">
+                      No lines routed to direct operating expense forecast.
+                    </td>
+                  </tr>
+                ) : (
+                  ingestedOpexLines
+                    .filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "forecast_direct")
+                    .map((row) => {
+                      const rRow = findRowInTree(incomeStatement ?? [], row.lineId);
+                      const revRow = incomeStatement?.find((r) => r.id === "rev");
+                      return (
+                        <tr key={`opex-d-${row.lineId}`} className="border-b border-slate-900">
+                          <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-300`}>{row.label}</td>
+                          {years.map((y, yi) => {
+                            const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                            let val: number | null = null;
+                            let pct: number | null = null;
+                            if (y.endsWith("A")) {
+                              if (rRow) {
+                                const h = getRowHistoricalActual(row.lineId, rRow, y);
+                                val = h != null && Number.isFinite(h) ? h : null;
+                              }
+                              if (revRow) {
+                                const rev = getRowHistoricalActual("rev", revRow, y);
+                                if (rev != null && val != null && Number.isFinite(rev) && rev !== 0) {
+                                  pct = (val / rev) * 100;
+                                }
+                              }
+                            } else {
+                              const pv = opexProjectedByLineId[row.lineId]?.[y];
+                              val = pv != null && Number.isFinite(pv) ? pv : null;
+                              const rev = projectedValues.rev?.[y];
+                              const revN = rev != null && Number.isFinite(Number(rev)) ? Number(rev) : null;
+                              if (revN != null && val != null && revN !== 0) pct = (val / revN) * 100;
+                            }
+                            const pctLine = (
+                              <div className="text-[10px] text-slate-500 mt-0.5">
+                                {pct != null && Number.isFinite(pct)
+                                  ? `(${new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(pct)}% of rev.)`
+                                  : "—"}
+                              </div>
+                            );
+                            return (
+                              <td
+                                key={`${row.lineId}-${y}`}
+                                className={`px-3.5 py-2.5 text-right align-top tabular-nums text-slate-300 ${
+                                  isFirstForecast ? "border-l border-slate-600/90" : ""
+                                } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/40" : ""}`}
+                              >
+                                <div>
+                                  {val != null && Number.isFinite(val) ? formatAccounting(val, unit, showDecimals) : "—"}
+                                </div>
+                                {pctLine}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })
+                )}
+              </tbody>
+            </table>
+            ) : null}
+          </div>
+
+          <div className="rounded-md border border-slate-700 bg-slate-900/40">
+            <div className="px-3.5 py-2 border-b border-slate-800">
+              <PreviewCollapsibleHeader
+                expanded={cogsPreviewSections.cogs_opex_routed}
+                onToggle={() => toggleCogsPreviewSection("cogs_opex_routed")}
+                title="Routed OpEx (schedules & review)"
+                subtitle="Read-only routing summary — not included in Phase 1 forecast totals above."
+              />
+            </div>
+            {cogsPreviewSections.cogs_opex_routed ? (
+            <div className="px-3.5 py-3 space-y-3 text-xs text-slate-400">
+              {ingestedOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
+                .length > 0 ? (
+                <div>
+                  <div className="text-slate-300 font-semibold mb-1">Derived from schedule (Phase 2)</div>
+                  <ul className="list-disc pl-4 space-y-1">
+                    {ingestedOpexLines
+                      .filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
+                      .map((r) => (
+                        <li key={r.lineId}>
+                          <span className="text-slate-200">{r.label}</span>
+                          {opexForecastConfigV1?.lines?.[r.lineId]?.aiExplanation
+                            ? ` — ${opexForecastConfigV1.lines[r.lineId]!.aiUserFacingSummary ?? opexForecastConfigV1.lines[r.lineId]!.aiExplanation}`
+                            : null}
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              ) : null}
+              {ingestedOpexLines.filter((r) => {
+                const s = opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus;
+                return s === "review_required" || s === "excluded_nonrecurring";
+              }).length > 0 ? (
+                <div>
+                  <div className="text-slate-300 font-semibold mb-1">Review / excluded</div>
+                  <ul className="list-disc pl-4 space-y-1">
+                    {ingestedOpexLines
+                      .filter((r) => {
+                        const s = opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus;
+                        return s === "review_required" || s === "excluded_nonrecurring";
+                      })
+                      .map((r) => {
+                        const lc = opexForecastConfigV1?.lines?.[r.lineId];
+                        return (
+                          <li key={r.lineId}>
+                            <span className="text-slate-200">{r.label}</span>
+                            <span className="text-slate-500"> ({lc?.routeStatus?.replace(/_/g, " ")})</span>
+                            {lc?.aiExplanation
+                              ? ` — ${lc.aiUserFacingSummary ?? lc.aiExplanation}`
+                              : null}
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              ) : null}
+              {ingestedOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
+                .length === 0 &&
+              ingestedOpexLines.filter((r) => {
+                const s = opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus;
+                return s === "review_required" || s === "excluded_nonrecurring";
+              }).length === 0 ? (
+                <div className="text-slate-500">No schedule or review routes.</div>
+              ) : null}
+            </div>
+            ) : null}
+          </div>
+
+          <div className="rounded-md border border-slate-700 bg-slate-900/40">
+            <div className="px-3.5 py-2 border-b border-slate-800">
+              <PreviewCollapsibleHeader
+                expanded={cogsPreviewSections.cogs_detail}
+                onToggle={() => toggleCogsPreviewSection("cogs_detail")}
+                title="COGS"
+              />
+            </div>
+            {cogsPreviewSections.cogs_detail ? (
+            <>
+            <table className={COGS_PREVIEW_YEAR_TABLE_CLASS}>
+              <CogsPreviewYearColgroup years={years} />
+              <thead>
+                <tr className="border-b border-slate-800">
+                  <th className={COGS_PREVIEW_LABEL_TH_CLASS}>Line Item</th>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    return (
+                      <th
+                        key={`cogs-h-${y}`}
+                        className={`px-3.5 py-2.5 text-right font-semibold text-slate-400 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/50" : ""}`}
+                      >
+                        {y}
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {forecastableCogsLines.length === 0 ? (
+                  <tr>
+                    <td colSpan={1 + years.length} className="px-3.5 py-5 text-center text-slate-500">
+                      No forecastable COGS lines yet.
+                    </td>
+                  </tr>
+                ) : (
+                  forecastableCogsLines.map((line) => (
+                    <tr key={line.lineId} className="border-b border-slate-900">
+                      <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-300`}>
+                        <div>{line.lineLabel}</div>
+                        <div className="text-[10px] text-slate-500">Linked to revenue: {line.lineLabel}</div>
+                      </td>
+                      {years.map((y, yi) => {
+                        const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                        const pct = getCogsPctOfLinkedRevenue(line, y);
+                        const pctLine = (
+                          <div className="text-[10px] text-slate-500 mt-0.5">
+                            {pct != null && Number.isFinite(pct)
+                              ? `(${new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(pct)}% of rev.)`
+                              : "—"}
+                          </div>
+                        );
+                        if (y.endsWith("A")) {
+                          const val = (() => {
+                            const cogsRow = findRowInTree(incomeStatement ?? [], line.lineId);
+                            if (!cogsRow) return null;
+                            const h = getRowHistoricalActual(line.lineId, cogsRow, y);
+                            return h != null && Number.isFinite(h) ? h : null;
+                          })();
+                          return (
+                            <td
+                              key={`${line.lineId}-${y}`}
+                              className={`px-3.5 py-2.5 text-right align-top tabular-nums text-slate-300 bg-slate-950/40 ${
+                                isFirstForecast ? "border-l border-slate-600/90" : ""
+                              }`}
+                            >
+                              <div>
+                                {val != null ? formatAccounting(val, unit, showDecimals) : "—"}
+                              </div>
+                              {pctLine}
+                            </td>
+                          );
+                        }
+                        const cogsVal = cogsValueByLineByYear[line.lineId]?.[y];
+                        return (
+                          <td
+                            key={`${line.lineId}-${y}`}
+                            className={`px-3.5 py-2.5 text-right align-top tabular-nums text-slate-300 ${
+                              isFirstForecast ? "border-l border-slate-600/90" : ""
+                            } ${forecastStartColClass(y)}`}
+                          >
+                            <div>
+                              {cogsVal != null && Number.isFinite(Number(cogsVal))
+                                ? formatAccounting(Number(cogsVal), unit, showDecimals)
+                                : "—"}
+                            </div>
+                            {pctLine}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))
+                )}
+                <tr className="border-t border-slate-700">
+                  <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} font-semibold text-slate-200`}>Total COGS</td>
+                  {years.map((y, yi) => {
+                    const isFirstForecast = firstForecastColumnIndex >= 0 && yi === firstForecastColumnIndex;
+                    const total = y.endsWith("A") ? null : totalCogsByYear[y];
+                    const tpct = y.endsWith("A") ? null : getTotalCogsPctOfRevenue(y);
+                    const pctLine =
+                      tpct != null && Number.isFinite(tpct) ? (
+                        <div className="text-[10px] text-slate-500 mt-0.5 font-normal">
+                          ({new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(tpct)}% of rev.)
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-slate-600 mt-0.5 font-normal">—</div>
+                      );
+                    return (
+                      <td
+                        key={`total-cogs-${y}`}
+                        className={`px-3.5 py-2.5 text-right align-top font-semibold text-slate-300 ${
+                          isFirstForecast ? "border-l border-slate-600/90" : ""
+                        } ${forecastStartColClass(y)} ${y.endsWith("A") ? "bg-slate-950/40" : ""}`}
+                      >
+                        <div>{total != null ? formatAccounting(total, unit, showDecimals) : "—"}</div>
+                        {pctLine}
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
+            </table>
+            {forecastableCogsLines.length > 0 && cogsConfiguredLineCount < forecastableCogsLines.length ? (
+              <div className="px-3.5 pb-2 text-[10px] text-amber-300/90">
+                {forecastableCogsLines.length - cogsConfiguredLineCount} of {forecastableCogsLines.length} forecastable COGS lines are still unconfigured.
+              </div>
+            ) : null}
+            </>
+            ) : null}
+          </div>
+
+          {costPerUnitDriverAuditRows.length > 0 ||
+          costPerCustomerDriverAuditRows.length > 0 ||
+          costPerContractDriverAuditRows.length > 0 ||
+          costPerLocationDriverAuditRows.length > 0 ||
+          costPerUtilizedUnitDriverAuditRows.length > 0 ? (
+            <div className="rounded-md border border-slate-800 bg-slate-950/40">
+              <div className="px-3.5 py-2 border-b border-slate-800">
+                <PreviewCollapsibleHeader
+                  expanded={cogsPreviewSections.cogs_driver_diagnostics}
+                  onToggle={() => toggleCogsPreviewSection("cogs_driver_diagnostics")}
+                  title="COGS driver diagnostics"
+                  subtitle="(optional detail)"
+                />
+              </div>
+              {cogsPreviewSections.cogs_driver_diagnostics ? (
+              <div className="border-t border-slate-800/90 pb-3 pt-2 space-y-3">
+                {costPerUnitDriverAuditRows.length > 0 ? (
+                  <div className="rounded-md border border-slate-700/80 bg-slate-900/40">
+                    <div className="px-3.5 py-2 border-b border-slate-800 text-xs font-semibold text-slate-200">
+                      Cost per Unit Drivers
+                    </div>
+                    <div className="overflow-x-auto min-w-0">
+                      <table className="w-full border-collapse text-xs min-w-[720px]">
+                        <thead>
+                          <tr className="border-b border-slate-800">
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Line</th>
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Linked revenue line</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting volume</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting cost / unit</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year volume
+                            </th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year cost / unit
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {costPerUnitDriverAuditRows.map((r) => (
+                            <tr key={r.lineId} className="border-b border-slate-900">
+                              <td className="px-3.5 py-2.5 text-slate-200">{r.lineLabel}</td>
+                              <td className="px-3.5 py-2.5 text-slate-400">{r.linkedRevenueLabel}</td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200">
+                                {formatVolumeDriverCount(r.startingVolume)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200">
+                                {formatAbsolutePricePerUnit(r.startingCostPerUnit, currencyCode)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200">
+                                {r.firstYearVolume != null && Number.isFinite(r.firstYearVolume)
+                                  ? formatVolumeDriverCount(r.firstYearVolume)
+                                  : "—"}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200">
+                                {r.firstYearCostPerUnit != null && Number.isFinite(r.firstYearCostPerUnit)
+                                  ? formatAbsolutePricePerUnit(r.firstYearCostPerUnit, currencyCode)
+                                  : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+                {costPerCustomerDriverAuditRows.length > 0 ? (
+                  <div className="rounded-md border border-slate-700/80 bg-slate-900/40">
+                    <div className="px-3.5 py-2 border-b border-slate-800 text-xs font-semibold text-slate-200">
+                      Cost per Customer Drivers
+                    </div>
+                    <div className="overflow-x-auto min-w-0">
+                      <table className="w-full border-collapse text-xs min-w-[840px]">
+                        <thead>
+                          <tr className="border-b border-slate-800">
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Line</th>
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Linked revenue line</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting customers</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              Starting cost / customer
+                              <span className="block text-[9px] font-normal text-slate-500 mt-0.5">(per basis)</span>
+                            </th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year customers
+                            </th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year cost / customer
+                              <span className="block text-[9px] font-normal text-slate-500 mt-0.5">(annual)</span>
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {costPerCustomerDriverAuditRows.map((r) => (
+                            <tr key={r.lineId} className="border-b border-slate-900">
+                              <td className="px-3.5 py-2.5 text-slate-200 align-top">
+                                <div>{r.lineLabel}</div>
+                                <div className="text-[10px] text-slate-500 mt-0.5">
+                                  Customers · {r.arpuBasisLabel} ARPU · Cost basis:{" "}
+                                  {r.costPerCustomerBasis === "monthly" ? "Monthly" : "Annual"}
+                                </div>
+                              </td>
+                              <td className="px-3.5 py-2.5 text-slate-400 align-top">{r.linkedRevenueLabel}</td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatVolumeDriverCount(r.startingCustomers)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatAbsolutePricePerUnit(r.startingCostPerCustomer, currencyCode)}
+                                <span className="text-slate-500">
+                                  {r.costPerCustomerBasis === "monthly" ? " / month" : " / year"}
+                                </span>
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearCustomers != null && Number.isFinite(r.firstYearCustomers)
+                                  ? formatVolumeDriverCount(r.firstYearCustomers)
+                                  : "—"}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearCostPerCustomer != null && Number.isFinite(r.firstYearCostPerCustomer)
+                                  ? (
+                                      <>
+                                        {formatAbsolutePricePerUnit(r.firstYearCostPerCustomer, currencyCode)}
+                                        <span className="text-slate-500"> / year</span>
+                                      </>
+                                    )
+                                  : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+                {costPerContractDriverAuditRows.length > 0 ? (
+                  <div className="rounded-md border border-slate-700/80 bg-slate-900/40">
+                    <div className="px-3.5 py-2 border-b border-slate-800 text-xs font-semibold text-slate-200">
+                      Cost per Contract Drivers
+                    </div>
+                    <div className="overflow-x-auto min-w-0">
+                      <table className="w-full border-collapse text-xs min-w-[840px]">
+                        <thead>
+                          <tr className="border-b border-slate-800">
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Line</th>
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Linked revenue line</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting contracts</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting cost / contract</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year contracts
+                            </th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year cost / contract
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {costPerContractDriverAuditRows.map((r) => (
+                            <tr key={r.lineId} className="border-b border-slate-900">
+                              <td className="px-3.5 py-2.5 text-slate-200 align-top">
+                                <div>{r.lineLabel}</div>
+                                <div className="text-[10px] text-slate-500 mt-0.5">Contracts · annual ACV</div>
+                              </td>
+                              <td className="px-3.5 py-2.5 text-slate-400 align-top">{r.linkedRevenueLabel}</td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatVolumeDriverCount(r.startingContracts)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatAbsolutePricePerUnit(r.startingCostPerContract, currencyCode)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearContracts != null && Number.isFinite(r.firstYearContracts)
+                                  ? formatVolumeDriverCount(r.firstYearContracts)
+                                  : "—"}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearCostPerContract != null && Number.isFinite(r.firstYearCostPerContract)
+                                  ? formatAbsolutePricePerUnit(r.firstYearCostPerContract, currencyCode)
+                                  : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+                {costPerLocationDriverAuditRows.length > 0 ? (
+                  <div className="rounded-md border border-slate-700/80 bg-slate-900/40">
+                    <div className="px-3.5 py-2 border-b border-slate-800 text-xs font-semibold text-slate-200">
+                      Cost per Location Drivers
+                    </div>
+                    <div className="overflow-x-auto min-w-0">
+                      <table className="w-full border-collapse text-xs min-w-[840px]">
+                        <thead>
+                          <tr className="border-b border-slate-800">
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Line</th>
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Linked revenue line</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting locations</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting cost / location</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year locations
+                            </th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year cost / location
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {costPerLocationDriverAuditRows.map((r) => (
+                            <tr key={r.lineId} className="border-b border-slate-900">
+                              <td className="px-3.5 py-2.5 text-slate-200 align-top">
+                                <div>{r.lineLabel}</div>
+                                <div className="text-[10px] text-slate-500 mt-0.5">
+                                  Locations · {r.rplBasisLabel} revenue per location
+                                </div>
+                              </td>
+                              <td className="px-3.5 py-2.5 text-slate-400 align-top">{r.linkedRevenueLabel}</td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatVolumeDriverCount(r.startingLocations)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatAbsolutePricePerUnit(r.startingCostPerLocation, currencyCode)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearLocations != null && Number.isFinite(r.firstYearLocations)
+                                  ? formatVolumeDriverCount(r.firstYearLocations)
+                                  : "—"}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearCostPerLocation != null && Number.isFinite(r.firstYearCostPerLocation)
+                                  ? formatAbsolutePricePerUnit(r.firstYearCostPerLocation, currencyCode)
+                                  : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+                {costPerUtilizedUnitDriverAuditRows.length > 0 ? (
+                  <div className="rounded-md border border-slate-700/80 bg-slate-900/40">
+                    <div className="px-3.5 py-2 border-b border-slate-800 text-xs font-semibold text-slate-200">
+                      Cost per Utilized Unit Drivers
+                    </div>
+                    <div className="overflow-x-auto min-w-0">
+                      <table className="w-full border-collapse text-xs min-w-[840px]">
+                        <thead>
+                          <tr className="border-b border-slate-800">
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Line</th>
+                            <th className="px-3.5 py-2.5 text-left font-semibold text-slate-300">Linked revenue line</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting utilized units</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">Starting cost / utilized unit</th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year utilized units
+                            </th>
+                            <th className="px-3.5 py-2.5 text-right font-semibold text-slate-300">
+                              First forecast-year cost / utilized unit
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {costPerUtilizedUnitDriverAuditRows.map((r) => (
+                            <tr key={r.lineId} className="border-b border-slate-900">
+                              <td className="px-3.5 py-2.5 text-slate-200 align-top">
+                                <div>{r.lineLabel}</div>
+                                <div className="text-[10px] text-slate-500 mt-0.5">{r.capacityUnitSecondary}</div>
+                              </td>
+                              <td className="px-3.5 py-2.5 text-slate-400 align-top">{r.linkedRevenueLabel}</td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatVolumeDriverCount(r.startingUtilizedUnits)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {formatAbsolutePricePerUnit(r.startingCostPerUtilizedUnit, currencyCode)}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearUtilizedUnits != null && Number.isFinite(r.firstYearUtilizedUnits)
+                                  ? formatVolumeDriverCount(r.firstYearUtilizedUnits)
+                                  : "—"}
+                              </td>
+                              <td className="px-3.5 py-2.5 text-right tabular-nums text-slate-200 align-top">
+                                {r.firstYearCostPerUtilizedUnit != null &&
+                                Number.isFinite(r.firstYearCostPerUtilizedUnit)
+                                  ? formatAbsolutePricePerUnit(r.firstYearCostPerUtilizedUnit, currencyCode)
+                                  : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {detectedCogsOnly.length > 0 ? (
+            <div className="rounded-md border border-slate-700 bg-slate-900/40">
+              <div className="px-3.5 py-2 border-b border-slate-800">
+                <PreviewCollapsibleHeader
+                  expanded={cogsPreviewSections.cogs_historical_context}
+                  onToggle={() => toggleCogsPreviewSection("cogs_historical_context")}
+                  title="Historical COGS Context"
+                />
+              </div>
+              {cogsPreviewSections.cogs_historical_context ? (
+              <div className="px-3.5 pt-2 pb-3 space-y-1.5 text-xs">
+                {detectedCogsOnly.map((line) => (
+                  <p key={`ctx-${line.sourceHistoricalLineId}`} className="text-slate-400">
+                    <span className="text-slate-300">{line.lineLabel}</span> — {line.detectionReason}
+                  </p>
+                ))}
+              </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {detectedCogsReview.length > 0 ? (
+            <div className="rounded-md border border-slate-700 bg-slate-900/40">
+              <div className="px-3.5 py-2 border-b border-slate-800">
+                <PreviewCollapsibleHeader
+                  expanded={cogsPreviewSections.cogs_review_items}
+                  onToggle={() => toggleCogsPreviewSection("cogs_review_items")}
+                  title="Review Items"
+                />
+              </div>
+              {cogsPreviewSections.cogs_review_items ? (
+              <div className="px-3.5 pt-2 pb-3 space-y-1.5 text-xs">
+                {detectedCogsReview.map((line) => (
+                  <p key={`review-${line.sourceHistoricalLineId}`} className="text-slate-400">
+                    <span className="text-slate-300">{line.lineLabel}</span> — {line.detectionReason}
+                  </p>
+                ))}
+              </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </section>
     );
@@ -1761,23 +2945,14 @@ export default function ISBuildPreview() {
                 colSpan={1 + years.length}
                 className="px-3 py-3 bg-slate-900/50"
               >
-                <button
-                  type="button"
-                  onClick={() => setRevenueSectionOpen((open) => !open)}
-                  className="flex w-full items-center justify-between text-left"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-400 text-xs">
-                      {revenueSectionOpen ? "▾" : "▸"}
-                    </span>
-                    <h3 className="text-sm font-bold text-slate-100">
-                      Revenue
-                    </h3>
-                  </div>
-                </button>
+                <PreviewCollapsibleHeader
+                  expanded={revenuePreviewSections.revenue_main}
+                  onToggle={() => toggleRevenuePreviewSection("revenue_main")}
+                  title="Revenue"
+                />
               </td>
             </tr>
-            {revenueSectionOpen &&
+            {revenuePreviewSections.revenue_main &&
               (revenueRows.length === 0 ? (
                 <tr>
                   <td
@@ -1897,16 +3072,28 @@ export default function ISBuildPreview() {
                 })
               ))}
             {priceVolumeDriverRows.length > 0 && (
-              <tr className="border-t-4 border-slate-700">
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
+                    <PreviewCollapsibleHeader
+                      expanded={revenuePreviewSections.revenue_price_volume}
+                      onToggle={() => toggleRevenuePreviewSection("revenue_price_volume")}
+                      title="Price × Volume Drivers"
+                      subtitle={
+                        <>
+                          Revenue = Volume × Price per unit.
+                          <span className="block mt-1">
+                            Driver audit only (volume × price after first-year growth). Not scaled to statement K/M;
+                            price/unit is absolute currency.
+                          </span>
+                        </>
+                      }
+                    />
+                  </td>
+                </tr>
+                {revenuePreviewSections.revenue_price_volume && (
+              <tr>
                 <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
-                  <h3 className="text-sm font-bold text-slate-100 mb-2">Price × Volume Drivers</h3>
-                  <p className="text-[11px] text-slate-500 mb-1 max-w-3xl">
-                    Revenue = Volume × Price per unit
-                  </p>
-                  <p className="text-[10px] text-slate-500 mb-2 max-w-3xl">
-                    Driver audit only (volume × price after first-year growth). Not scaled to statement K/M;
-                    price/unit is absolute currency.
-                  </p>
                   <div className="overflow-x-auto rounded border border-slate-700/80 bg-slate-950/50">
                     <table className="w-full min-w-[640px] border-collapse text-[11px]">
                       <thead>
@@ -1957,18 +3144,32 @@ export default function ISBuildPreview() {
                   </div>
                 </td>
               </tr>
+                )}
+              </>
             )}
             {customersArpuDriverRows.length > 0 && (
-              <tr className="border-t-4 border-slate-700">
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
+                    <PreviewCollapsibleHeader
+                      expanded={revenuePreviewSections.revenue_customers_arpu}
+                      onToggle={() => toggleRevenuePreviewSection("revenue_customers_arpu")}
+                      title="Customers × ARPU Drivers"
+                      subtitle={
+                        <>
+                          Revenue = Customers × ARPU (Average Revenue Per User), annualized when ARPU basis is monthly (×12).
+                          <span className="block mt-1">
+                            Driver audit only (customers × ARPU after first-year growth). Not scaled to statement K/M;
+                            ARPU is absolute currency per customer at the basis you selected.
+                          </span>
+                        </>
+                      }
+                    />
+                  </td>
+                </tr>
+                {revenuePreviewSections.revenue_customers_arpu && (
+              <tr>
                 <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
-                  <h3 className="text-sm font-bold text-slate-100 mb-2">Customers × ARPU Drivers</h3>
-                  <p className="text-[11px] text-slate-500 mb-1 max-w-3xl">
-                    Revenue = Customers × ARPU (Average Revenue Per User), annualized when ARPU basis is monthly (×12).
-                  </p>
-                  <p className="text-[10px] text-slate-500 mb-2 max-w-3xl">
-                    Driver audit only (customers × ARPU after first-year growth). Not scaled to statement K/M;
-                    ARPU is absolute currency per customer at the basis you selected.
-                  </p>
                   <div className="overflow-x-auto rounded border border-slate-700/80 bg-slate-950/50">
                     <table className="w-full min-w-[640px] border-collapse text-[11px]">
                       <thead>
@@ -2032,18 +3233,24 @@ export default function ISBuildPreview() {
                   </div>
                 </td>
               </tr>
+                )}
+              </>
             )}
             {locationsRevenuePerLocationDriverRows.length > 0 && (
-              <tr className="border-t-4 border-slate-700">
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
+                    <PreviewCollapsibleHeader
+                      expanded={revenuePreviewSections.revenue_locations_rpl}
+                      onToggle={() => toggleRevenuePreviewSection("revenue_locations_rpl")}
+                      title="Locations × Revenue per Location Drivers"
+                      subtitle="Driver audit only (locations × revenue/location after first-year growth). Annualized when basis is monthly (×12). Not scaled to statement K/M; revenue/location is absolute currency at the basis you selected."
+                    />
+                  </td>
+                </tr>
+                {revenuePreviewSections.revenue_locations_rpl && (
+              <tr>
                 <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
-                  <h3 className="text-sm font-bold text-slate-100 mb-2">
-                    Locations × Revenue per Location Drivers
-                  </h3>
-                  <p className="text-[10px] text-slate-500 mb-2 max-w-3xl">
-                    Driver audit only (locations × revenue/location after first-year growth). Annualized when basis is
-                    monthly (×12). Not scaled to statement K/M; revenue/location is absolute currency at the basis you
-                    selected.
-                  </p>
                   <div className="overflow-x-auto rounded border border-slate-700/80 bg-slate-950/50">
                     <table className="w-full min-w-[640px] border-collapse text-[11px]">
                       <thead>
@@ -2108,20 +3315,32 @@ export default function ISBuildPreview() {
                   </div>
                 </td>
               </tr>
+                )}
+              </>
             )}
             {capacityUtilizationYieldDriverRows.length > 0 && (
-              <tr className="border-t-4 border-slate-700">
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
+                    <PreviewCollapsibleHeader
+                      expanded={revenuePreviewSections.revenue_capacity_utilization_yield}
+                      onToggle={() => toggleRevenuePreviewSection("revenue_capacity_utilization_yield")}
+                      title="Capacity × Utilization × Yield Drivers"
+                      subtitle={
+                        <>
+                          Revenue = Capacity × (Utilization ÷ 100) × Yield; monthly yield is annualized (×12).
+                          <span className="block mt-1">
+                            Driver audit only (starting inputs and first forecast-year drivers after growth / level paths). Not
+                            scaled to statement K/M; yield is absolute currency per utilized unit.
+                          </span>
+                        </>
+                      }
+                    />
+                  </td>
+                </tr>
+                {revenuePreviewSections.revenue_capacity_utilization_yield && (
+              <tr>
                 <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
-                  <h3 className="text-sm font-bold text-slate-100 mb-2">
-                    Capacity × Utilization × Yield Drivers
-                  </h3>
-                  <p className="text-[11px] text-slate-500 mb-1 max-w-3xl">
-                    Revenue = Capacity × (Utilization ÷ 100) × Yield; monthly yield is annualized (×12).
-                  </p>
-                  <p className="text-[10px] text-slate-500 mb-2 max-w-3xl">
-                    Driver audit only (starting inputs and first forecast-year drivers after growth / level paths). Not
-                    scaled to statement K/M; yield is absolute currency per utilized unit.
-                  </p>
                   <div className="overflow-x-auto rounded border border-slate-700/80 bg-slate-950/50">
                     <table className="w-full min-w-[720px] border-collapse text-[11px]">
                       <thead>
@@ -2188,18 +3407,32 @@ export default function ISBuildPreview() {
                   </div>
                 </td>
               </tr>
+                )}
+              </>
             )}
             {contractsAcvDriverRows.length > 0 && (
-              <tr className="border-t-4 border-slate-700">
+              <>
+                <tr className="border-t-4 border-slate-700">
+                  <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
+                    <PreviewCollapsibleHeader
+                      expanded={revenuePreviewSections.revenue_contracts_acv}
+                      onToggle={() => toggleRevenuePreviewSection("revenue_contracts_acv")}
+                      title="Contracts × ACV Drivers"
+                      subtitle={
+                        <>
+                          Revenue = Contracts × ACV (annual contract value per contract).
+                          <span className="block mt-1">
+                            Driver audit only (starting inputs and first forecast-year drivers after growth). ACV is annual by
+                            definition — not scaled to statement K/M in this table.
+                          </span>
+                        </>
+                      }
+                    />
+                  </td>
+                </tr>
+                {revenuePreviewSections.revenue_contracts_acv && (
+              <tr>
                 <td colSpan={1 + years.length} className="px-3 py-3 bg-slate-900/40 align-top">
-                  <h3 className="text-sm font-bold text-slate-100 mb-2">Contracts × ACV Drivers</h3>
-                  <p className="text-[11px] text-slate-500 mb-1 max-w-3xl">
-                    Revenue = Contracts × ACV (annual contract value per contract).
-                  </p>
-                  <p className="text-[10px] text-slate-500 mb-2 max-w-3xl">
-                    Driver audit only (starting inputs and first forecast-year drivers after growth). ACV is annual by
-                    definition — not scaled to statement K/M in this table.
-                  </p>
                   <div className="overflow-x-auto rounded border border-slate-700/80 bg-slate-950/50">
                     <table className="w-full min-w-[640px] border-collapse text-[11px]">
                       <thead>
@@ -2248,6 +3481,8 @@ export default function ISBuildPreview() {
                   </div>
                 </td>
               </tr>
+                )}
+              </>
             )}
             {openingBasisCheck && (
               <>
@@ -2256,11 +3491,15 @@ export default function ISBuildPreview() {
                     colSpan={1 + years.length}
                     className="px-3 py-3 bg-slate-900/40"
                   >
-                    <h3 className="text-sm font-bold text-slate-100">
-                      Opening Revenue Bridge Check
-                    </h3>
+                    <PreviewCollapsibleHeader
+                      expanded={revenuePreviewSections.revenue_opening_bridge}
+                      onToggle={() => toggleRevenuePreviewSection("revenue_opening_bridge")}
+                      title="Opening Revenue Bridge Check"
+                    />
                   </td>
                 </tr>
+                {revenuePreviewSections.revenue_opening_bridge && (
+                  <>
                 <tr className="border-b border-slate-900">
                   <td className="px-3 py-2 text-slate-300">
                     Last Historical Revenue ({lastHistoricYear})
@@ -2299,6 +3538,8 @@ export default function ISBuildPreview() {
                   </td>
                   <td colSpan={Math.max(0, years.length - 1)} />
                 </tr>
+                  </>
+                )}
               </>
             )}
             {/* Revenue Growth — same row order and tree depth as Revenue above */}
@@ -2309,31 +3550,15 @@ export default function ISBuildPreview() {
                     colSpan={1 + years.length}
                     className="px-3 py-3 bg-slate-900/50"
                   >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setRevenueMethodSectionOpen((open) => !open)
-                      }
-                      className="flex w-full items-start justify-between text-left"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-slate-300 text-xs">
-                          {revenueMethodSectionOpen ? "▾" : "▸"}
-                        </span>
-                        <div>
-                          <h3 className="text-sm font-bold text-slate-100">
-                            Revenue Growth
-                          </h3>
-                          <p className="text-xs text-slate-500 mt-1">
-                            {firstForecastYear} compares to last actual when available; otherwise to opening base.
-                            Later years compare to prior forecast year.
-                          </p>
-                        </div>
-                      </div>
-                    </button>
+                    <PreviewCollapsibleHeader
+                      expanded={revenuePreviewSections.revenue_growth}
+                      onToggle={() => toggleRevenuePreviewSection("revenue_growth")}
+                      title="Revenue Growth"
+                      subtitle={`${firstForecastYear} compares to last actual when available; otherwise to opening base. Later years compare to prior forecast year.`}
+                    />
                   </td>
                 </tr>
-                {revenueMethodSectionOpen && (
+                {revenuePreviewSections.revenue_growth && (
                   <>
                     <tr className="border-b border-slate-800 bg-slate-900/30">
                       <td className="px-3.5 py-2.5 text-slate-400 text-xs font-medium">

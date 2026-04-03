@@ -78,7 +78,7 @@ export default function RevenueForecastV1Tab() {
 
   const [pendingDirectFocusRowId, setPendingDirectFocusRowId] = useState<string | null>(null);
   const [pendingAllocationFocusRowId, setPendingAllocationFocusRowId] = useState<string | null>(null);
-  const [revDirectCardOpen, setRevDirectCardOpen] = useState(true);
+  const [revDirectCardOpen, setRevDirectCardOpen] = useState(false);
   const [revFocusNonce, setRevFocusNonce] = useState(0);
 
   const historicalYears = useMemo(() => meta?.years?.historical ?? [], [meta?.years?.historical]);

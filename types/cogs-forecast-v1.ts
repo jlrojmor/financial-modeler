@@ -1,6 +1,12 @@
 import type { GrowthPatternTypeV1, GrowthPhaseV1, RevenueForecastMethodV1 } from "@/types/revenue-forecast-v1";
 
-export type CogsForecastMethodV1 = "pct_of_revenue" | "cost_per_unit" | "cost_per_customer";
+export type CogsForecastMethodV1 =
+  | "pct_of_revenue"
+  | "cost_per_unit"
+  | "cost_per_customer"
+  | "cost_per_contract"
+  | "cost_per_location"
+  | "cost_per_utilized_unit";
 
 export interface CogsPctOfRevenueParamsV1 {
   growthPatternType?: GrowthPatternTypeV1;
@@ -23,10 +29,39 @@ export interface CogsCostPerUnitParamsV1 {
 /** YoY % on cost per customer (parallel to Cost per Unit). */
 export interface CogsCostPerCustomerParamsV1 {
   growthPatternType?: GrowthPatternTypeV1;
+  /** Whether `startingCostPerCustomer` and the projected cost series are entered per month or per year. Missing = annual (legacy). */
+  costPerCustomerBasis?: "monthly" | "annual";
   startingCostPerCustomer?: number;
   costPerCustomerRatePercent?: number;
   costPerCustomerRatesByYear?: Record<string, number>;
   costPerCustomerGrowthPhases?: GrowthPhaseV1[];
+}
+
+/** YoY % on cost per contract (parallel to Cost per Unit / Cost per Customer). */
+export interface CogsCostPerContractParamsV1 {
+  growthPatternType?: GrowthPatternTypeV1;
+  startingCostPerContract?: number;
+  costPerContractRatePercent?: number;
+  costPerContractRatesByYear?: Record<string, number>;
+  costPerContractGrowthPhases?: GrowthPhaseV1[];
+}
+
+/** YoY % on cost per location (parallel to other unit-based COGS methods). */
+export interface CogsCostPerLocationParamsV1 {
+  growthPatternType?: GrowthPatternTypeV1;
+  startingCostPerLocation?: number;
+  costPerLocationRatePercent?: number;
+  costPerLocationRatesByYear?: Record<string, number>;
+  costPerLocationGrowthPhases?: GrowthPhaseV1[];
+}
+
+/** YoY % on cost per utilized unit (Capacity × Utilization × Yield revenue driver). */
+export interface CogsCostPerUtilizedUnitParamsV1 {
+  growthPatternType?: GrowthPatternTypeV1;
+  startingCostPerUtilizedUnit?: number;
+  costPerUtilizedUnitRatePercent?: number;
+  costPerUtilizedUnitRatesByYear?: Record<string, number>;
+  costPerUtilizedUnitGrowthPhases?: GrowthPhaseV1[];
 }
 
 export interface CogsForecastLineConfigV1 {
@@ -35,7 +70,13 @@ export interface CogsForecastLineConfigV1 {
   lineLabel: string;
   linkedRevenueMethod?: RevenueForecastMethodV1;
   forecastMethod?: CogsForecastMethodV1;
-  forecastParameters?: CogsPctOfRevenueParamsV1 | CogsCostPerUnitParamsV1 | CogsCostPerCustomerParamsV1;
+  forecastParameters?:
+    | CogsPctOfRevenueParamsV1
+    | CogsCostPerUnitParamsV1
+    | CogsCostPerCustomerParamsV1
+    | CogsCostPerContractParamsV1
+    | CogsCostPerLocationParamsV1
+    | CogsCostPerUtilizedUnitParamsV1;
 }
 
 export interface CogsForecastConfigV1 {

@@ -1034,7 +1034,7 @@ export const COGS_OPEX_GUIDE_SECTIONS: GuideSection[] = [
   section("methods", "COGS methods", "COGS forecasting methods", [
     {
       type: "paragraph",
-      text: "Each forecastable COGS line links to a revenue stream. Choose a method that matches how cost scales with that revenue: % of Revenue for margin-style economics, Cost per Unit when the linked revenue line is Price × Volume, or Cost per Customer when the linked line is Customers × ARPU.",
+      text: "Each forecastable COGS line links to a revenue stream. Choose a method that matches how cost scales with that revenue: % of Revenue for margin-style economics, Cost per Unit for Price × Volume, Cost per Customer for Customers × ARPU, Cost per Contract for Contracts × ACV, Cost per Location for Locations × Revenue per Location, or Cost per Utilized Unit for Capacity × Utilization × Yield.",
     },
   ]),
   section("cogs_pct_revenue", "% of Revenue", "COGS · % of Revenue", [
@@ -1052,7 +1052,7 @@ export const COGS_OPEX_GUIDE_SECTIONS: GuideSection[] = [
       type: "list",
       items: [
         "Use when the linked revenue line is Price × Volume and direct cost scales with units sold, produced, or delivered.",
-        "Do not use when the linked line is Customers × ARPU, Contracts × ACV, Locations × Revenue per Location, Capacity × Utilization × Yield, or other non–unit×price methods — those will get matching COGS methods later.",
+        "Do not use when the linked line is Customers × ARPU, Contracts × ACV, Locations × Revenue per Location, Capacity × Utilization × Yield, or other non–unit×price methods — use the matching driver-linked COGS method instead.",
         "Required inputs: starting cost per unit (absolute currency per unit, not K/M statement scaling) and a growth pattern for cost per unit.",
       ],
     },
@@ -1081,27 +1081,27 @@ export const COGS_OPEX_GUIDE_SECTIONS: GuideSection[] = [
   section("cogs_cost_per_customer", "Cost per Customer", "COGS · Cost per Customer", [
     {
       type: "paragraph",
-      text: "Forecasts COGS as linked revenue customer count × a projected cost per customer each year: COGS(t) = Customers(t) × Cost per Customer(t). Customer counts and growth follow the linked revenue row’s Customers × ARPU driver (starting customers and customer growth). You enter starting cost per customer and how that cost per customer grows (constant %, by year, or phases). Do not re-enter customers, ARPU, or ARPU growth in COGS.",
+      text: "Forecasts COGS as linked revenue customer count × a projected annual cost per customer each year: COGS(t) = Customers(t) × Cost per Customer(t). Customer counts and growth follow the linked revenue row’s Customers × ARPU driver. You set Cost basis (monthly or annual) for your starting cost input — it defaults to match the linked row’s ARPU basis and you can override. Growth % applies to the annual cost series after that basis is normalized. Do not re-enter customers, ARPU, or ARPU growth in COGS.",
     },
     {
       type: "list",
       items: [
         "Use when the linked revenue line is Customers × ARPU and direct cost scales with the customer or subscriber base.",
         "Do not use when the linked line is Price × Volume, Contracts × ACV, Locations × Revenue per Location, Capacity × Utilization × Yield, or plain growth/manual-only revenue — those methods have their own matching COGS approaches.",
-        "Required inputs: starting cost per customer (absolute currency per customer, not K/M statement scaling) and a growth pattern for cost per customer.",
+        "Required inputs: cost basis (monthly vs annual), starting cost per customer in that basis (absolute currency, not K/M statement scaling), and a growth pattern for cost per customer.",
       ],
     },
     {
       type: "paragraph",
-      text: "ARPU basis (monthly vs annual) in Revenue affects how implied starting revenue and the “Implied Gross Margin at Start” context are displayed. Enter cost per customer in the same annual economic frame you intend for the model (for example, if ARPU is monthly and annualized for revenue, align cost per customer with that annualized view).",
+      text: "Implied gross margin at start compares annual revenue per customer (ARPU, annualized when ARPU is monthly) to annual cost per customer (your entered cost ×12 when cost basis is monthly). The Revenue Driver Context shows ARPU with “/ month” or “/ year” and implied starting revenue as annualized.",
     },
     {
       type: "paragraph",
-      text: "First forecast year: cost per customer after growth = Starting cost per customer × (1 + growth % for that year). Later years compound on the prior year’s projected cost per customer. Revenue and customer math are unchanged; COGS only reads the customer path from the revenue config.",
+      text: "Internally, starting cost is converted to an annual $/customer before YoY growth is applied. First forecast year: annual cost after growth = annual starting cost × (1 + growth % for that year), compounding each year. Revenue and customer math are unchanged; COGS only reads the customer path from the revenue config.",
     },
     {
       type: "paragraph",
-      text: "In the COGS & Operating Expenses preview, configured lines appear in the COGS table. The Cost per Customer Drivers audit block (when relevant) shows starting customers, starting cost per customer, and first–forecast-year customers and cost per customer. For gross bridge consistency in preview, the COGS-side opening basis concept for this method is starting customers × starting cost per customer (read-only; nothing is written to revenue or historicals).",
+      text: "In the COGS & Operating Expenses preview, configured lines appear in the COGS table. The Cost per Customer Drivers audit block shows starting cost with “/ month” or “/ year” per your cost basis, and first–forecast-year cost per customer as annual $/customer (matching the internal COGS math).",
     },
     {
       type: "subheading",
@@ -1113,8 +1113,128 @@ export const COGS_OPEX_GUIDE_SECTIONS: GuideSection[] = [
         "Re-entering customer counts or ARPU in the COGS card — those stay in Revenue.",
         "Entering cost per customer using K/M-scaled statement units instead of true currency per customer.",
         "Confusing cost per customer with % of revenue — use % of Revenue when margin on revenue is the right story.",
-        "Mismatching economic period: Revenue may annualize monthly ARPU while you enter cost per customer on a different implicit period — keep the frame consistent with how you read the implied margin context.",
+        "Wrong Cost basis vs. what you typed (e.g. entering an annual figure while Monthly is selected) — check the label on the starting cost field and the implied margin callout.",
         "Using Cost per Customer when the linked revenue row is not Customers × ARPU (the method is gated in the selector; if the revenue method later changes, saved Cost per Customer configs remain editable but preview context may not resolve until drivers match).",
+      ],
+    },
+  ]),
+  section("cogs_cost_per_contract", "Cost per Contract", "COGS · Cost per Contract", [
+    {
+      type: "paragraph",
+      text: "Forecasts COGS as linked revenue contract count × a projected cost per contract each year: COGS(t) = Contracts(t) × Cost per Contract(t). Contract counts and contract growth follow the linked revenue row’s Contracts × ACV driver. ACV and ACV growth are read-only context from Revenue. You enter starting cost per contract and how that cost per contract grows (constant %, by year, or phases). Do not re-enter contracts, ACV, or growth legs in COGS.",
+    },
+    {
+      type: "list",
+      items: [
+        "Use when the linked revenue line is Contracts × ACV and direct cost scales with active contracts or accounts.",
+        "Do not use when the linked line is Price × Volume, Customers × ARPU, Locations × Revenue per Location, Capacity × Utilization × Yield, or plain growth/manual-only revenue.",
+        "Required inputs: starting cost per contract (absolute currency per contract, not K/M statement scaling) and a growth pattern for cost per contract.",
+      ],
+    },
+    {
+      type: "paragraph",
+      text: "ACV in Revenue is annual contract value by definition; the builder shows it only to align implied starting revenue (contracts × ACV) and the implied gross margin sanity check: (Starting ACV − cost per contract) / Starting ACV.",
+    },
+    {
+      type: "paragraph",
+      text: "First forecast year: cost per contract after growth = Starting cost per contract × (1 + growth % for that year). Later years compound on the prior year’s projected cost per contract. Revenue and contract/ACV math are unchanged; COGS only reads the contract count path from the revenue config.",
+    },
+    {
+      type: "paragraph",
+      text: "In the COGS & Operating Expenses preview, configured lines appear in the COGS table. The Cost per Contract Drivers audit block (when relevant) shows starting contracts, starting cost per contract, and first–forecast-year contracts and cost per contract. For gross bridge consistency in preview, the COGS-side opening basis concept for this method is starting contracts × starting cost per contract (read-only; nothing is written to revenue or historicals).",
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes",
+    },
+    {
+      type: "list",
+      items: [
+        "Re-entering contract counts or ACV in the COGS card — those stay in Revenue.",
+        "Using K/M-scaled statement units for cost per contract instead of true currency per contract.",
+        "Confusing cost per contract with % of revenue — use % of Revenue when margin on revenue is the right story.",
+        "Forgetting that ACV is annual by definition while mis-scaling cost per contract relative to that frame.",
+        "Using Cost per Contract when the linked revenue row is not Contracts × ACV (the method is gated in the selector; if the revenue method later changes, saved configs remain editable but preview context may not resolve until drivers match).",
+      ],
+    },
+  ]),
+  section("cogs_cost_per_location", "Cost per Location", "COGS · Cost per Location", [
+    {
+      type: "paragraph",
+      text: "Forecasts COGS as linked revenue location count × a projected cost per location each year: COGS(t) = Locations(t) × Cost per Location(t). Location counts and location growth follow the linked revenue row’s Locations × Revenue per Location driver. Revenue per location and its basis (monthly vs annual) are read-only context from Revenue. You enter starting cost per location and how that cost per location grows (constant %, by year, or phases). Do not re-enter locations, revenue per location, or growth legs in COGS.",
+    },
+    {
+      type: "list",
+      items: [
+        "Use when the linked revenue line is Locations × Revenue per Location and direct cost scales with stores, sites, branches, or other active locations.",
+        "Do not use when the linked line is Price × Volume, Customers × ARPU, Contracts × ACV, Capacity × Utilization × Yield, or plain growth/manual-only revenue.",
+        "Required inputs: starting cost per location (absolute currency per location, not K/M statement scaling) and a growth pattern for cost per location.",
+      ],
+    },
+    {
+      type: "paragraph",
+      text: "Revenue per location basis in Revenue (monthly vs annual) affects implied starting revenue and the “Implied Gross Margin at Start” context: effective revenue per location is the stored starting revenue per location when annual, or ×12 when monthly. Enter cost per location in the annualized economic frame you intend to model so it aligns with how you read the implied margin.",
+    },
+    {
+      type: "paragraph",
+      text: "First forecast year: cost per location after growth = Starting cost per location × (1 + growth % for that year). Later years compound on the prior year’s projected cost per location. Revenue and location/revenue-per-location math are unchanged; COGS only reads the location count path from the revenue config.",
+    },
+    {
+      type: "paragraph",
+      text: "In the COGS & Operating Expenses preview, configured lines appear in the COGS table. The Cost per Location Drivers audit block (when relevant) shows starting locations, starting cost per location, and first–forecast-year locations and cost per location. For gross bridge consistency in preview, the COGS-side opening basis concept for this method is starting locations × starting cost per location (read-only; nothing is written to revenue or historicals).",
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes",
+    },
+    {
+      type: "list",
+      items: [
+        "Re-entering location counts or revenue per location in the COGS card — those stay in Revenue.",
+        "Entering cost per location using K/M-scaled statement units instead of true currency per location.",
+        "Confusing cost per location with % of revenue — use % of Revenue when margin on revenue is the right story.",
+        "Mismatching economic period: Revenue may annualize monthly revenue per location while you enter cost per location on a different implicit period — keep the frame consistent with how you read the implied margin context.",
+        "Using Cost per Location when the linked revenue row is not Locations × Revenue per Location (the method is gated in the selector; if the revenue method later changes, saved configs remain editable but preview context may not resolve until drivers match).",
+      ],
+    },
+  ]),
+  section("cogs_cost_per_utilized_unit", "Cost per Utilized Unit", "COGS · Cost per Utilized Unit", [
+    {
+      type: "paragraph",
+      text: "Forecasts COGS as utilized units × a projected cost per utilized unit each year: COGS(t) = Utilized Units(t) × Cost per Utilized Unit(t). Utilized units follow the same capacity and utilization level path as the linked revenue row’s Capacity × Utilization × Yield driver (capacity growth and utilization as a level, not compounded in COGS). Yield and yield basis are read-only context from Revenue for implied starting revenue and implied gross margin at start. You enter starting cost per utilized unit and how that cost grows (constant %, by year, or phases). Do not re-enter capacity, utilization, yield, or yield growth in COGS.",
+    },
+    {
+      type: "list",
+      items: [
+        "Use when the linked revenue line is Capacity × Utilization × Yield and direct cost scales with utilized capacity (actual usage), not only installed capacity.",
+        "Do not use when the linked line is Price × Volume, Customers × ARPU, Contracts × ACV, Locations × Revenue per Location, or plain growth/manual-only revenue — use the matching driver-linked COGS method or % of Revenue instead.",
+        "Required inputs: starting cost per utilized unit (absolute currency per utilized unit, not K/M statement scaling) and a growth pattern for cost per utilized unit.",
+      ],
+    },
+    {
+      type: "paragraph",
+      text: "Yield basis (monthly vs annual) affects implied starting revenue and the “Implied Gross Margin at Start” context: effective yield is the stored starting yield when annual, or ×12 when monthly, matching how Revenue annualizes for the model frame.",
+    },
+    {
+      type: "paragraph",
+      text: "First forecast year: cost per utilized unit after growth = Starting cost per utilized unit × (1 + growth % for that year). Later years compound on the prior year’s projected cost per utilized unit. Revenue, capacity, utilization, and yield math are unchanged; COGS reads the utilized-units path from the revenue driver projection only.",
+    },
+    {
+      type: "paragraph",
+      text: "In the COGS & Operating Expenses preview, configured lines appear in the COGS table. The Cost per Utilized Unit Drivers audit block (when relevant) shows the linked revenue line, starting utilized units, starting cost per utilized unit, and first–forecast-year utilized units and cost per utilized unit. For gross bridge consistency in preview, the COGS-side opening basis concept for this method is starting utilized units × starting cost per utilized unit (read-only; nothing is written to revenue or historicals).",
+    },
+    {
+      type: "subheading",
+      text: "Common mistakes",
+    },
+    {
+      type: "list",
+      items: [
+        "Re-entering capacity, utilization %, or yield in the COGS card — those stay in Revenue.",
+        "Entering cost per utilized unit using K/M-scaled statement units instead of true currency per utilized unit.",
+        "Confusing cost per utilized unit with % of revenue — use % of Revenue when margin on revenue is the right story.",
+        "Treating utilization as a growth rate in COGS — utilization is a level series resolved from Revenue; COGS does not compound utilization.",
+        "Using Cost per Utilized Unit when the linked revenue row is not Capacity × Utilization × Yield (the method is gated in the selector; if the revenue method later changes, saved configs remain editable but utilized-unit preview context may no longer resolve correctly).",
       ],
     },
   ]),

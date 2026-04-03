@@ -9,7 +9,10 @@ import { buildForecastRevenueParentIdMap } from "@/lib/revenue-forecast-tree-v1"
 import { expandPhasesToRatesByYear, validateGrowthPhases, type GrowthPhaseV1 } from "@/lib/revenue-growth-phases-v1";
 import {
   getArpuAnnualizationMultiplier,
+  getRevenuePerLocationAnnualizationMultiplier,
   resolveArpuBasisFromParams,
+  resolveRevenuePerLocationBasisFromParams,
+  resolveYieldBasisFromParams,
 } from "@/lib/revenue-projection-engine-v1";
 
 /** Stable fingerprint for preview memos when nested line configs change. */
@@ -117,6 +120,108 @@ export function hasPersistedCogsCpcConfig(
   return p.costPerCustomerRatePercent != null && Number.isFinite(Number(p.costPerCustomerRatePercent));
 }
 
+/** True when the line has an applied cost per contract config. */
+export function hasPersistedCogsCptConfig(
+  cfg: CogsForecastLineConfigV1 | undefined,
+  projectionYears: string[]
+): boolean {
+  if (!cfg?.forecastMethod || cfg.forecastMethod !== "cost_per_contract") return false;
+  const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  const start = Number(p.startingCostPerContract);
+  if (!Number.isFinite(start) || start <= 0) return false;
+  const pType = (p.growthPatternType as string | undefined) ?? "constant";
+  if (pType === "by_year") {
+    const by = (p.costPerContractRatesByYear ?? {}) as Record<string, number>;
+    if (projectionYears.length === 0) return Object.keys(by).length > 0;
+    return projectionYears.some((y) => {
+      const v = by[y];
+      return v != null && Number.isFinite(Number(v));
+    });
+  }
+  if (pType === "phases") {
+    const raw = Array.isArray(p.costPerContractGrowthPhases)
+      ? (p.costPerContractGrowthPhases as GrowthPhaseV1[])
+      : [];
+    if (raw.length === 0) return false;
+    return raw.some(
+      (ph) =>
+        String(ph.startYear ?? "").trim() !== "" &&
+        String(ph.endYear ?? "").trim() !== "" &&
+        ph.ratePercent != null &&
+        Number.isFinite(Number(ph.ratePercent))
+    );
+  }
+  return p.costPerContractRatePercent != null && Number.isFinite(Number(p.costPerContractRatePercent));
+}
+
+/** True when the line has an applied cost per location config. */
+export function hasPersistedCogsCplConfig(
+  cfg: CogsForecastLineConfigV1 | undefined,
+  projectionYears: string[]
+): boolean {
+  if (!cfg?.forecastMethod || cfg.forecastMethod !== "cost_per_location") return false;
+  const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  const start = Number(p.startingCostPerLocation);
+  if (!Number.isFinite(start) || start <= 0) return false;
+  const pType = (p.growthPatternType as string | undefined) ?? "constant";
+  if (pType === "by_year") {
+    const by = (p.costPerLocationRatesByYear ?? {}) as Record<string, number>;
+    if (projectionYears.length === 0) return Object.keys(by).length > 0;
+    return projectionYears.some((y) => {
+      const v = by[y];
+      return v != null && Number.isFinite(Number(v));
+    });
+  }
+  if (pType === "phases") {
+    const raw = Array.isArray(p.costPerLocationGrowthPhases)
+      ? (p.costPerLocationGrowthPhases as GrowthPhaseV1[])
+      : [];
+    if (raw.length === 0) return false;
+    return raw.some(
+      (ph) =>
+        String(ph.startYear ?? "").trim() !== "" &&
+        String(ph.endYear ?? "").trim() !== "" &&
+        ph.ratePercent != null &&
+        Number.isFinite(Number(ph.ratePercent))
+    );
+  }
+  return p.costPerLocationRatePercent != null && Number.isFinite(Number(p.costPerLocationRatePercent));
+}
+
+/** True when the line has an applied cost per utilized unit config. */
+export function hasPersistedCogsCpuuConfig(
+  cfg: CogsForecastLineConfigV1 | undefined,
+  projectionYears: string[]
+): boolean {
+  if (!cfg?.forecastMethod || cfg.forecastMethod !== "cost_per_utilized_unit") return false;
+  const p = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  const start = Number(p.startingCostPerUtilizedUnit);
+  if (!Number.isFinite(start) || start <= 0) return false;
+  const pType = (p.growthPatternType as string | undefined) ?? "constant";
+  if (pType === "by_year") {
+    const by = (p.costPerUtilizedUnitRatesByYear ?? {}) as Record<string, number>;
+    if (projectionYears.length === 0) return Object.keys(by).length > 0;
+    return projectionYears.some((y) => {
+      const v = by[y];
+      return v != null && Number.isFinite(Number(v));
+    });
+  }
+  if (pType === "phases") {
+    const raw = Array.isArray(p.costPerUtilizedUnitGrowthPhases)
+      ? (p.costPerUtilizedUnitGrowthPhases as GrowthPhaseV1[])
+      : [];
+    if (raw.length === 0) return false;
+    return raw.some(
+      (ph) =>
+        String(ph.startYear ?? "").trim() !== "" &&
+        String(ph.endYear ?? "").trim() !== "" &&
+        ph.ratePercent != null &&
+        Number.isFinite(Number(ph.ratePercent))
+    );
+  }
+  return p.costPerUtilizedUnitRatePercent != null && Number.isFinite(Number(p.costPerUtilizedUnitRatePercent));
+}
+
 export function hasPersistedCogsLineForecast(
   cfg: CogsForecastLineConfigV1 | undefined,
   projectionYears: string[]
@@ -124,7 +229,10 @@ export function hasPersistedCogsLineForecast(
   return (
     hasPersistedCogsPctConfig(cfg, projectionYears) ||
     hasPersistedCogsCpuConfig(cfg, projectionYears) ||
-    hasPersistedCogsCpcConfig(cfg, projectionYears)
+    hasPersistedCogsCpcConfig(cfg, projectionYears) ||
+    hasPersistedCogsCptConfig(cfg, projectionYears) ||
+    hasPersistedCogsCplConfig(cfg, projectionYears) ||
+    hasPersistedCogsCpuuConfig(cfg, projectionYears)
   );
 }
 
@@ -290,6 +398,28 @@ export function projectCostPerCustomerByYear(
   return projectCostPerUnitByYear(startingCostPerCustomer, growthPctByYear, projectionYears);
 }
 
+export type CostPerCustomerBasisV1 = "monthly" | "annual";
+
+/** Read stored cost-per-customer basis; default annual for legacy configs. */
+export function parseCostPerCustomerBasisFromParams(
+  params: Record<string, unknown> | undefined | null
+): CostPerCustomerBasisV1 {
+  if (!params || typeof params !== "object") return "annual";
+  return params.costPerCustomerBasis === "monthly" ? "monthly" : "annual";
+}
+
+/**
+ * Convert stored starting cost to **annual** $/customer before growth compounding.
+ * Revenue in this path uses annualized ARPU × customers; COGS must use matching annual $/customer.
+ */
+export function startingCostPerCustomerStoredToAnnual(
+  startingStored: number,
+  basis: CostPerCustomerBasisV1
+): number {
+  if (!Number.isFinite(startingStored) || startingStored <= 0) return NaN;
+  return basis === "monthly" ? startingStored * 12 : startingStored;
+}
+
 /** COGS_y = volume_y × costPerUnit_y; volume from Price × Volume driver path only. */
 export function computeCogsCostPerUnitForecastByYear(
   cogsParams: Record<string, unknown>,
@@ -320,7 +450,9 @@ export function computeCogsCostPerCustomerForecastByYear(
   projectionYears: string[]
 ): Record<string, number> {
   if (!customersByYear || projectionYears.length === 0) return {};
-  const start = Number(cogsParams.startingCostPerCustomer);
+  const basis = parseCostPerCustomerBasisFromParams(cogsParams);
+  const startStored = Number(cogsParams.startingCostPerCustomer);
+  const start = startingCostPerCustomerStoredToAnnual(startStored, basis);
   if (!Number.isFinite(start) || start <= 0) return {};
   const growth = resolveCogsCostPerCustomerGrowthPctByYear(cogsParams, projectionYears);
   if (Object.keys(growth).length === 0) return {};
@@ -331,6 +463,231 @@ export function computeCogsCostPerCustomerForecastByYear(
     const c = cpcByY[y];
     if (cust != null && Number.isFinite(cust) && c != null && Number.isFinite(c)) {
       out[y] = cust * c;
+    }
+  }
+  return out;
+}
+
+/**
+ * YoY % growth on cost per contract per projection year (builder keys: costPerContract*).
+ */
+export function resolveCogsCostPerContractGrowthPctByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> {
+  if (projectionYears.length === 0) return {};
+  const pType = (params.growthPatternType as string | undefined) ?? "constant";
+
+  if (pType === "phases") {
+    const raw = params.costPerContractGrowthPhases;
+    if (!Array.isArray(raw) || raw.length === 0) return {};
+    const phases: GrowthPhaseV1[] = raw.map((x: unknown) => {
+      const o = x as Record<string, unknown>;
+      return {
+        startYear: String(o.startYear ?? ""),
+        endYear: String(o.endYear ?? ""),
+        ratePercent: Number(o.ratePercent),
+      };
+    });
+    const { ok } = validateGrowthPhases(phases, projectionYears);
+    if (!ok) return {};
+    return expandPhasesToRatesByYear(phases, projectionYears);
+  }
+
+  if (pType === "by_year") {
+    const pby = params.costPerContractRatesByYear as Record<string, number> | undefined;
+    if (!pby || typeof pby !== "object") return {};
+    const out: Record<string, number> = {};
+    for (const y of projectionYears) {
+      const v = pby[y];
+      if (v != null && Number.isFinite(Number(v))) out[y] = Number(v);
+    }
+    return out;
+  }
+
+  const pct = Number(params.costPerContractRatePercent);
+  if (!Number.isFinite(pct)) return {};
+  const out: Record<string, number> = {};
+  for (const y of projectionYears) out[y] = pct;
+  return out;
+}
+
+export function projectCostPerContractByYear(
+  startingCostPerContract: number,
+  growthPctByYear: Record<string, number>,
+  projectionYears: string[]
+): Record<string, number> {
+  return projectCostPerUnitByYear(startingCostPerContract, growthPctByYear, projectionYears);
+}
+
+/** COGS_y = contracts_y × costPerContract_y; contracts from linked Contracts × ACV driver path only. */
+export function computeCogsCostPerContractForecastByYear(
+  cogsParams: Record<string, unknown>,
+  contractsByYear: Record<string, number> | null | undefined,
+  projectionYears: string[]
+): Record<string, number> {
+  if (!contractsByYear || projectionYears.length === 0) return {};
+  const start = Number(cogsParams.startingCostPerContract);
+  if (!Number.isFinite(start) || start <= 0) return {};
+  const growth = resolveCogsCostPerContractGrowthPctByYear(cogsParams, projectionYears);
+  if (Object.keys(growth).length === 0) return {};
+  const cptByY = projectCostPerContractByYear(start, growth, projectionYears);
+  const out: Record<string, number> = {};
+  for (const y of projectionYears) {
+    const n = contractsByYear[y];
+    const c = cptByY[y];
+    if (n != null && Number.isFinite(n) && c != null && Number.isFinite(c)) {
+      out[y] = n * c;
+    }
+  }
+  return out;
+}
+
+/**
+ * YoY % growth on cost per location per projection year (builder keys: costPerLocation*).
+ */
+export function resolveCogsCostPerLocationGrowthPctByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> {
+  if (projectionYears.length === 0) return {};
+  const pType = (params.growthPatternType as string | undefined) ?? "constant";
+
+  if (pType === "phases") {
+    const raw = params.costPerLocationGrowthPhases;
+    if (!Array.isArray(raw) || raw.length === 0) return {};
+    const phases: GrowthPhaseV1[] = raw.map((x: unknown) => {
+      const o = x as Record<string, unknown>;
+      return {
+        startYear: String(o.startYear ?? ""),
+        endYear: String(o.endYear ?? ""),
+        ratePercent: Number(o.ratePercent),
+      };
+    });
+    const { ok } = validateGrowthPhases(phases, projectionYears);
+    if (!ok) return {};
+    return expandPhasesToRatesByYear(phases, projectionYears);
+  }
+
+  if (pType === "by_year") {
+    const pby = params.costPerLocationRatesByYear as Record<string, number> | undefined;
+    if (!pby || typeof pby !== "object") return {};
+    const out: Record<string, number> = {};
+    for (const y of projectionYears) {
+      const v = pby[y];
+      if (v != null && Number.isFinite(Number(v))) out[y] = Number(v);
+    }
+    return out;
+  }
+
+  const pct = Number(params.costPerLocationRatePercent);
+  if (!Number.isFinite(pct)) return {};
+  const out: Record<string, number> = {};
+  for (const y of projectionYears) out[y] = pct;
+  return out;
+}
+
+export function projectCostPerLocationByYear(
+  startingCostPerLocation: number,
+  growthPctByYear: Record<string, number>,
+  projectionYears: string[]
+): Record<string, number> {
+  return projectCostPerUnitByYear(startingCostPerLocation, growthPctByYear, projectionYears);
+}
+
+/** COGS_y = locations_y × costPerLocation_y; locations from linked Locations × Revenue/Location driver path only. */
+export function computeCogsCostPerLocationForecastByYear(
+  cogsParams: Record<string, unknown>,
+  locationsByYear: Record<string, number> | null | undefined,
+  projectionYears: string[]
+): Record<string, number> {
+  if (!locationsByYear || projectionYears.length === 0) return {};
+  const start = Number(cogsParams.startingCostPerLocation);
+  if (!Number.isFinite(start) || start <= 0) return {};
+  const growth = resolveCogsCostPerLocationGrowthPctByYear(cogsParams, projectionYears);
+  if (Object.keys(growth).length === 0) return {};
+  const cplByY = projectCostPerLocationByYear(start, growth, projectionYears);
+  const out: Record<string, number> = {};
+  for (const y of projectionYears) {
+    const loc = locationsByYear[y];
+    const c = cplByY[y];
+    if (loc != null && Number.isFinite(loc) && c != null && Number.isFinite(c)) {
+      out[y] = loc * c;
+    }
+  }
+  return out;
+}
+
+/**
+ * YoY % growth on cost per utilized unit per projection year (builder keys: costPerUtilizedUnit*).
+ */
+export function resolveCogsCostPerUtilizedUnitGrowthPctByYear(
+  params: Record<string, unknown>,
+  projectionYears: string[]
+): Record<string, number> {
+  if (projectionYears.length === 0) return {};
+  const pType = (params.growthPatternType as string | undefined) ?? "constant";
+
+  if (pType === "phases") {
+    const raw = params.costPerUtilizedUnitGrowthPhases;
+    if (!Array.isArray(raw) || raw.length === 0) return {};
+    const phases: GrowthPhaseV1[] = raw.map((x: unknown) => {
+      const o = x as Record<string, unknown>;
+      return {
+        startYear: String(o.startYear ?? ""),
+        endYear: String(o.endYear ?? ""),
+        ratePercent: Number(o.ratePercent),
+      };
+    });
+    const { ok } = validateGrowthPhases(phases, projectionYears);
+    if (!ok) return {};
+    return expandPhasesToRatesByYear(phases, projectionYears);
+  }
+
+  if (pType === "by_year") {
+    const pby = params.costPerUtilizedUnitRatesByYear as Record<string, number> | undefined;
+    if (!pby || typeof pby !== "object") return {};
+    const out: Record<string, number> = {};
+    for (const y of projectionYears) {
+      const v = pby[y];
+      if (v != null && Number.isFinite(Number(v))) out[y] = Number(v);
+    }
+    return out;
+  }
+
+  const pct = Number(params.costPerUtilizedUnitRatePercent);
+  if (!Number.isFinite(pct)) return {};
+  const out: Record<string, number> = {};
+  for (const y of projectionYears) out[y] = pct;
+  return out;
+}
+
+export function projectCostPerUtilizedUnitByYear(
+  startingCostPerUtilizedUnit: number,
+  growthPctByYear: Record<string, number>,
+  projectionYears: string[]
+): Record<string, number> {
+  return projectCostPerUnitByYear(startingCostPerUtilizedUnit, growthPctByYear, projectionYears);
+}
+
+/** COGS_y = utilizedUnits_y × costPerUtilizedUnit_y; utilized units from linked Capacity × Utilization × Yield path only. */
+export function computeCogsCostPerUtilizedUnitForecastByYear(
+  cogsParams: Record<string, unknown>,
+  utilizedUnitsByYear: Record<string, number> | null | undefined,
+  projectionYears: string[]
+): Record<string, number> {
+  if (!utilizedUnitsByYear || projectionYears.length === 0) return {};
+  const start = Number(cogsParams.startingCostPerUtilizedUnit);
+  if (!Number.isFinite(start) || start <= 0) return {};
+  const growth = resolveCogsCostPerUtilizedUnitGrowthPctByYear(cogsParams, projectionYears);
+  if (Object.keys(growth).length === 0) return {};
+  const cpuuByY = projectCostPerUtilizedUnitByYear(start, growth, projectionYears);
+  const out: Record<string, number> = {};
+  for (const y of projectionYears) {
+    const u = utilizedUnitsByYear[y];
+    const c = cpuuByY[y];
+    if (u != null && Number.isFinite(u) && c != null && Number.isFinite(c)) {
+      out[y] = u * c;
     }
   }
   return out;
@@ -414,6 +771,280 @@ export function revenueRowUsesCustomersArpuForCogsEligibility(
     return false;
   }
   return false;
+}
+
+/**
+ * Whether the linked revenue row should expose **Cost per Contract** in the COGS builder.
+ * Same ancestor-walk pattern, for `contracts_acv`.
+ */
+export function revenueRowUsesContractsAcvForCogsEligibility(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): boolean {
+  const cfg = revenueCfg[rowId];
+  if (!cfg) return false;
+  const role = cfg.forecastRole as RevenueForecastRoleV1 | undefined;
+  if (role === "independent_driver") {
+    return cfg.forecastMethod === "contracts_acv";
+  }
+  if (role === "allocation_of_parent") {
+    const parentById = buildForecastRevenueParentIdMap(revenueTree);
+    let pid: string | null | undefined = parentById.get(rowId) ?? null;
+    while (pid) {
+      const p = revenueCfg[pid];
+      if (p?.forecastRole === "independent_driver") {
+        return p.forecastMethod === "contracts_acv";
+      }
+      pid = parentById.get(pid) ?? null;
+    }
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Whether the linked revenue row should expose **Cost per Location** in the COGS builder.
+ * Same ancestor-walk pattern, for `locations_revenue_per_location`.
+ */
+export function revenueRowUsesLocationsRevenuePerLocationForCogsEligibility(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): boolean {
+  const cfg = revenueCfg[rowId];
+  if (!cfg) return false;
+  const role = cfg.forecastRole as RevenueForecastRoleV1 | undefined;
+  if (role === "independent_driver") {
+    return cfg.forecastMethod === "locations_revenue_per_location";
+  }
+  if (role === "allocation_of_parent") {
+    const parentById = buildForecastRevenueParentIdMap(revenueTree);
+    let pid: string | null | undefined = parentById.get(rowId) ?? null;
+    while (pid) {
+      const p = revenueCfg[pid];
+      if (p?.forecastRole === "independent_driver") {
+        return p.forecastMethod === "locations_revenue_per_location";
+      }
+      pid = parentById.get(pid) ?? null;
+    }
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Whether the linked revenue row should expose **Cost per Utilized Unit** in the COGS builder.
+ * Same ancestor-walk pattern, for `capacity_utilization_yield`.
+ */
+export function revenueRowUsesCapacityUtilizationYieldForCogsEligibility(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): boolean {
+  const cfg = revenueCfg[rowId];
+  if (!cfg) return false;
+  const role = cfg.forecastRole as RevenueForecastRoleV1 | undefined;
+  if (role === "independent_driver") {
+    return cfg.forecastMethod === "capacity_utilization_yield";
+  }
+  if (role === "allocation_of_parent") {
+    const parentById = buildForecastRevenueParentIdMap(revenueTree);
+    let pid: string | null | undefined = parentById.get(rowId) ?? null;
+    while (pid) {
+      const p = revenueCfg[pid];
+      if (p?.forecastRole === "independent_driver") {
+        return p.forecastMethod === "capacity_utilization_yield";
+      }
+      pid = parentById.get(pid) ?? null;
+    }
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Revenue Contracts × ACV parameters for the linked row or nearest qualifying ancestor.
+ */
+export function resolveContractsAcvParamsForCogsLinkedRow(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): Record<string, unknown> | null {
+  const cfg = revenueCfg[rowId];
+  if (!cfg) return null;
+  const role = cfg.forecastRole as RevenueForecastRoleV1 | undefined;
+
+  let params: Record<string, unknown> | undefined;
+
+  if (role === "independent_driver" && cfg.forecastMethod === "contracts_acv") {
+    params = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  } else if (role === "allocation_of_parent") {
+    const parentById = buildForecastRevenueParentIdMap(revenueTree);
+    let pid: string | null | undefined = parentById.get(rowId) ?? null;
+    while (pid) {
+      const p = revenueCfg[pid];
+      if (p?.forecastRole === "independent_driver" && p.forecastMethod === "contracts_acv") {
+        params = (p.forecastParameters ?? {}) as Record<string, unknown>;
+        break;
+      }
+      pid = parentById.get(pid) ?? null;
+    }
+  }
+
+  return params ?? null;
+}
+
+/**
+ * Read-only Contracts × ACV starting drivers for COGS Cost per Contract context.
+ * Implied starting revenue = contracts × ACV (annual contract value).
+ */
+export function resolveContractsAcvStartingDriversForCogsLinkedRow(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): {
+  startingContracts: number;
+  startingAcv: number;
+  impliedStartingRevenue: number;
+} | null {
+  const params = resolveContractsAcvParamsForCogsLinkedRow(rowId, revenueCfg, revenueTree);
+  if (!params) return null;
+  const sc = Number(params.startingContracts);
+  const sa = Number(params.startingAcv);
+  if (!Number.isFinite(sc) || !Number.isFinite(sa) || sc <= 0 || sa <= 0) return null;
+  const impliedStartingRevenue = sc * sa;
+  return { startingContracts: sc, startingAcv: sa, impliedStartingRevenue };
+}
+
+/**
+ * Revenue Locations × Revenue per Location parameters for the linked row or nearest qualifying ancestor.
+ */
+export function resolveLocationsRevenuePerLocationParamsForCogsLinkedRow(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): Record<string, unknown> | null {
+  const cfg = revenueCfg[rowId];
+  if (!cfg) return null;
+  const role = cfg.forecastRole as RevenueForecastRoleV1 | undefined;
+
+  let params: Record<string, unknown> | undefined;
+
+  if (role === "independent_driver" && cfg.forecastMethod === "locations_revenue_per_location") {
+    params = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  } else if (role === "allocation_of_parent") {
+    const parentById = buildForecastRevenueParentIdMap(revenueTree);
+    let pid: string | null | undefined = parentById.get(rowId) ?? null;
+    while (pid) {
+      const p = revenueCfg[pid];
+      if (p?.forecastRole === "independent_driver" && p.forecastMethod === "locations_revenue_per_location") {
+        params = (p.forecastParameters ?? {}) as Record<string, unknown>;
+        break;
+      }
+      pid = parentById.get(pid) ?? null;
+    }
+  }
+
+  return params ?? null;
+}
+
+/**
+ * Read-only Locations × Revenue per Location starting drivers for COGS Cost per Location context.
+ * Implied starting revenue matches the revenue projection frame (annualized when basis is monthly).
+ */
+export function resolveLocationsRevenuePerLocationStartingDriversForCogsLinkedRow(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): {
+  startingLocations: number;
+  startingRevenuePerLocation: number;
+  revenuePerLocationBasis: "monthly" | "annual";
+  impliedStartingRevenue: number;
+} | null {
+  const params = resolveLocationsRevenuePerLocationParamsForCogsLinkedRow(rowId, revenueCfg, revenueTree);
+  if (!params) return null;
+  const sl = Number(params.startingLocations);
+  const sr = Number(params.startingRevenuePerLocation);
+  if (!Number.isFinite(sl) || !Number.isFinite(sr) || sl <= 0 || sr <= 0) return null;
+  const revenuePerLocationBasis = resolveRevenuePerLocationBasisFromParams(params);
+  const mult = getRevenuePerLocationAnnualizationMultiplier(params);
+  const impliedStartingRevenue = sl * sr * mult;
+  return { startingLocations: sl, startingRevenuePerLocation: sr, revenuePerLocationBasis, impliedStartingRevenue };
+}
+
+/**
+ * Revenue Capacity × Utilization × Yield parameters for the linked row or nearest qualifying ancestor.
+ */
+export function resolveCapacityUtilizationYieldParamsForCogsLinkedRow(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): Record<string, unknown> | null {
+  const cfg = revenueCfg[rowId];
+  if (!cfg) return null;
+  const role = cfg.forecastRole as RevenueForecastRoleV1 | undefined;
+
+  let params: Record<string, unknown> | undefined;
+
+  if (role === "independent_driver" && cfg.forecastMethod === "capacity_utilization_yield") {
+    params = (cfg.forecastParameters ?? {}) as Record<string, unknown>;
+  } else if (role === "allocation_of_parent") {
+    const parentById = buildForecastRevenueParentIdMap(revenueTree);
+    let pid: string | null | undefined = parentById.get(rowId) ?? null;
+    while (pid) {
+      const p = revenueCfg[pid];
+      if (p?.forecastRole === "independent_driver" && p.forecastMethod === "capacity_utilization_yield") {
+        params = (p.forecastParameters ?? {}) as Record<string, unknown>;
+        break;
+      }
+      pid = parentById.get(pid) ?? null;
+    }
+  }
+
+  return params ?? null;
+}
+
+/**
+ * Read-only Capacity × Utilization × Yield starting drivers for COGS Cost per Utilized Unit context.
+ */
+export function resolveCapacityUtilizationYieldStartingDriversForCogsLinkedRow(
+  rowId: string,
+  revenueCfg: RevenueForecastConfigV1["rows"],
+  revenueTree: ForecastRevenueNodeV1[]
+): {
+  startingCapacity: number;
+  startingUtilizationPct: number;
+  startingUtilizedUnits: number;
+  startingYield: number;
+  yieldBasis: "monthly" | "annual";
+  impliedStartingRevenue: number;
+  capacityUnitLabel?: string;
+} | null {
+  const params = resolveCapacityUtilizationYieldParamsForCogsLinkedRow(rowId, revenueCfg, revenueTree);
+  if (!params) return null;
+  const cap = Number(params.startingCapacity);
+  const u0 = Number(params.startingUtilizationPct);
+  const y0 = Number(params.startingYield);
+  if (!Number.isFinite(cap) || !Number.isFinite(u0) || !Number.isFinite(y0) || cap <= 0 || y0 <= 0) return null;
+  if (!Number.isFinite(u0) || u0 < 0 || u0 > 100) return null;
+  const startingUtilizedUnits = cap * (u0 / 100);
+  const yieldBasis = resolveYieldBasisFromParams(params);
+  const effectiveYield = yieldBasis === "monthly" ? y0 * 12 : y0;
+  const impliedStartingRevenue = startingUtilizedUnits * effectiveYield;
+  const rawLabel = params.capacityUnitLabel;
+  const capacityUnitLabel =
+    typeof rawLabel === "string" && rawLabel.trim() !== "" ? rawLabel.trim() : undefined;
+  return {
+    startingCapacity: cap,
+    startingUtilizationPct: u0,
+    startingUtilizedUnits,
+    startingYield: y0,
+    yieldBasis,
+    impliedStartingRevenue,
+    capacityUnitLabel,
+  };
 }
 
 /**
@@ -529,11 +1160,23 @@ function suggestionFromRevenueMethod(method: RevenueForecastMethodV1 | undefined
           "Suggested: Cost per Customer, because the linked revenue line is forecast from customers and ARPU. Customer counts are automatically inherited from Revenue.",
       };
     case "contracts_acv":
-      return { suggestion: "Cost per Contract", reason: "Suggested next method: Cost per Contract, because revenue is driven by contract count and ACV." };
+      return {
+        suggestion: "Cost per Contract",
+        reason:
+          "Suggested: Cost per Contract, because the linked revenue line is forecast from contracts and ACV. Contract counts are automatically inherited from Revenue.",
+      };
     case "locations_revenue_per_location":
-      return { suggestion: "Cost per Location", reason: "Suggested next method: Cost per Location, because revenue is driven by location count and productivity." };
+      return {
+        suggestion: "Cost per Location",
+        reason:
+          "Suggested: Cost per Location, because the linked revenue line is forecast from locations and revenue per location. Location counts are automatically inherited from Revenue.",
+      };
     case "capacity_utilization_yield":
-      return { suggestion: "Cost per Utilized Unit", reason: "Suggested next method: Cost per Utilized Unit, because revenue is driven by utilized capacity and yield." };
+      return {
+        suggestion: "Cost per Utilized Unit",
+        reason:
+          "Suggested: Cost per Utilized Unit, because the linked revenue line is forecast from capacity, utilization, and yield. Utilized units are automatically inherited from Revenue.",
+      };
     default:
       return {
         suggestion: "% of Revenue",

@@ -2,32 +2,82 @@ import type { IngestedOpExLineV1 } from "@/lib/opex-line-ingest";
 import { routeOpExLineDeterministic } from "@/lib/opex-routing-deterministic";
 import type { OpExForecastConfigV1, OpExForecastLineConfigV1 } from "@/types/opex-forecast-v1";
 
+function applyDeterministicShadow(
+  line: Partial<OpExForecastLineConfigV1>,
+  det: ReturnType<typeof routeOpExLineDeterministic>
+): Partial<OpExForecastLineConfigV1> {
+  return {
+    ...line,
+    deterministicRuleId: det.ruleId,
+    deterministicConfidencePct: det.confidencePct,
+    deterministicExplanation: det.explanation,
+    deterministicNormalizedCategory: det.normalizedCategory,
+    linkedFutureScheduleType: det.linkedFutureScheduleType ?? line.linkedFutureScheduleType ?? null,
+  };
+}
+
 /**
- * Merge historical IS ingest with persisted config: new lines get deterministic routing;
- * existing lines keep routing/forecast; labels refresh from IS.
+ * Merge historical IS ingest with persisted config.
+ * - New lines: full deterministic routing + metadata.
+ * - User override: never changes routeStatus / routeResolvedBy / forecast fields; refreshes deterministic “shadow” for transparency.
+ * - AI-applied: keeps route + routeResolvedBy; refreshes shadow from current label.
+ * - Deterministic: recomputes route from label (label drift / relabel).
  */
 export function mergeOpExIngestedWithConfig(
   ingested: IngestedOpExLineV1[],
   existing: Record<string, OpExForecastLineConfigV1>
 ): Record<string, OpExForecastLineConfigV1> {
   const next: Record<string, OpExForecastLineConfigV1> = {};
-  const allowed = new Set(ingested.map((x) => x.lineId));
 
   for (const row of ingested) {
     const prev = existing[row.lineId];
+    const det = routeOpExLineDeterministic(row.label);
+
     if (prev) {
-      const det = routeOpExLineDeterministic(row.label);
+      const resolved = prev.routeResolvedBy ?? "deterministic";
+
+      if (resolved === "user") {
+        next[row.lineId] = applyDeterministicShadow(
+          {
+            ...prev,
+            originalLineLabel: row.label,
+            parentLineLabel: row.parentLabel,
+            sectionOwnerSnapshot: row.sectionOwner ?? prev.sectionOwnerSnapshot,
+          },
+          det
+        ) as OpExForecastLineConfigV1;
+        continue;
+      }
+
+      if (resolved === "ai") {
+        next[row.lineId] = applyDeterministicShadow(
+          {
+            ...prev,
+            originalLineLabel: row.label,
+            parentLineLabel: row.parentLabel,
+            sectionOwnerSnapshot: row.sectionOwner ?? prev.sectionOwnerSnapshot,
+          },
+          det
+        ) as OpExForecastLineConfigV1;
+        continue;
+      }
+
       next[row.lineId] = {
         ...prev,
         originalLineLabel: row.label,
         parentLineLabel: row.parentLabel,
         sectionOwnerSnapshot: row.sectionOwner ?? prev.sectionOwnerSnapshot,
-        routeStatus: prev.routeStatus ?? det.route,
-        routeResolvedBy: prev.routeResolvedBy ?? "deterministic",
+        routeStatus: det.route,
+        routeResolvedBy: "deterministic",
+        deterministicRuleId: det.ruleId,
+        linkedFutureScheduleType: det.linkedFutureScheduleType ?? null,
+        deterministicConfidencePct: det.confidencePct,
+        deterministicExplanation: det.explanation,
+        deterministicNormalizedCategory: det.normalizedCategory,
       };
       continue;
     }
-    const det = routeOpExLineDeterministic(row.label);
+
     next[row.lineId] = {
       lineId: row.lineId,
       originalLineLabel: row.label,
@@ -37,13 +87,10 @@ export function mergeOpExIngestedWithConfig(
       routeResolvedBy: "deterministic",
       deterministicRuleId: det.ruleId,
       linkedFutureScheduleType: det.linkedFutureScheduleType ?? null,
+      deterministicConfidencePct: det.confidencePct,
+      deterministicExplanation: det.explanation,
+      deterministicNormalizedCategory: det.normalizedCategory,
     };
-  }
-
-  for (const id of Object.keys(existing)) {
-    if (!allowed.has(id) && next[id] === undefined) {
-      // dropped from IS — do not carry forward
-    }
   }
 
   return next;

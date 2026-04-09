@@ -2759,7 +2759,7 @@ function ForecastableCogsLineCard({
                   : "bg-slate-800/70 text-slate-500 border border-slate-700/60"
             }`}
           >
-            {hasUnsavedChanges ? "Unsaved" : hasSavedConfig ? "Saved" : "Not started"}
+            {hasUnsavedChanges ? "Unsaved" : hasSavedConfig ? "Applied" : "Not started"}
           </span>
         </div>
         {!cardExpanded ? (
@@ -2808,31 +2808,31 @@ function ForecastableCogsLineCard({
       </div>
       {!allowCostPerUnit && cfg?.forecastMethod === "cost_per_unit" ? (
         <p className="text-[11px] text-amber-300/90">
-          This line is saved as Cost per Unit, but the linked revenue row is no longer Price × Volume. Preview may not
+          This line is applied as Cost per Unit, but the linked revenue row is no longer Price × Volume. Preview may not
           resolve volume until the revenue driver matches.
         </p>
       ) : null}
       {!allowCostPerCustomer && cfg?.forecastMethod === "cost_per_customer" ? (
         <p className="text-[11px] text-amber-300/90">
-          This line is saved as Cost per Customer, but the linked revenue row is no longer Customers × ARPU. Customer-driver
+          This line is applied as Cost per Customer, but the linked revenue row is no longer Customers × ARPU. Customer-driver
           preview context may not resolve correctly until the revenue driver matches.
         </p>
       ) : null}
       {!allowCostPerContract && cfg?.forecastMethod === "cost_per_contract" ? (
         <p className="text-[11px] text-amber-300/90">
-          This line is saved as Cost per Contract, but the linked revenue row is no longer Contracts × ACV. Contract-driver
+          This line is applied as Cost per Contract, but the linked revenue row is no longer Contracts × ACV. Contract-driver
           preview context may not resolve correctly until the revenue driver matches.
         </p>
       ) : null}
       {!allowCostPerLocation && cfg?.forecastMethod === "cost_per_location" ? (
         <p className="text-[11px] text-amber-300/90">
-          This line is saved as Cost per Location, but the linked revenue row is no longer Locations × Revenue per Location.
+          This line is applied as Cost per Location, but the linked revenue row is no longer Locations × Revenue per Location.
           Location-driver preview context may not resolve correctly until the revenue driver matches.
         </p>
       ) : null}
       {!allowCostPerUtilizedUnit && cfg?.forecastMethod === "cost_per_utilized_unit" ? (
         <p className="text-[11px] text-amber-300/90">
-          This line is saved as Cost per Utilized Unit, but the linked revenue row is no longer Capacity × Utilization ×
+          This line is applied as Cost per Utilized Unit, but the linked revenue row is no longer Capacity × Utilization ×
           Yield. Utilized-unit preview context may no longer resolve correctly until the revenue driver matches.
         </p>
       ) : null}
@@ -3742,7 +3742,7 @@ function ForecastableCogsLineCard({
                   : "cursor-pointer border-slate-500 bg-slate-700 text-slate-100 hover:bg-slate-600 hover:border-slate-400"
               }`}
             >
-              Reset
+              Reset changes
             </button>
           </div>
         </div>
@@ -3791,24 +3791,19 @@ export default function CogsOpexForecastV1Tab() {
   );
 
   const cogsItems = detected.filter((d) => d.detectedBucket === "cogs");
-  const reviewItems = detected.filter((d) => d.detectedBucket === "review");
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-slate-700 bg-slate-900/30 p-3">
-        <p className="text-xs text-slate-300">
-          COGS forecast lines were created from your revenue forecast structure. Review how each revenue stream should
-          convert into direct costs.
-        </p>
-      </div>
-
       <section className="rounded-lg border border-slate-700 bg-slate-900/40">
         <div className="border-b border-slate-800 px-4 py-3">
-          <h3 className="text-sm font-semibold text-slate-100">Forecastable COGS Lines</h3>
+          <h3 className="text-sm font-semibold text-slate-100">Forecast COGS</h3>
+          <p className="text-[11px] text-slate-500 mt-1">
+            Review how each revenue stream converts into direct costs.
+          </p>
         </div>
         {forecastableLines.length === 0 ? (
           <div className="px-4 py-6 text-sm text-slate-500">
-            No forecastable COGS lines found from the current revenue forecast structure.
+            No COGS lines to forecast from the current revenue setup.
           </div>
         ) : (
           <div className="p-3 space-y-4 bg-slate-950/25">
@@ -3828,13 +3823,14 @@ export default function CogsOpexForecastV1Tab() {
         )}
       </section>
 
-      <section className="rounded-lg border border-slate-700 bg-slate-900/40">
-        <div className="border-b border-slate-800 px-4 py-3">
-          <h3 className="text-sm font-semibold text-slate-100">Historical COGS Context</h3>
-        </div>
+      <details className="rounded-lg border border-slate-700 bg-slate-900/40 group" open={cogsItems.length > 0}>
+        <summary className="border-b border-slate-800 px-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden flex items-center gap-2">
+          <span className="text-slate-500 text-[10px] group-open:rotate-90 transition-transform">▸</span>
+          <h3 className="text-sm font-semibold text-slate-100 inline">Historical COGS (reference)</h3>
+        </summary>
         {cogsItems.length === 0 ? (
-          <div className="px-4 py-4 text-xs text-slate-500">
-            No clear historical COGS lines detected.
+          <div className="px-4 py-4 text-xs text-slate-500 leading-relaxed">
+            No separately labeled COGS lines were found. COGS is derived from your revenue setup.
           </div>
         ) : (
           <div className="divide-y divide-slate-800">
@@ -3849,33 +3845,7 @@ export default function CogsOpexForecastV1Tab() {
             ))}
           </div>
         )}
-      </section>
-
-      <section className="rounded-lg border border-slate-700 bg-slate-900/40">
-        <div className="border-b border-slate-800 px-4 py-3">
-          <h3 className="text-sm font-semibold text-slate-100">Review Items</h3>
-        </div>
-        {reviewItems.length === 0 ? (
-          <div className="px-4 py-4 text-xs text-slate-500">
-            No ambiguous items detected.
-          </div>
-        ) : (
-          <div className="divide-y divide-slate-800">
-            {reviewItems.map((line) => (
-              <div key={line.sourceHistoricalLineId} className="px-4 py-3 space-y-1">
-                <div className="text-sm text-slate-200">{line.lineLabel}</div>
-                <div className="text-[11px] text-slate-500">
-                  Confidence: <span className={confidenceTone(line.confidence)}>{line.confidence}</span> ·{" "}
-                  {line.detectionReason}
-                </div>
-                <div className="text-[11px] text-amber-300/80">
-                  Likely derived from schedule or non-recurring; review before forecasting here.
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+      </details>
 
       <OperatingExpensesPhase1Panel />
     </div>

@@ -32,11 +32,14 @@ import type { ForecastRevenueNodeV1 } from "@/types/revenue-forecast-v1";
 import { getRevenueForecastConfigV1RowsFingerprint } from "@/lib/revenue-forecast-v1-fingerprint";
 import { detectCogsLinesFromIncomeStatement } from "@/lib/cogs-line-detection";
 import { collectOperatingExpenseLeafLines } from "@/lib/opex-line-ingest";
+import { isOpexLineLabelHiddenOnCogsOpexTab } from "@/lib/opex-cogs-opex-tab-visibility";
 import {
   projectOpExLineForecastByYear,
   getOpExLineLastHistoricalValue,
 } from "@/lib/opex-forecast-projection-v1";
 import { getOpExForecastConfigFingerprint } from "@/lib/opex-forecast-fingerprint";
+import { formatOpexRoutedLineSummary } from "@/lib/opex-routing-ui";
+import { getOpexPreviewNudges } from "@/lib/opex-nudges";
 import {
   buildForecastableCogsLinesFromRevenue,
   computeCogsCostPerContractForecastByYear,
@@ -166,7 +169,6 @@ const COGS_PREVIEW_SECTION_DEFAULTS = {
   cogs_detail: false,
   cogs_driver_diagnostics: false,
   cogs_historical_context: false,
-  cogs_review_items: false,
 } as const;
 
 type CogsPreviewSectionKey = keyof typeof COGS_PREVIEW_SECTION_DEFAULTS;
@@ -1246,10 +1248,6 @@ export default function ISBuildPreview() {
     () => detectedCogsLines.filter((x) => x.detectedBucket === "cogs"),
     [detectedCogsLines]
   );
-  const detectedCogsReview = useMemo(
-    () => detectedCogsLines.filter((x) => x.detectedBucket === "review"),
-    [detectedCogsLines]
-  );
 
   const forecastableCogsLines = useMemo(
     () => buildForecastableCogsLinesFromRevenue(revenueForecastTreeV1 ?? [], revenueForecastConfigV1?.rows ?? {}),
@@ -1644,6 +1642,10 @@ export default function ISBuildPreview() {
     () => collectOperatingExpenseLeafLines(incomeStatement ?? []),
     [incomeStatement]
   );
+  const visibleOpexLines = useMemo(
+    () => ingestedOpexLines.filter((r) => !isOpexLineLabelHiddenOnCogsOpexTab(r.label)),
+    [ingestedOpexLines]
+  );
 
   const revenueTotalByForecastYear = useMemo(() => {
     const out: Record<string, number> = {};
@@ -1734,6 +1736,16 @@ export default function ISBuildPreview() {
     opexProjectedByLineId,
     opexForecastConfigV1,
   ]);
+
+  const opexPreviewNudges = useMemo(
+    () =>
+      getOpexPreviewNudges({
+        visibleLines: visibleOpexLines,
+        lineConfig: (id) => opexForecastConfigV1?.lines?.[id],
+        lastHistByLineId: opexLastHistByLineId,
+      }),
+    [visibleOpexLines, opexForecastLinesFingerprint, opexLastHistByLineId, opexForecastConfigV1]
+  );
 
   const operatingExpensesIsRollupByYear = useMemo(() => {
     const opExRow = incomeStatement?.find((r) => r.id === "operating_expenses");
@@ -2122,9 +2134,8 @@ export default function ISBuildPreview() {
                 title="Operating expenses & operating income"
                 subtitle={
                   <span>
-                    Historical: reported IS totals where available. Forecast: Phase 1 direct OpEx only (lines routed to
-                    &quot;forecast here&quot;); schedule-derived and review routes are excluded from the forecast
-                    subtotal.
+                    Historical: reported totals where available. Forecast: Phase 1 includes only operating expenses you
+                    forecast in this step; schedule and review lines are excluded from the subtotal.
                   </span>
                 }
               />
@@ -2172,9 +2183,9 @@ export default function ISBuildPreview() {
                 </tr>
                 <tr className="border-b border-slate-900">
                   <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>
-                    Direct OpEx (Phase 1)
+                    Direct operating expenses (Phase 1)
                     <div className="text-[10px] font-normal text-slate-500 mt-0.5">
-                      Sum of lines forecast in drivers · actuals = same routed lines only
+                      Sum of lines you forecast here · historical uses the same classified lines
                     </div>
                   </td>
                   {years.map((y, yi) => {
@@ -2196,7 +2207,7 @@ export default function ISBuildPreview() {
                   <td className={`${COGS_PREVIEW_LABEL_TD_CLASS} text-slate-200 font-medium`}>
                     Operating income (EBIT)
                     <div className="text-[10px] font-normal text-slate-500 mt-0.5">
-                      Historical: IS EBIT. Forecast: Gross profit − direct OpEx (Phase 1).
+                      Historical: reported EBIT. Forecast: gross profit minus Phase 1 direct operating expenses.
                     </div>
                   </td>
                   {years.map((y, yi) => {
@@ -2235,11 +2246,29 @@ export default function ISBuildPreview() {
               <PreviewCollapsibleHeader
                 expanded={cogsPreviewSections.cogs_opex_detail}
                 onToggle={() => toggleCogsPreviewSection("cogs_opex_detail")}
-                title="Operating expenses detail (direct)"
-                subtitle="Preview-only % of revenue uses total revenue. Excludes schedule / review routes."
+                title="Direct operating expenses (Phase 1)"
+                subtitle="Includes only items forecasted in this step. % of revenue uses total revenue."
               />
             </div>
             {cogsPreviewSections.cogs_opex_detail ? (
+            <>
+            {opexPreviewNudges.length > 0 ? (
+              <div className="px-3.5 py-2 space-y-1 border-b border-slate-800/80">
+                {opexPreviewNudges.map((n) => (
+                  <div
+                    key={n.type}
+                    className={`text-[11px] flex items-start gap-1.5 leading-snug ${
+                      n.severity === "warning" ? "text-amber-200/90" : "text-slate-400"
+                    }`}
+                  >
+                    <span aria-hidden className="shrink-0">
+                      {n.severity === "warning" ? "⚠️" : "ℹ️"}
+                    </span>
+                    <span>{n.message}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <table className={COGS_PREVIEW_YEAR_TABLE_CLASS}>
               <CogsPreviewYearColgroup years={years} />
               <thead>
@@ -2261,15 +2290,15 @@ export default function ISBuildPreview() {
                 </tr>
               </thead>
               <tbody>
-                {ingestedOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "forecast_direct")
+                {visibleOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "forecast_direct")
                   .length === 0 ? (
                   <tr>
                     <td colSpan={1 + years.length} className="px-3.5 py-5 text-center text-slate-500">
-                      No lines routed to direct operating expense forecast.
+                      No operating expense lines forecasted in this step.
                     </td>
                   </tr>
                 ) : (
-                  ingestedOpexLines
+                  visibleOpexLines
                     .filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "forecast_direct")
                     .map((row) => {
                       const rRow = findRowInTree(incomeStatement ?? [], row.lineId);
@@ -2326,6 +2355,7 @@ export default function ISBuildPreview() {
                 )}
               </tbody>
             </table>
+            </>
             ) : null}
           </div>
 
@@ -2334,64 +2364,79 @@ export default function ISBuildPreview() {
               <PreviewCollapsibleHeader
                 expanded={cogsPreviewSections.cogs_opex_routed}
                 onToggle={() => toggleCogsPreviewSection("cogs_opex_routed")}
-                title="Routed OpEx (schedules & review)"
-                subtitle="Read-only routing summary — not included in Phase 1 forecast totals above."
+                title="Not included in Phase 1"
+                subtitle="Handled in schedules or excluded from recurring forecast."
               />
             </div>
             {cogsPreviewSections.cogs_opex_routed ? (
-            <div className="px-3.5 py-3 space-y-3 text-xs text-slate-400">
-              {ingestedOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
+            <div className="px-3.5 py-3 space-y-4 text-xs text-slate-400">
+              {visibleOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
                 .length > 0 ? (
                 <div>
-                  <div className="text-slate-300 font-semibold mb-1">Derived from schedule (Phase 2)</div>
+                  <div className="text-slate-300 font-semibold mb-1">Handled in schedules</div>
                   <ul className="list-disc pl-4 space-y-1">
-                    {ingestedOpexLines
+                    {visibleOpexLines
                       .filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
-                      .map((r) => (
-                        <li key={r.lineId}>
-                          <span className="text-slate-200">{r.label}</span>
-                          {opexForecastConfigV1?.lines?.[r.lineId]?.aiExplanation
-                            ? ` — ${opexForecastConfigV1.lines[r.lineId]!.aiUserFacingSummary ?? opexForecastConfigV1.lines[r.lineId]!.aiExplanation}`
-                            : null}
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-              ) : null}
-              {ingestedOpexLines.filter((r) => {
-                const s = opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus;
-                return s === "review_required" || s === "excluded_nonrecurring";
-              }).length > 0 ? (
-                <div>
-                  <div className="text-slate-300 font-semibold mb-1">Review / excluded</div>
-                  <ul className="list-disc pl-4 space-y-1">
-                    {ingestedOpexLines
-                      .filter((r) => {
-                        const s = opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus;
-                        return s === "review_required" || s === "excluded_nonrecurring";
-                      })
                       .map((r) => {
                         const lc = opexForecastConfigV1?.lines?.[r.lineId];
+                        const routing = formatOpexRoutedLineSummary(lc);
                         return (
                           <li key={r.lineId}>
                             <span className="text-slate-200">{r.label}</span>
-                            <span className="text-slate-500"> ({lc?.routeStatus?.replace(/_/g, " ")})</span>
-                            {lc?.aiExplanation
-                              ? ` — ${lc.aiUserFacingSummary ?? lc.aiExplanation}`
-                              : null}
+                            {routing ? <span className="text-slate-500"> — {routing}</span> : null}
                           </li>
                         );
                       })}
                   </ul>
                 </div>
               ) : null}
-              {ingestedOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
+              {visibleOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "review_required")
+                .length > 0 ? (
+                <div>
+                  <div className="text-slate-300 font-semibold mb-1">Needs review</div>
+                  <ul className="list-disc pl-4 space-y-1">
+                    {visibleOpexLines
+                      .filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "review_required")
+                      .map((r) => {
+                        const lc = opexForecastConfigV1?.lines?.[r.lineId];
+                        const routing = formatOpexRoutedLineSummary(lc);
+                        return (
+                          <li key={r.lineId}>
+                            <span className="text-slate-200">{r.label}</span>
+                            {routing ? <span className="text-slate-500"> — {routing}</span> : null}
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              ) : null}
+              {visibleOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "excluded_nonrecurring")
+                .length > 0 ? (
+                <div>
+                  <div className="text-slate-300 font-semibold mb-1">Excluded</div>
+                  <ul className="list-disc pl-4 space-y-1">
+                    {visibleOpexLines
+                      .filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "excluded_nonrecurring")
+                      .map((r) => {
+                        const lc = opexForecastConfigV1?.lines?.[r.lineId];
+                        const routing = formatOpexRoutedLineSummary(lc);
+                        return (
+                          <li key={r.lineId}>
+                            <span className="text-slate-200">{r.label}</span>
+                            {routing ? <span className="text-slate-500"> — {routing}</span> : null}
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              ) : null}
+              {visibleOpexLines.filter((r) => opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus === "derive_schedule")
                 .length === 0 &&
-              ingestedOpexLines.filter((r) => {
+              visibleOpexLines.filter((r) => {
                 const s = opexForecastConfigV1?.lines?.[r.lineId]?.routeStatus;
                 return s === "review_required" || s === "excluded_nonrecurring";
               }).length === 0 ? (
-                <div className="text-slate-500">No schedule or review routes.</div>
+                <div className="text-slate-500">No lines in this section.</div>
               ) : null}
             </div>
             ) : null}
@@ -2402,7 +2447,8 @@ export default function ISBuildPreview() {
               <PreviewCollapsibleHeader
                 expanded={cogsPreviewSections.cogs_detail}
                 onToggle={() => toggleCogsPreviewSection("cogs_detail")}
-                title="COGS"
+                title="COGS forecast detail"
+                subtitle="Per-line amounts and % of linked revenue — beyond the Revenue, COGS & Gross Margin summary."
               />
             </div>
             {cogsPreviewSections.cogs_detail ? (
@@ -2847,26 +2893,6 @@ export default function ISBuildPreview() {
             </div>
           ) : null}
 
-          {detectedCogsReview.length > 0 ? (
-            <div className="rounded-md border border-slate-700 bg-slate-900/40">
-              <div className="px-3.5 py-2 border-b border-slate-800">
-                <PreviewCollapsibleHeader
-                  expanded={cogsPreviewSections.cogs_review_items}
-                  onToggle={() => toggleCogsPreviewSection("cogs_review_items")}
-                  title="Review Items"
-                />
-              </div>
-              {cogsPreviewSections.cogs_review_items ? (
-              <div className="px-3.5 pt-2 pb-3 space-y-1.5 text-xs">
-                {detectedCogsReview.map((line) => (
-                  <p key={`review-${line.sourceHistoricalLineId}`} className="text-slate-400">
-                    <span className="text-slate-300">{line.lineLabel}</span> — {line.detectionReason}
-                  </p>
-                ))}
-              </div>
-              ) : null}
-            </div>
-          ) : null}
         </div>
       </section>
     );

@@ -19,7 +19,9 @@ function findOperatingExpensesRoot(rows: Row[]): Row | null {
 
 /**
  * Leaf operating-expense rows under the historical IS `operating_expenses` parent, in tree order.
- * Does not invent lines — only rows already on the P&L under OpEx.
+ * Phase 1 builder lists only these lines — not revenue, COGS, or other IS sections.
+ * If interest, tax, or other income/expense appear here, the tree mis-filed them; deterministic routing
+ * can still push them to derive_schedule / review in config, but ingest itself does not pull non-OpEx sections.
  */
 export function collectOperatingExpenseLeafLines(incomeStatement: Row[]): IngestedOpExLineV1[] {
   const root = findOperatingExpensesRoot(incomeStatement ?? []);

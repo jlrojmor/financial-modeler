@@ -68,15 +68,29 @@ export interface OpExForecastLineConfigV1 {
   routeResolvedBy: OpExRouteResolvedByV1;
   /** When deterministic routing matched first. */
   deterministicRuleId?: string | null;
+  /** 0–100 from deterministic classifier (shown when source is or shadows deterministic). */
+  deterministicConfidencePct?: number;
+  deterministicExplanation?: string;
+  deterministicNormalizedCategory?: string;
   linkedFutureScheduleType?: OpExLinkedFutureScheduleTypeV1;
   /** AI advisory (structured; not the sole source for obvious deterministic cases). */
   aiSuggestedRoute?: OpExRouteStatusV1;
   aiSuggestedMethod?: OpExDirectForecastMethodV1;
+  /** Legacy bucket; prefer aiConfidencePct when present. */
   aiConfidence?: "high" | "medium" | "low";
+  /** 0–100 from AI routing. */
+  aiConfidencePct?: number;
   aiExplanation?: string;
   /** Short UI copy from AI routing response. */
   aiUserFacingSummary?: string;
   aiFlags?: string[];
+  aiNormalizedCategory?: string;
+  aiDetectedSignals?: string[];
+  aiAmbiguityFlags?: string[];
+  aiLikelyRecurring?: boolean | null;
+  aiLikelyScheduleDerived?: boolean | null;
+  aiLikelyNonRecurring?: boolean | null;
+  aiReviewRecommended?: boolean;
   forecastMethod?: OpExDirectForecastMethodV1;
   forecastParameters?: OpExForecastParametersV1;
 }

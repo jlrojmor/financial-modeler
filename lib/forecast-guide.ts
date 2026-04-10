@@ -1252,6 +1252,11 @@ export const FORECAST_GUIDE_CONTENT: Record<
 > = {
   revenue: { kind: "sections", sections: REVENUE_GUIDE_SECTIONS },
   operating_costs: { kind: "sections", sections: COGS_OPEX_GUIDE_SECTIONS },
+  non_operating_schedules: {
+    kind: "placeholder",
+    headline: "Non-operating & Schedules",
+    body: "Guidance for schedules and non-operating lines (interest, other income and expense, and the path from EBIT to EBT) will be expanded in a future pass.",
+  },
   wc_drivers: {
     kind: "placeholder",
     headline: "Working Capital Drivers",

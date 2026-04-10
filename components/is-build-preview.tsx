@@ -72,6 +72,7 @@ import {
   resolveCogsCostPerUtilizedUnitGrowthPctByYear,
   resolveCogsPctOfRevenueByYear,
 } from "@/lib/cogs-forecast-v1";
+import NonOperatingPhase2Preview from "@/components/non-operating-phase2-preview";
 
 /** Driver preview: unit counts only — no statement K/M scaling. */
 function formatVolumeDriverCount(n: number): string {
@@ -1915,6 +1916,10 @@ export default function ISBuildPreview() {
     if (!Number.isFinite(rev) || rev === 0) return null;
     return (cogs / rev) * 100;
   };
+
+  if (forecastDriversSubTab === "non_operating_schedules") {
+    return <NonOperatingPhase2Preview />;
+  }
 
   if (forecastDriversSubTab === "operating_costs") {
     return (

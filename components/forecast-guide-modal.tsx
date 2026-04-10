@@ -11,6 +11,7 @@ import {
 const SUB_TAB_LABELS: Record<ForecastDriversSubTab, string> = {
   revenue: "Revenue",
   operating_costs: "COGS & Operating Expenses",
+  non_operating_schedules: "Non-operating & Schedules",
   wc_drivers: "Working Capital Drivers",
   financing_taxes: "Financing / Taxes",
 };

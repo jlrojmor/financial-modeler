@@ -68,6 +68,12 @@ import { TEMPLATE_IS_ROW_IDS } from "@/lib/is-classification";
 import { isCoreBsRow, getCoreLockedBehavior } from "@/lib/bs-core-rows";
 import { CFS_ANCHOR_HISTORICAL_NATURE } from "@/lib/cfs-forecast-drivers";
 import { CAPEX_IB_DEFAULT_USEFUL_LIVES, isLegacyWrongUsefulLives, CAPEX_DEFAULT_BUCKET_IDS } from "@/lib/capex-defaults";
+import type { Phase2LineBucket, Phase2ScheduleShellStatus } from "@/lib/non-operating-phase2-lines";
+import type { NonOperatingPhase2DirectLinePersist } from "@/lib/non-operating-phase2-ui-persist";
+import type { NonOperatingPhase2AiLineSuggestion } from "@/types/non-operating-phase2-ai";
+import type { InterestExpenseScheduleLinePersist } from "@/types/interest-expense-schedule-v1";
+import type { DebtSchedulePhase2Persist } from "@/types/debt-schedule-v1";
+import { defaultDebtSchedulePhase2Persist } from "@/lib/debt-schedule-persist";
 import { getWcScheduleItems, computeWcProjectedBalances, type WcDriverState } from "@/lib/working-capital-schedule";
 import {
   computeCapexDaSchedule,
@@ -513,6 +519,7 @@ export type CurrencyUnit = "units" | "thousands" | "millions";
 export type ForecastDriversSubTab =
   | "revenue"
   | "operating_costs"
+  | "non_operating_schedules"
   | "wc_drivers"
   | "financing_taxes";
 
@@ -627,6 +634,18 @@ export type ProjectSnapshot = {
   intangiblesPctOfCapex: number;
   intangiblesHasHistoricalAmortization: boolean;
   intangiblesHistoricalAmortizationByYear: Record<string, number>;
+  /** Forecast Drivers Phase 2 shell (Non-operating & Schedules); guidance UI only. */
+  nonOperatingPhase2ScheduleStatusByLine?: Record<string, Phase2ScheduleShellStatus>;
+  nonOperatingPhase2BucketOverrides?: Record<string, Phase2LineBucket>;
+  nonOperatingPhase2DirectByLine?: Record<string, NonOperatingPhase2DirectLinePersist>;
+  /** Latest AI classification per line (advisory; does not change bucket unless user acts). */
+  nonOperatingPhase2AiByLine?: Record<string, NonOperatingPhase2AiLineSuggestion>;
+  /** True when user explicitly set classification via dropdown (vs default heuristic). */
+  nonOperatingPhase2ClassificationLockedByLine?: Record<string, boolean>;
+  /** Phase 2 interest expense schedule (applied config drives preview only). */
+  nonOperatingPhase2InterestExpenseScheduleByLine?: Record<string, InterestExpenseScheduleLinePersist>;
+  /** Phase 2 debt schedule (applied drives preview interest + debt roll-forward). */
+  debtSchedulePhase2Persist?: DebtSchedulePhase2Persist;
   /** Company Context (step before Historicals): user inputs, AI context, overrides. */
   companyContext: CompanyContext;
 };
@@ -761,6 +780,14 @@ export type ModelState = {
   bsBuildPreviewOverrides: Record<string, Record<string, number>>;
   /** Forecast Drivers: active left-panel sub-tab (Revenue preview reads this). Omitted from ProjectSnapshot. */
   forecastDriversSubTab: ForecastDriversSubTab;
+  /** Phase 2 Non-operating & Schedules — local shell state (persisted per project). */
+  nonOperatingPhase2ScheduleStatusByLine: Record<string, Phase2ScheduleShellStatus>;
+  nonOperatingPhase2BucketOverrides: Record<string, Phase2LineBucket>;
+  nonOperatingPhase2DirectByLine: Record<string, NonOperatingPhase2DirectLinePersist>;
+  nonOperatingPhase2AiByLine: Record<string, NonOperatingPhase2AiLineSuggestion>;
+  nonOperatingPhase2ClassificationLockedByLine: Record<string, boolean>;
+  nonOperatingPhase2InterestExpenseScheduleByLine: Record<string, InterestExpenseScheduleLinePersist>;
+  debtSchedulePhase2Persist: DebtSchedulePhase2Persist;
   /** Company Context step: user inputs, AI context, overrides. */
   companyContext: CompanyContext;
 };
@@ -982,6 +1009,13 @@ export type ModelActions = {
   /** Set BS Build preview overrides (WC + PP&E + Intangibles schedule outputs). Preview-only, not persisted. */
   setBsBuildPreviewOverrides: (overrides: Record<string, Record<string, number>>) => void;
   setForecastDriversSubTab: (subTab: ForecastDriversSubTab) => void;
+  setNonOperatingPhase2ScheduleStatus: (lineId: string, status: Phase2ScheduleShellStatus) => void;
+  setNonOperatingPhase2BucketOverride: (lineId: string, bucket: Phase2LineBucket | null) => void;
+  setNonOperatingPhase2DirectLine: (lineId: string, value: NonOperatingPhase2DirectLinePersist) => void;
+  setNonOperatingPhase2InterestExpenseSchedule: (lineId: string, value: InterestExpenseScheduleLinePersist) => void;
+  setDebtSchedulePhase2Persist: (value: DebtSchedulePhase2Persist) => void;
+  mergeNonOperatingPhase2AiSuggestions: (suggestions: NonOperatingPhase2AiLineSuggestion[]) => void;
+  setNonOperatingPhase2ClassificationLocked: (lineId: string, locked: boolean) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
   removeRevenueBreakdown: (parentId: string, itemId: string) => void;
   renameRevenueBreakdown: (parentId: string, itemId: string, label: string) => void;
@@ -1145,6 +1179,13 @@ const defaultState: ModelState = {
   intangiblesHistoricalAmortizationByYear: {},
   bsBuildPreviewOverrides: {},
   forecastDriversSubTab: "revenue",
+  nonOperatingPhase2ScheduleStatusByLine: {},
+  nonOperatingPhase2BucketOverrides: {},
+  nonOperatingPhase2DirectByLine: {},
+  nonOperatingPhase2AiByLine: {},
+  nonOperatingPhase2ClassificationLockedByLine: {},
+  nonOperatingPhase2InterestExpenseScheduleByLine: {},
+  debtSchedulePhase2Persist: defaultDebtSchedulePhase2Persist(),
   companyContext: getDefaultCompanyContext(),
 };
 
@@ -1218,6 +1259,13 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     intangiblesPctOfCapex: state.intangiblesPctOfCapex ?? 0,
     intangiblesHasHistoricalAmortization: state.intangiblesHasHistoricalAmortization ?? false,
     intangiblesHistoricalAmortizationByYear: state.intangiblesHistoricalAmortizationByYear ?? {},
+    nonOperatingPhase2ScheduleStatusByLine: state.nonOperatingPhase2ScheduleStatusByLine ?? {},
+    nonOperatingPhase2BucketOverrides: state.nonOperatingPhase2BucketOverrides ?? {},
+    nonOperatingPhase2DirectByLine: state.nonOperatingPhase2DirectByLine ?? {},
+    nonOperatingPhase2AiByLine: state.nonOperatingPhase2AiByLine ?? {},
+    nonOperatingPhase2ClassificationLockedByLine: state.nonOperatingPhase2ClassificationLockedByLine ?? {},
+    nonOperatingPhase2InterestExpenseScheduleByLine: state.nonOperatingPhase2InterestExpenseScheduleByLine ?? {},
+    debtSchedulePhase2Persist: state.debtSchedulePhase2Persist ?? defaultDebtSchedulePhase2Persist(),
     companyContext: state.companyContext ?? getDefaultCompanyContext(),
   };
 }
@@ -1333,6 +1381,13 @@ function applyProjectSnapshot(
     intangiblesPctOfCapex: snapshot.intangiblesPctOfCapex ?? 0,
     intangiblesHasHistoricalAmortization: snapshot.intangiblesHasHistoricalAmortization ?? false,
     intangiblesHistoricalAmortizationByYear: snapshot.intangiblesHistoricalAmortizationByYear ?? {},
+    nonOperatingPhase2ScheduleStatusByLine: snapshot.nonOperatingPhase2ScheduleStatusByLine ?? {},
+    nonOperatingPhase2BucketOverrides: snapshot.nonOperatingPhase2BucketOverrides ?? {},
+    nonOperatingPhase2DirectByLine: snapshot.nonOperatingPhase2DirectByLine ?? {},
+    nonOperatingPhase2AiByLine: snapshot.nonOperatingPhase2AiByLine ?? {},
+    nonOperatingPhase2ClassificationLockedByLine: snapshot.nonOperatingPhase2ClassificationLockedByLine ?? {},
+    nonOperatingPhase2InterestExpenseScheduleByLine: snapshot.nonOperatingPhase2InterestExpenseScheduleByLine ?? {},
+    debtSchedulePhase2Persist: snapshot.debtSchedulePhase2Persist ?? defaultDebtSchedulePhase2Persist(),
     companyContext: (() => {
       const def = getDefaultCompanyContext();
       const snap = snapshot.companyContext;
@@ -1946,6 +2001,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
             intangiblesHistoricalAmortizationByYear: {},
             schedules: { workingCapital: [], debt: [], capex: [] } as { workingCapital: Row[]; debt: Row[]; capex: Row[] },
             bsBuildPreviewOverrides: {},
+            nonOperatingPhase2ScheduleStatusByLine: {},
+            nonOperatingPhase2BucketOverrides: {},
+            nonOperatingPhase2DirectByLine: {},
+            nonOperatingPhase2AiByLine: {},
+            nonOperatingPhase2ClassificationLockedByLine: {},
+            nonOperatingPhase2InterestExpenseScheduleByLine: {},
+            debtSchedulePhase2Persist: defaultDebtSchedulePhase2Persist(),
           }
         : {};
 
@@ -4101,6 +4163,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
       intangiblesHasHistoricalAmortization: false,
       intangiblesHistoricalAmortizationByYear: {},
       bsBuildPreviewOverrides: {},
+      nonOperatingPhase2ScheduleStatusByLine: {},
+      nonOperatingPhase2BucketOverrides: {},
+      nonOperatingPhase2DirectByLine: {},
+      nonOperatingPhase2AiByLine: {},
+      nonOperatingPhase2ClassificationLockedByLine: {},
+      nonOperatingPhase2InterestExpenseScheduleByLine: {},
+      debtSchedulePhase2Persist: defaultDebtSchedulePhase2Persist(),
     });
     get().recalculateAll();
   },
@@ -5021,7 +5090,58 @@ export const useModelStore = create<ModelState & ModelActions>()(
       intangiblesHistoricalAmortizationByYear: { ...(s.intangiblesHistoricalAmortizationByYear ?? {}), [year]: value },
     })),
   setBsBuildPreviewOverrides: (overrides) => set(() => ({ bsBuildPreviewOverrides: overrides })),
-  setForecastDriversSubTab: (subTab) => set(() => ({ forecastDriversSubTab: subTab })),
+      setForecastDriversSubTab: (subTab) => set(() => ({ forecastDriversSubTab: subTab })),
+
+      setNonOperatingPhase2ScheduleStatus: (lineId, status) =>
+        set((s) => ({
+          nonOperatingPhase2ScheduleStatusByLine: {
+            ...s.nonOperatingPhase2ScheduleStatusByLine,
+            [lineId]: status,
+          },
+        })),
+
+      setNonOperatingPhase2BucketOverride: (lineId, bucket) =>
+        set((s) => {
+          const next = { ...s.nonOperatingPhase2BucketOverrides };
+          if (bucket == null) delete next[lineId];
+          else next[lineId] = bucket;
+          return { nonOperatingPhase2BucketOverrides: next };
+        }),
+
+      setNonOperatingPhase2DirectLine: (lineId, value) =>
+        set((s) => ({
+          nonOperatingPhase2DirectByLine: {
+            ...s.nonOperatingPhase2DirectByLine,
+            [lineId]: value,
+          },
+        })),
+
+      setNonOperatingPhase2InterestExpenseSchedule: (lineId, value) =>
+        set((s) => ({
+          nonOperatingPhase2InterestExpenseScheduleByLine: {
+            ...(s.nonOperatingPhase2InterestExpenseScheduleByLine ?? {}),
+            [lineId]: value,
+          },
+        })),
+
+      setDebtSchedulePhase2Persist: (value) => set(() => ({ debtSchedulePhase2Persist: value })),
+
+      mergeNonOperatingPhase2AiSuggestions: (suggestions) =>
+        set((s) => {
+          const next = { ...s.nonOperatingPhase2AiByLine };
+          for (const sug of suggestions) {
+            next[sug.lineId] = sug;
+          }
+          return { nonOperatingPhase2AiByLine: next };
+        }),
+
+      setNonOperatingPhase2ClassificationLocked: (lineId, locked) =>
+        set((s) => {
+          const next = { ...s.nonOperatingPhase2ClassificationLockedByLine };
+          if (locked) next[lineId] = true;
+          else delete next[lineId];
+          return { nonOperatingPhase2ClassificationLockedByLine: next };
+        }),
 
   // IS Build breakdowns live ONLY in config; they are NOT added to the incomeStatement tree.
   // Historicals structure (e.g. Revenue → Subscription, Services) is unchanged. For projection

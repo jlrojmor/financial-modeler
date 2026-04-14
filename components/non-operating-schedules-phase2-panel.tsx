@@ -559,25 +559,34 @@ function Phase2DandAScheduleBuilder() {
 
   const unitLabel = getUnitLabel(currencyUnit);
 
+  /** Format a stored number into a compact human-readable string (e.g. 1,516,143 K → "1.5B", 323,218 K → "323M") */
+  function fmtCompact(stored: number): string {
+    const d = storedToDisplay(stored, currencyUnit);
+    // unitLabel is "K", "M", etc. Normalise to a dollar/base amount then pick suffix.
+    const inK = unitLabel === "K" ? d : unitLabel === "M" ? d * 1_000 : d;
+    if (inK >= 1_000_000) return `$${(inK / 1_000_000).toFixed(1)}B`;
+    if (inK >= 1_000)     return `$${Math.round(inK / 1_000)}M`;
+    return `$${Math.round(inK)}K`;
+  }
+
   const summaryText = schedule?.isConfigured
     ? (() => {
         const dandaVals = projectionYears.map((y) => schedule.totalDandaByYear[y] ?? 0).filter((v) => v > 0);
         const capexVals = projectionYears.map((y) => schedule.totalCapexByYear[y] ?? 0).filter((v) => v > 0);
         if (dandaVals.length === 0 && capexVals.length === 0) return null;
-        const fmtNum = (v: number) =>
-          storedToDisplay(v, currencyUnit).toLocaleString(undefined, { maximumFractionDigits: 0 });
         const dandaMin = dandaVals.length ? Math.min(...dandaVals) : 0;
         const dandaMax = dandaVals.length ? Math.max(...dandaVals) : 0;
         const capexAvg = capexVals.length
           ? capexVals.reduce((a, b) => a + b, 0) / capexVals.length
           : 0;
+        // Plain-English summary shown in the collapsed header
+        const capexPart = capexAvg > 0 ? `~${fmtCompact(capexAvg)}/yr in new assets` : "";
         const dandaPart =
           dandaVals.length === 0
             ? ""
             : dandaMin === dandaMax
-            ? `D&A: ${fmtNum(dandaMin)} ${unitLabel}/yr`
-            : `D&A: ${fmtNum(dandaMin)}–${fmtNum(dandaMax)} ${unitLabel}/yr`;
-        const capexPart = capexAvg > 0 ? `Capex: ~${fmtNum(capexAvg)} ${unitLabel}/yr` : "";
+            ? `${fmtCompact(dandaMin)}/yr depreciation expense`
+            : `${fmtCompact(dandaMin)}–${fmtCompact(dandaMax)}/yr depreciation expense`;
         return [capexPart, dandaPart].filter(Boolean).join(" · ");
       })()
     : null;
@@ -1131,17 +1140,22 @@ function Phase2DandAScheduleBuilder() {
                     </tr>
                     <tr>
                       <td className="py-1 px-1 text-[10px] pl-4">
-                        <button
-                          type="button"
-                          onClick={() => setShowBucketBreakdown((v) => !v)}
-                          className="flex items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
-                          title={schedule.byBucket ? "Toggle bucket breakdown" : undefined}
-                        >
-                          <span>+ Capex</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-slate-400">+ Capex</span>
                           {schedule.byBucket ? (
-                            <span className="text-slate-600 text-[9px]">{showBucketBreakdown ? "▲" : "▼"}</span>
+                            <button
+                              type="button"
+                              onClick={() => setShowBucketBreakdown((v) => !v)}
+                              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-medium border transition-colors ${
+                                showBucketBreakdown
+                                  ? "bg-sky-900/40 text-sky-300 border-sky-700/50 hover:bg-sky-900/60"
+                                  : "bg-slate-800 text-slate-400 border-slate-600 hover:bg-slate-700 hover:text-slate-200"
+                              }`}
+                            >
+                              {showBucketBreakdown ? "▲ Hide buckets" : "▼ By asset type"}
+                            </button>
                           ) : null}
-                        </button>
+                        </div>
                       </td>
                       {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}
                       {projectionYears.map((y) => (
@@ -1150,9 +1164,10 @@ function Phase2DandAScheduleBuilder() {
                         </td>
                       ))}
                     </tr>
-                    {/* Per-bucket Capex breakdown (collapsed by default) */}
-                    {showBucketBreakdown && schedule.byBucket
-                      ? schedule.bucketIdsForDisplay
+                    {/* Per-bucket Capex breakdown */}
+                    {showBucketBreakdown && schedule.byBucket ? (
+                      <>
+                        {schedule.bucketIdsForDisplay
                           .filter((id) => {
                             const b = schedule.byBucket![id];
                             return b && projectionYears.some((y) => (b.capexByYear[y] ?? 0) > 0);
@@ -1162,20 +1177,33 @@ function Phase2DandAScheduleBuilder() {
                             const label = CAPEX_BUCKET_LABELS[id] ?? id;
                             const pct = capexBucketAllocationPct?.[id];
                             return (
-                              <tr key={id} className="bg-slate-900/30">
-                                <td className="py-0.5 px-1 text-[9px] text-slate-600 pl-7">
-                                  {label}{pct != null ? ` (${pct}%)` : ""}
+                              <tr key={id} className="bg-slate-900/40 border-l-2 border-sky-800/40">
+                                <td className="py-1 px-2 text-[10px] text-slate-300 pl-6">
+                                  <span className="font-medium">{label}</span>
+                                  {pct != null ? (
+                                    <span className="ml-1 text-slate-500">({pct}%)</span>
+                                  ) : null}
                                 </td>
-                                {lastHistYear ? <td className="py-0.5 px-1 text-right text-slate-700 text-[9px]">—</td> : null}
+                                {lastHistYear ? (
+                                  <td className="py-1 px-1 text-right text-slate-600 text-[10px]">—</td>
+                                ) : null}
                                 {projectionYears.map((y) => (
-                                  <td key={y} className="py-0.5 px-1 text-right tabular-nums text-slate-600 text-[9px]">
+                                  <td key={y} className="py-1 px-1 text-right tabular-nums text-slate-300 text-[10px] font-mono">
                                     {fmtCell(b.capexByYear[y])}
                                   </td>
                                 ))}
                               </tr>
                             );
-                          })
-                      : null}
+                          })}
+                        <tr className="bg-slate-900/20">
+                          <td className="py-0.5 px-2 text-[9px] text-slate-600 pl-6 italic">
+                            ↑ Capex split by asset type · allocation % set in Step 3 above
+                          </td>
+                          {lastHistYear ? <td /> : null}
+                          {projectionYears.map((y) => <td key={y} />)}
+                        </tr>
+                      </>
+                    ) : null}
                     <tr>
                       <td className="py-1 px-1 text-slate-500 text-[10px] pl-4">− Depreciation</td>
                       {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}

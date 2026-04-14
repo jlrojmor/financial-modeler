@@ -1,10 +1,11 @@
 /**
- * Detect whether BS short-term + long-term debt have explicit values for each requested year.
- * Returns ok: false if any year is missing on either row — avoids silent zeros as "forecast debt".
+ * Funded debt totals for interest / debt schedule. Prefers detected BS lines (metadata + taxonomy);
+ * falls back to template st_debt + lt_debt when detection yields nothing.
  */
 
 import type { Row } from "@/types/finance";
 import { findRowInTree } from "@/lib/row-utils";
+import { detectFundedDebtTotalsByYear } from "@/lib/historical-bs-debt-detection";
 
 function explicitCell(row: Row | null, year: string): number | null {
   if (!row?.values || !Object.prototype.hasOwnProperty.call(row.values, year)) return null;
@@ -14,12 +15,19 @@ function explicitCell(row: Row | null, year: string): number | null {
 }
 
 /**
- * Sum st_debt + lt_debt for each year when both rows have an explicit value for that year.
+ * Sum funded debt for each year. Uses historical BS detection when possible; otherwise st_debt + lt_debt only.
  */
 export function tryBuildModelTotalDebtByYear(
   balanceSheet: Row[],
   years: string[]
 ): { byYear: Record<string, number>; ok: boolean } {
+  if (years.length === 0) return { byYear: {}, ok: false };
+
+  const detected = detectFundedDebtTotalsByYear(balanceSheet, years);
+  if (detected.ok && detected.members.length > 0) {
+    return { byYear: detected.byYearTotal, ok: true };
+  }
+
   const st = findRowInTree(balanceSheet, "st_debt");
   const lt = findRowInTree(balanceSheet, "lt_debt");
   if (!st || !lt) return { byYear: {}, ok: false };

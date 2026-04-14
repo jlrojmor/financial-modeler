@@ -70,6 +70,32 @@ export function getBSCategoryForRow(
 }
 
 /**
+ * Find a BS row by id in the top-level array or nested under any top-level row.
+ * Returns the row and the top-level index used for placement inference (same as a flat custom row at that index).
+ */
+export function findBalanceSheetRowContext(
+  rows: Row[],
+  rowId: string
+): { topLevelIndex: number; row: Row } | null {
+  for (let i = 0; i < rows.length; i++) {
+    const top = rows[i]!;
+    if (top.id === rowId) return { topLevelIndex: i, row: top };
+    const walk = (children: Row[] | undefined): Row | null => {
+      if (!children?.length) return null;
+      for (const c of children) {
+        if (c.id === rowId) return c;
+        const d = walk(c.children);
+        if (d) return d;
+      }
+      return null;
+    };
+    const nested = walk(top.children);
+    if (nested) return { topLevelIndex: i, row: nested };
+  }
+  return null;
+}
+
+/**
  * Get all rows for a specific category
  */
 export function getRowsForCategory(

@@ -480,10 +480,17 @@ export function backfillBalanceSheetClassification(balanceSheet: Row[]): Row[] {
       if (r.classificationSource === "user") return r;
       const locked = getCoreLockedBehavior(r.id);
       if (locked) {
+        const debtMeta =
+          r.id === "st_debt"
+            ? { normalizedDebtCategory: "debt_short_term" as const, bsFundedDebtLine: true, bsDebtClassificationAmbiguous: false }
+            : r.id === "lt_debt"
+              ? { normalizedDebtCategory: "debt_long_term" as const, bsFundedDebtLine: true, bsDebtClassificationAmbiguous: false }
+              : {};
         return {
           ...r,
           cashFlowBehavior: locked.cashFlowBehavior,
           ...(locked.scheduleOwner != null && { scheduleOwner: locked.scheduleOwner }),
+          ...debtMeta,
         };
       }
       if (r.cashFlowBehavior != null && r.cashFlowBehavior !== "unclassified") return r;

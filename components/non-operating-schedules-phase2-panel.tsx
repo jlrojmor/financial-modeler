@@ -43,6 +43,35 @@ import {
   type NonOperatingPhase2DirectLinePersist,
 } from "@/lib/non-operating-phase2-ui-persist";
 import { DebtSchedulePhase2Builder } from "@/components/debt-schedule-phase2-builder";
+import {
+  computeCapexDaSchedule,
+  computeCapexDaScheduleByBucket,
+  computeProjectedCapexByYear,
+} from "@/lib/capex-da-engine";
+import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
+import {
+  CAPEX_DEFAULT_BUCKET_IDS,
+  CAPEX_IB_DEFAULT_USEFUL_LIVES,
+  CAPEX_IB_TYPICAL_RANGE,
+} from "@/lib/capex-defaults";
+import { computeCapexDiagnostics } from "@/lib/capex-da-diagnostics";
+import type { CapexDaAiSuggestion } from "@/types/capex-da-ai";
+import { getProjectedRevenueTotalByYear } from "@/lib/non-operating-phase2-direct-preview";
+
+const CAPEX_BUCKET_LABELS: Record<string, string> = {
+  cap_b1: "Land",
+  cap_b2: "Buildings & Improvements",
+  cap_b3: "Machinery & Equipment",
+  cap_b4: "Computer Hardware",
+  cap_b5: "Software (Capitalized)",
+  cap_b6: "Furniture & Fixtures",
+  cap_b7: "Leasehold Improvements",
+  cap_b8: "Vehicles",
+  cap_b9: "Construction in Progress",
+  cap_b10: "Other PP&E",
+};
+
+const NON_DEPRECIABLE_BUCKETS = new Set(["cap_b1", "cap_b9"]);
 
 type Phase2SectionAccordionVariant = "default" | "needs_review" | "excluded";
 
@@ -192,27 +221,1010 @@ function lastHistoricalSnippet(row: Row | null, lastHistYear: string | null): st
   return String(v);
 }
 
-function Phase2AmortizationSchedulePlaceholderCard() {
+function Phase2DandAScheduleBuilder() {
   const [open, setOpen] = useState(false);
+  const [dandaConfirmed, setDandaConfirmed] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiSuggestion, setAiSuggestion] = useState<CapexDaAiSuggestion | null>(null);
+  const [ppeSkipped, setPpeSkipped] = useState(false);
+  const [manualPpe, setManualPpe] = useState<string>("");
+
+  const meta = useModelStore((s) => s.meta);
+  const balanceSheet = useModelStore((s) => s.balanceSheet ?? []);
+  const cashFlow = useModelStore((s) => s.cashFlow ?? []);
+  const incomeStatement = useModelStore((s) => s.incomeStatement ?? []);
+  const companyContext = useModelStore((s) => s.companyContext);
+
+  // Revenue forecast context — needed to compute projected revenue for capex/D&A engine
+  const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
+  const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
+  const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
+  const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns ?? {});
+  const danaBreakdowns = useModelStore((s) => s.danaBreakdowns ?? {});
+
+  const projectionYears = meta?.years?.projection ?? [];
+  const historicalYears = meta?.years?.historical ?? [];
+  const lastHistYear = historicalYears.length > 0 ? historicalYears[historicalYears.length - 1]! : null;
+  const currencyUnit = meta?.currencyUnit ?? "millions";
+
+  const capexForecastMethod = useModelStore((s) => s.capexForecastMethod);
+  const capexPctRevenue = useModelStore((s) => s.capexPctRevenue);
+  const capexManualByYear = useModelStore((s) => s.capexManualByYear);
+  const capexGrowthPct = useModelStore((s) => s.capexGrowthPct);
+  const capexTimingConvention = useModelStore((s) => s.capexTimingConvention);
+  const ppeUsefulLifeSingle = useModelStore((s) => s.ppeUsefulLifeSingle);
+  const capexSplitByBucket = useModelStore((s) => s.capexSplitByBucket);
+  const capexCustomBucketIds = useModelStore((s) => s.capexCustomBucketIds);
+  const capexBucketAllocationPct = useModelStore((s) => s.capexBucketAllocationPct);
+  const ppeUsefulLifeByBucket = useModelStore((s) => s.ppeUsefulLifeByBucket);
+  const capexHelperPpeByBucketByYear = useModelStore((s) => s.capexHelperPpeByBucketByYear);
+  const capexModelIntangibles = useModelStore((s) => s.capexModelIntangibles);
+  const intangiblesAmortizationLifeYears = useModelStore((s) => s.intangiblesAmortizationLifeYears);
+  const intangiblesForecastMethod = useModelStore((s) => s.intangiblesForecastMethod);
+  const intangiblesPctRevenue = useModelStore((s) => s.intangiblesPctRevenue);
+  const intangiblesManualByYear = useModelStore((s) => s.intangiblesManualByYear);
+  const intangiblesPctOfCapex = useModelStore((s) => s.intangiblesPctOfCapex);
+
+  // Store setters
+  const setCapexForecastMethod = useModelStore((s) => s.setCapexForecastMethod);
+  const setCapexPctRevenue = useModelStore((s) => s.setCapexPctRevenue);
+  const setCapexManualByYear = useModelStore((s) => s.setCapexManualByYear);
+  const setCapexGrowthPct = useModelStore((s) => s.setCapexGrowthPct);
+  const setCapexSplitByBucket = useModelStore((s) => s.setCapexSplitByBucket);
+  const setCapexTimingConvention = useModelStore((s) => s.setCapexTimingConvention);
+  const setCapexBucketAllocationPct = useModelStore((s) => s.setCapexBucketAllocationPct);
+  const setPpeUsefulLifeSingle = useModelStore((s) => s.setPpeUsefulLifeSingle);
+  const setPpeUsefulLifeByBucket = useModelStore((s) => s.setPpeUsefulLifeByBucket);
+  const setCapexModelIntangibles = useModelStore((s) => s.setCapexModelIntangibles);
+  const setIntangiblesForecastMethod = useModelStore((s) => s.setIntangiblesForecastMethod);
+  const setIntangiblesAmortizationLifeYears = useModelStore((s) => s.setIntangiblesAmortizationLifeYears);
+  const setIntangiblesPctRevenue = useModelStore((s) => s.setIntangiblesPctRevenue);
+  const setIntangiblesPctOfCapex = useModelStore((s) => s.setIntangiblesPctOfCapex);
+  const setIntangiblesManualByYear = useModelStore((s) => s.setIntangiblesManualByYear);
+
+  // PP&E detection
+  const ppeRow = useMemo(() => balanceSheet.find((r) => r.id === "ppe") ?? null, [balanceSheet]);
+  const lastHistPPEValue = lastHistYear ? (ppeRow?.values?.[lastHistYear] ?? 0) : 0;
+  const hasPpeRow = ppeRow != null;
+  const hasPpeData = hasPpeRow && lastHistPPEValue > 0;
+
+  // Detect gross PP&E / accumulated depreciation split
+  const grossPpeLike = useMemo(() => {
+    return balanceSheet.filter((r) => {
+      if (r.id === "ppe") return false;
+      const lbl = (r.label ?? "").toLowerCase();
+      return (
+        (lbl.includes("gross") || lbl.includes("property") || lbl.includes("plant")) &&
+        (lbl.includes("equipment") || lbl.includes("pp&e") || lbl.includes("ppe"))
+      );
+    });
+  }, [balanceSheet]);
+  const accumDepLike = useMemo(() => {
+    return balanceSheet.filter((r) => {
+      const lbl = (r.label ?? "").toLowerCase();
+      return lbl.includes("accumulated") && (lbl.includes("depreciation") || lbl.includes("amortization"));
+    });
+  }, [balanceSheet]);
+  const hasGrossSplit = grossPpeLike.length > 0 || accumDepLike.length > 0;
+
+  // Historical diagnostics for hints and AI context
+  const diagnostics = useMemo(() => {
+    if (!lastHistYear || !balanceSheet.length || !incomeStatement.length || !cashFlow.length) return null;
+    const histYears = meta?.years?.historical ?? [];
+    if (histYears.length === 0) return null;
+    return computeCapexDiagnostics({
+      incomeStatement,
+      balanceSheet,
+      cashFlow,
+      historicalYears: histYears,
+    });
+  }, [incomeStatement, balanceSheet, cashFlow, meta, lastHistYear]);
+
+  // Projected revenue (proper engine) — used for capex computation and AI context
+  const allStatements = useMemo(
+    () => ({ incomeStatement, balanceSheet, cashFlow }),
+    [incomeStatement, balanceSheet, cashFlow]
+  );
+
+  const revenueTotalByYear = useMemo(
+    () =>
+      getProjectedRevenueTotalByYear({
+        incomeStatement,
+        revenueForecastConfigV1,
+        revenueForecastTreeV1,
+        revenueProjectionConfig,
+        projectionYears,
+        lastHistoricYear: lastHistYear ?? "",
+        allStatements,
+        sbcBreakdowns,
+        danaBreakdowns,
+        currencyUnit,
+      }),
+    [
+      incomeStatement,
+      revenueForecastConfigV1,
+      revenueForecastTreeV1,
+      revenueProjectionConfig,
+      projectionYears,
+      lastHistYear,
+      allStatements,
+      sbcBreakdowns,
+      danaBreakdowns,
+      currencyUnit,
+    ]
+  );
+
+  // Historical revenue for AI context
+  const lastHistRevenue = useMemo(() => {
+    if (!lastHistYear) return 0;
+    const revRow = incomeStatement.find((r) => r.id === "rev" || r.id === "revenue");
+    return revRow?.values?.[lastHistYear] ?? 0;
+  }, [incomeStatement, lastHistYear]);
+
+  // AI suggest handler
+  const handleAiSuggest = async () => {
+    setAiLoading(true);
+    setAiError(null);
+    setAiSuggestion(null);
+    try {
+      const histCapexPcts = (diagnostics?.capexIntensity ?? [])
+        .map((r) => r.capexPctRevenue ?? 0)
+        .filter((v) => v > 0);
+      const histPpePcts = (diagnostics?.ppeIntensity ?? [])
+        .map((r) => r.ppePctRevenue ?? 0)
+        .filter((v) => v > 0);
+      const res = await fetch("/api/ai/capex-da-suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyContext,
+          historicalCapexPctRevenue: histCapexPcts,
+          historicalPpePctRevenue: histPpePcts,
+          lastHistPPE: lastHistPPEValue,
+          lastHistRevenue,
+          projectionYears,
+          currencyUnit,
+        }),
+      });
+      const data = (await res.json()) as { suggestion?: CapexDaAiSuggestion; error?: string };
+      if (data.suggestion) {
+        const s = data.suggestion;
+        setAiSuggestion(s);
+        // Apply suggestions to store
+        setCapexForecastMethod("pct_revenue");
+        setCapexPctRevenue(s.suggestedCapexPctRevenue);
+        setPpeUsefulLifeSingle(s.suggestedUsefulLifeSingle);
+        for (const [id, life] of Object.entries(s.suggestedUsefulLifeByBucket)) {
+          setPpeUsefulLifeByBucket(id, life as number);
+        }
+        for (const [id, pct] of Object.entries(s.suggestedAllocationPct)) {
+          setCapexBucketAllocationPct(id, pct as number);
+        }
+        // Enable bucket view if meaningful allocation provided
+        const hasBuckets = Object.values(s.suggestedAllocationPct).some((v) => (v as number) > 0);
+        if (hasBuckets) setCapexSplitByBucket(true);
+      } else {
+        setAiError(data.error ?? "AI suggestion unavailable.");
+      }
+    } catch {
+      setAiError("Failed to reach AI service.");
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const schedule = useMemo(() => {
+    if (projectionYears.length === 0) return null;
+
+    // Use the proper revenue engine (same as the rest of the model) — NOT computeRowValue
+    // because projected revenue is forecast-configured, not stored as literal values
+    const revenueByYear: Record<string, number> = {};
+    for (const y of projectionYears) revenueByYear[y] = revenueTotalByYear[y] ?? 0;
+
+    const lastHistPPE = lastHistPPEValue;
+    const lastHistCapex = lastHistYear ? (cashFlow.find((r) => r.id === "capex")?.values?.[lastHistYear] ?? 0) : 0;
+    const lastHistIntangibles = lastHistYear
+      ? (balanceSheet.find((r) => r.id === "intangible_assets")?.values?.[lastHistYear] ?? 0)
+      : 0;
+
+    const effectiveUsefulLife =
+      capexSplitByBucket && ppeUsefulLifeByBucket
+        ? (() => {
+            const allBucketIds = [...CAPEX_DEFAULT_BUCKET_IDS, ...(capexCustomBucketIds ?? [])];
+            const lives = allBucketIds
+              .map((id) => ppeUsefulLifeByBucket[id])
+              .filter((n): n is number => n != null && n > 0);
+            return lives.length > 0 ? lives.reduce((a, b) => a + b, 0) / lives.length : ppeUsefulLifeSingle;
+          })()
+        : ppeUsefulLifeSingle;
+
+    const capexEngineInput = {
+      projectionYears,
+      revenueByYear,
+      lastHistPPE,
+      lastHistCapex,
+      method: capexForecastMethod,
+      pctRevenue: capexPctRevenue,
+      manualByYear: capexManualByYear ?? {},
+      growthPct: capexGrowthPct,
+      timingConvention: capexTimingConvention,
+      usefulLifeYears: effectiveUsefulLife,
+    };
+
+    const totalCapexByYear = computeProjectedCapexByYear(capexEngineInput);
+
+    let dandaByYear: Record<string, number>;
+    let ppeEndByYear: Record<string, number>;
+
+    if (capexSplitByBucket) {
+      const allBucketIds = [...CAPEX_DEFAULT_BUCKET_IDS, ...(capexCustomBucketIds ?? [])];
+      const landDisplay = lastHistYear && capexHelperPpeByBucketByYear?.["cap_b1"]?.[lastHistYear];
+      const initialLand =
+        landDisplay != null && typeof landDisplay === "number" && !Number.isNaN(landDisplay)
+          ? displayToStored(landDisplay, currencyUnit)
+          : 0;
+      const bucketOut = computeCapexDaScheduleByBucket({
+        projectionYears,
+        totalCapexByYear,
+        lastHistPPE,
+        timingConvention: capexTimingConvention,
+        bucketIds: allBucketIds,
+        allocationPct: capexBucketAllocationPct ?? {},
+        usefulLifeByBucket: ppeUsefulLifeByBucket ?? {},
+        initialLandBalance: initialLand,
+      });
+      dandaByYear = bucketOut.totalDandaByYear;
+      ppeEndByYear = bucketOut.totalPpeByYear;
+    } else {
+      const daOut = computeCapexDaSchedule(capexEngineInput);
+      dandaByYear = daOut.dandaByYear;
+      ppeEndByYear = daOut.ppeByYear;
+    }
+
+    const ppeOpenByYear: Record<string, number> = {};
+    let prior = lastHistPPE;
+    for (const y of projectionYears) {
+      ppeOpenByYear[y] = prior;
+      prior = ppeEndByYear[y] ?? prior;
+    }
+
+    const intangiblesOutput =
+      capexModelIntangibles && intangiblesAmortizationLifeYears > 0
+        ? computeIntangiblesAmortSchedule({
+            projectionYears,
+            lastHistIntangibles,
+            additionsMethod: intangiblesForecastMethod,
+            pctRevenue: intangiblesPctRevenue,
+            manualByYear: intangiblesManualByYear ?? {},
+            pctOfCapex: intangiblesPctOfCapex,
+            capexByYear: totalCapexByYear,
+            revenueByYear,
+            lifeYears: intangiblesAmortizationLifeYears,
+            timingConvention: capexTimingConvention,
+          })
+        : null;
+
+    const totalDandaByYear: Record<string, number> = {};
+    for (const y of projectionYears) {
+      totalDandaByYear[y] = (dandaByYear[y] ?? 0) + (intangiblesOutput?.amortByYear[y] ?? 0);
+    }
+
+    const isConfigured = projectionYears.some((y) => (dandaByYear[y] ?? 0) > 0 || (totalCapexByYear[y] ?? 0) > 0);
+
+    return {
+      totalCapexByYear,
+      dandaByYear,
+      ppeOpenByYear,
+      ppeEndByYear,
+      lastHistPPE,
+      lastHistIntangibles,
+      intangiblesOutput,
+      totalDandaByYear,
+      isConfigured,
+    };
+  }, [
+    projectionYears,
+    revenueTotalByYear,
+    balanceSheet,
+    cashFlow,
+    lastHistYear,
+    lastHistPPEValue,
+    currencyUnit,
+    capexForecastMethod,
+    capexPctRevenue,
+    capexManualByYear,
+    capexGrowthPct,
+    capexTimingConvention,
+    ppeUsefulLifeSingle,
+    capexSplitByBucket,
+    capexCustomBucketIds,
+    capexBucketAllocationPct,
+    ppeUsefulLifeByBucket,
+    capexHelperPpeByBucketByYear,
+    capexModelIntangibles,
+    intangiblesAmortizationLifeYears,
+    intangiblesForecastMethod,
+    intangiblesPctRevenue,
+    intangiblesManualByYear,
+    intangiblesPctOfCapex,
+  ]);
+
+  const unitLabel = getUnitLabel(currencyUnit);
+
+  const summaryText = schedule?.isConfigured
+    ? (() => {
+        const values = projectionYears.map((y) => schedule.totalDandaByYear[y] ?? 0).filter((v) => v > 0);
+        if (values.length === 0) return null;
+        const minV = Math.min(...values);
+        const maxV = Math.max(...values);
+        const fmt = (v: number) =>
+          `${storedToDisplay(v, currencyUnit).toLocaleString(undefined, { maximumFractionDigits: 0 })} ${unitLabel}`;
+        return minV === maxV ? `D&A: ${fmt(minV)}/yr` : `D&A: ${fmt(minV)}–${fmt(maxV)}/yr`;
+      })()
+    : null;
+
+  function fmtCell(v: number | null | undefined): string {
+    if (v == null || !Number.isFinite(v) || v === 0) return "—";
+    return storedToDisplay(v, currencyUnit).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  }
+
+  const allDepreciableBuckets = CAPEX_DEFAULT_BUCKET_IDS.filter((id) => !NON_DEPRECIABLE_BUCKETS.has(id));
+  const allocationSum = allDepreciableBuckets.reduce((s, id) => s + (capexBucketAllocationPct?.[id] ?? 0), 0);
+
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-950/30 overflow-hidden">
+      {/* Header */}
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="w-full text-left px-3 py-2.5 flex items-start justify-between gap-2 hover:bg-slate-800/20"
       >
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-slate-100">Amortization schedule</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Placeholder · engine not built yet</div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-medium text-slate-100">PP&amp;E, Capex &amp; D&amp;A Schedule</span>
+            {dandaConfirmed && schedule?.isConfigured ? (
+              <span className="inline-flex items-center gap-1 text-[9px] font-semibold rounded px-1.5 py-0.5 bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+                ✓ Active
+              </span>
+            ) : schedule?.isConfigured ? (
+              <span className="inline-flex items-center gap-1 text-[9px] rounded px-1.5 py-0.5 bg-amber-950/40 text-amber-400 border border-amber-700/40">
+                Pending confirm
+              </span>
+            ) : null}
+          </div>
+          <div className="text-[10px] text-slate-500 mt-0.5">
+            {summaryText ?? "PP\u0026E roll-forward · Capex forecast · Depreciation · Intangibles \u0026 Amortization"}
+          </div>
         </div>
         <span className="text-slate-500 text-xs shrink-0">{open ? "▼" : "▶"}</span>
       </button>
+
       {open ? (
-        <div className="px-3 pb-3 pt-0 border-t border-slate-800/80 space-y-2 text-[11px] text-slate-400 leading-relaxed">
-          <p>
-            Amortization and related below-EBIT items will use a dedicated schedule engine later. This section only
-            records the intended route for now.
+        <div className="px-3 pb-4 pt-0 border-t border-slate-800/80 space-y-4">
+
+          {/* ── Step 1: PP&E Opening Balance Detection ───────────────── */}
+          <div className="mt-3">
+            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1.5">
+              Step 1 — Opening PP&amp;E Balance
+            </p>
+            {!hasPpeRow && !ppeSkipped ? (
+              <div className="rounded border border-amber-700/50 bg-amber-950/20 p-3 space-y-2">
+                <p className="text-[11px] text-amber-200 font-medium">No PP&amp;E row found in your Balance Sheet</p>
+                <p className="text-[10px] text-slate-400 leading-snug">
+                  If your business owns fixed assets (stores, equipment, software), check your Balance Sheet import.
+                  If this is an asset-light business, you can skip the PP&amp;E schedule.
+                </p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-slate-400">Manual opening:</span>
+                    <input
+                      type="number"
+                      min={0}
+                      placeholder="e.g. 1500"
+                      className="w-24 rounded border border-slate-600 bg-slate-800 px-2 py-0.5 text-xs text-slate-200 font-mono"
+                      value={manualPpe}
+                      onChange={(e) => setManualPpe(e.target.value)}
+                    />
+                    <span className="text-[10px] text-slate-500">{unitLabel}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPpeSkipped(true)}
+                    className="text-[10px] text-slate-500 underline hover:text-slate-400"
+                  >
+                    Skip (asset-light)
+                  </button>
+                </div>
+              </div>
+            ) : ppeSkipped ? (
+              <div className="rounded border border-slate-700 bg-slate-800/40 px-3 py-2 flex items-center justify-between">
+                <span className="text-[10px] text-slate-500">PP&amp;E skipped (asset-light)</span>
+                <button
+                  type="button"
+                  onClick={() => setPpeSkipped(false)}
+                  className="text-[10px] text-sky-400 hover:text-sky-300 underline"
+                >
+                  Undo
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <div className="rounded border border-slate-700 bg-slate-800/40 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-[11px] text-slate-200 font-medium">
+                        Opening PP&amp;E (net): {fmtCell(lastHistPPEValue)} {unitLabel}
+                      </span>
+                      {lastHistYear ? (
+                        <span className="ml-2 text-[10px] text-amber-400/70">({lastHistYear}A)</span>
+                      ) : null}
+                    </div>
+                    <span className="text-[9px] rounded px-1.5 py-0.5 bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+                      From Balance Sheet
+                    </span>
+                  </div>
+                  {hasGrossSplit ? (
+                    <p className="text-[9px] text-amber-300/70 mt-1 leading-snug">
+                      Note: gross PP&amp;E / accumulated depreciation detected on separate rows. The model uses
+                      net PP&amp;E — this is the IB standard for the roll-forward.
+                    </p>
+                  ) : null}
+                </div>
+                {diagnostics?.recommendedCapexPctRevenue != null ? (
+                  <p className="text-[9px] text-slate-500 leading-snug">
+                    Historical Capex avg: {diagnostics.recommendedCapexPctRevenue.toFixed(1)}% of revenue.
+                    PP&amp;E/Revenue: {diagnostics.ppeIntensity.at(-1)?.ppePctRevenue?.toFixed(1) ?? "—"}%.
+                  </p>
+                ) : null}
+              </div>
+            )}
+          </div>
+
+          {/* ── AI Quick-Start ───────────────────────────────────────── */}
+          {!ppeSkipped ? (
+            <div className="rounded border border-violet-800/40 bg-violet-950/15 px-3 py-2.5 space-y-2">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <p className="text-[11px] text-violet-200 font-medium">AI Quick-Start</p>
+                  <p className="text-[10px] text-slate-400 leading-snug mt-0.5">
+                    Let AI suggest Capex %, useful lives, and bucket allocation based on your company profile and
+                    historical data. You can adjust everything after.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={aiLoading}
+                  onClick={handleAiSuggest}
+                  className="shrink-0 rounded px-3 py-1.5 text-[11px] font-medium bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white transition-colors"
+                >
+                  {aiLoading ? "Thinking…" : "✦ AI Suggest"}
+                </button>
+              </div>
+              {aiError ? (
+                <p className="text-[10px] text-red-400">{aiError}</p>
+              ) : aiSuggestion ? (
+                <div className="space-y-1 pt-1 border-t border-violet-800/30">
+                  <p className="text-[10px] text-violet-300 font-medium">
+                    Applied: {aiSuggestion.suggestedCapexPctRevenue.toFixed(1)}% Capex ·{" "}
+                    {aiSuggestion.suggestedUsefulLifeSingle}yr avg life ·{" "}
+                    <span className="capitalize">{aiSuggestion.confidence}</span> confidence
+                  </p>
+                  {aiSuggestion.rationaleCapex ? (
+                    <p className="text-[9px] text-slate-400 leading-snug">{aiSuggestion.rationaleCapex}</p>
+                  ) : null}
+                  {aiSuggestion.rationaleUsefulLife ? (
+                    <p className="text-[9px] text-slate-500 leading-snug">{aiSuggestion.rationaleUsefulLife}</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* ── Step 2: Capex Forecast ───────────────────────────────── */}
+          {!ppeSkipped ? (
+            <div className="space-y-3">
+              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
+                Step 2 — Capex Forecast
+              </p>
+
+              {/* Method */}
+              <div className="space-y-1">
+                <label className="block text-[10px] text-slate-500">Forecast method</label>
+                <select
+                  className="rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-xs text-slate-200 max-w-xs"
+                  value={capexForecastMethod ?? "pct_revenue"}
+                  onChange={(e) => setCapexForecastMethod(e.target.value as "pct_revenue" | "manual" | "growth")}
+                >
+                  <option value="pct_revenue">% of Revenue</option>
+                  <option value="manual">Manual by year</option>
+                  <option value="growth">Growth %</option>
+                </select>
+              </div>
+
+              {/* % of Revenue input */}
+              {(capexForecastMethod ?? "pct_revenue") === "pct_revenue" ? (
+                <div className="space-y-1">
+                  <label className="block text-[10px] text-slate-500">Capex % of Revenue</label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="number"
+                      step={0.1}
+                      min={0}
+                      max={50}
+                      className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-200 font-mono"
+                      value={capexPctRevenue ?? ""}
+                      onChange={(e) => {
+                        const n = parseFloat(e.target.value);
+                        if (Number.isFinite(n)) setCapexPctRevenue(n);
+                      }}
+                    />
+                    <span className="text-[10px] text-slate-500">%</span>
+                    {diagnostics?.recommendedCapexPctRevenue != null ? (
+                      <button
+                        type="button"
+                        className="text-[9px] text-sky-400 underline hover:text-sky-300"
+                        onClick={() => setCapexPctRevenue(diagnostics!.recommendedCapexPctRevenue!)}
+                      >
+                        Use hist. avg ({diagnostics.recommendedCapexPctRevenue.toFixed(1)}%)
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (capexForecastMethod ?? "pct_revenue") === "growth" ? (
+                <div className="space-y-1">
+                  <label className="block text-[10px] text-slate-500">Annual growth %</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      step={0.5}
+                      className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-200 font-mono"
+                      value={capexGrowthPct ?? ""}
+                      onChange={(e) => {
+                        const n = parseFloat(e.target.value);
+                        if (Number.isFinite(n)) setCapexGrowthPct(n);
+                      }}
+                    />
+                    <span className="text-[10px] text-slate-500">%</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <label className="block text-[10px] text-slate-500">Capex by year ({unitLabel})</label>
+                  <div className="flex flex-wrap gap-2">
+                    {projectionYears.map((y) => (
+                      <div key={y} className="flex items-center gap-1">
+                        <span className="text-[9px] text-slate-500">{y}E</span>
+                        <input
+                          type="number"
+                          min={0}
+                          className="w-20 rounded border border-slate-600 bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-200 font-mono"
+                          value={capexManualByYear?.[y] != null ? storedToDisplay(capexManualByYear[y]!, currencyUnit) : ""}
+                          onChange={(e) => {
+                            const n = parseFloat(e.target.value);
+                            setCapexManualByYear(y, Number.isFinite(n) ? displayToStored(n, currencyUnit) : 0);
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Timing convention */}
+              <div className="space-y-1">
+                <label className="block text-[10px] text-slate-500">Timing convention</label>
+                <div className="flex gap-1">
+                  {(["mid", "start", "end"] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setCapexTimingConvention(t)}
+                      className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                        (capexTimingConvention ?? "mid") === t
+                          ? "bg-violet-700 border-violet-600 text-white"
+                          : "border-slate-600 text-slate-400 hover:border-slate-500"
+                      }`}
+                    >
+                      {t === "mid" ? "Mid-year" : t === "start" ? "Start" : "End"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[9px] text-slate-600">Mid-year convention is the IB standard.</p>
+              </div>
+
+              {/* Bucket breakdown toggle */}
+              <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={capexSplitByBucket ?? false}
+                  onChange={(e) => setCapexSplitByBucket(e.target.checked)}
+                />
+                Use asset categories (buckets) with per-bucket allocation % and useful lives
+              </label>
+            </div>
+          ) : null}
+
+          {/* ── Step 3: Depreciation Setup ───────────────────────────── */}
+          {!ppeSkipped ? (
+            <div className="space-y-3">
+              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">
+                Step 3 — Depreciation Setup
+              </p>
+
+              {capexSplitByBucket ? (
+                /* Per-bucket useful life + allocation table */
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[10px] border-collapse">
+                    <thead>
+                      <tr className="text-slate-500 border-b border-slate-800">
+                        <th className="text-left py-1 px-1 font-medium">Asset category</th>
+                        <th className="text-right py-1 px-1 font-medium">Life (yrs)</th>
+                        <th className="text-right py-1 px-1 font-medium">Allocation %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {CAPEX_DEFAULT_BUCKET_IDS.map((id) => {
+                        const isND = NON_DEPRECIABLE_BUCKETS.has(id);
+                        const defLife = CAPEX_IB_DEFAULT_USEFUL_LIVES[id] ?? 0;
+                        const range = CAPEX_IB_TYPICAL_RANGE[id];
+                        const life = ppeUsefulLifeByBucket?.[id] ?? defLife;
+                        const alloc = capexBucketAllocationPct?.[id] ?? 0;
+                        return (
+                          <tr key={id} className="border-b border-slate-800/50">
+                            <td className="py-0.5 px-1 text-slate-300">
+                              {CAPEX_BUCKET_LABELS[id] ?? id}
+                              {range && !isND ? (
+                                <span className="text-slate-600 ml-1">({range}yr)</span>
+                              ) : null}
+                            </td>
+                            <td className="py-0.5 px-1 text-right">
+                              {isND ? (
+                                <span className="text-slate-600">N/A</span>
+                              ) : (
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={100}
+                                  className="w-14 rounded border border-slate-600 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 font-mono text-right"
+                                  value={life > 0 ? life : ""}
+                                  onChange={(e) => {
+                                    const n = parseFloat(e.target.value);
+                                    if (Number.isFinite(n) && n > 0) setPpeUsefulLifeByBucket(id, n);
+                                  }}
+                                />
+                              )}
+                            </td>
+                            <td className="py-0.5 px-1 text-right">
+                              {isND ? (
+                                <span className="text-slate-600">—</span>
+                              ) : (
+                                <div className="flex items-center justify-end gap-1">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={100}
+                                    step={0.5}
+                                    className="w-14 rounded border border-slate-600 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 font-mono text-right"
+                                    value={alloc > 0 ? alloc : ""}
+                                    onChange={(e) => {
+                                      const n = parseFloat(e.target.value);
+                                      setCapexBucketAllocationPct(id, Number.isFinite(n) ? n : 0);
+                                    }}
+                                  />
+                                  <span className="text-slate-500">%</span>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      <tr className="border-t border-slate-700">
+                        <td className="py-1 px-1 text-slate-500 font-medium" colSpan={2}>Total allocation</td>
+                        <td className={`py-1 px-1 text-right font-mono font-medium ${Math.abs(allocationSum - 100) < 1 ? "text-emerald-400" : "text-amber-400"}`}>
+                          {allocationSum.toFixed(1)}%
+                          {Math.abs(allocationSum - 100) > 1 ? (
+                            <span className="text-[9px] text-amber-400 ml-1">(should be 100%)</span>
+                          ) : null}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                /* Single useful life */
+                <div className="space-y-1">
+                  <label className="block text-[10px] text-slate-500">PP&amp;E useful life (years)</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      className="w-20 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-200 font-mono"
+                      value={ppeUsefulLifeSingle ?? ""}
+                      onChange={(e) => {
+                        const n = parseFloat(e.target.value);
+                        if (Number.isFinite(n) && n > 0) setPpeUsefulLifeSingle(n);
+                      }}
+                    />
+                    <span className="text-[10px] text-slate-500">years (straight-line)</span>
+                  </div>
+                  <p className="text-[9px] text-slate-600">IB default: 10–15 years for mixed asset base.</p>
+                </div>
+              )}
+
+              {/* Intangibles toggle */}
+              <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={capexModelIntangibles ?? false}
+                  onChange={(e) => setCapexModelIntangibles(e.target.checked)}
+                />
+                Model intangibles &amp; amortization separately
+              </label>
+              {capexModelIntangibles ? (
+                <div className="mt-2 rounded border border-slate-700 bg-slate-900/40 p-3 space-y-3">
+                  <p className="text-[10px] text-slate-400 leading-snug">
+                    <span className="font-medium text-slate-300">Intangibles roll-forward:</span> Each year the model adds
+                    new intangible acquisitions/capitalized costs to the beginning balance and subtracts straight-line
+                    amortization. The result feeds into Total D&amp;A.
+                  </p>
+
+                  {/* How to forecast intangible additions */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] font-semibold text-slate-400">
+                      How to forecast annual additions
+                    </label>
+                    <select
+                      className="rounded border border-slate-600 bg-slate-800 px-2 py-1.5 text-xs text-slate-200 w-full max-w-xs"
+                      value={intangiblesForecastMethod ?? "pct_revenue"}
+                      onChange={(e) =>
+                        setIntangiblesForecastMethod(e.target.value as "pct_revenue" | "manual" | "pct_capex")
+                      }
+                    >
+                      <option value="pct_revenue">% of Revenue — use if intangibles scale with the business</option>
+                      <option value="pct_capex">% of Capex — use if acquisitions track investment activity</option>
+                      <option value="manual">Manual by year — enter a specific $ amount each year</option>
+                    </select>
+
+                    {(intangiblesForecastMethod ?? "pct_revenue") === "pct_revenue" ? (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            step={0.1}
+                            min={0}
+                            className="w-16 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-200 font-mono"
+                            value={intangiblesPctRevenue ?? ""}
+                            onChange={(e) => {
+                              const n = parseFloat(e.target.value);
+                              if (Number.isFinite(n)) setIntangiblesPctRevenue(n);
+                            }}
+                          />
+                          <span className="text-[10px] text-slate-500">% of revenue each year</span>
+                        </div>
+                        <p className="text-[9px] text-slate-600">
+                          e.g. 0.2% → adds intangibles equal to 0.2% of projected revenue each year.
+                        </p>
+                      </div>
+                    ) : (intangiblesForecastMethod ?? "pct_revenue") === "pct_capex" ? (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            step={1}
+                            min={0}
+                            max={100}
+                            className="w-16 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-200 font-mono"
+                            value={intangiblesPctOfCapex ?? ""}
+                            onChange={(e) => {
+                              const n = parseFloat(e.target.value);
+                              if (Number.isFinite(n)) setIntangiblesPctOfCapex(n);
+                            }}
+                          />
+                          <span className="text-[10px] text-slate-500">% of Capex each year</span>
+                        </div>
+                        <p className="text-[9px] text-slate-600">
+                          e.g. 20% → adds intangibles equal to 20% of that year&apos;s Capex.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <p className="text-[10px] text-slate-500">Enter intangible additions ({unitLabel}) for each year:</p>
+                        <div className="flex flex-wrap gap-2">
+                          {projectionYears.map((y) => (
+                            <div key={y} className="flex items-center gap-1">
+                              <span className="text-[9px] text-slate-500">{y}E</span>
+                              <input
+                                type="number"
+                                min={0}
+                                className="w-16 rounded border border-slate-600 bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-200 font-mono"
+                                value={intangiblesManualByYear?.[y] != null ? storedToDisplay(intangiblesManualByYear[y]!, currencyUnit) : ""}
+                                onChange={(e) => {
+                                  const n = parseFloat(e.target.value);
+                                  setIntangiblesManualByYear(y, Number.isFinite(n) ? displayToStored(n, currencyUnit) : 0);
+                                }}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Amortization life */}
+                  <div className="space-y-1">
+                    <label className="block text-[10px] font-semibold text-slate-400">
+                      Amortization life (straight-line)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step={1}
+                        min={1}
+                        max={40}
+                        className="w-16 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-200 font-mono"
+                        value={intangiblesAmortizationLifeYears ?? ""}
+                        onChange={(e) => {
+                          const n = parseFloat(e.target.value);
+                          if (Number.isFinite(n) && n > 0) setIntangiblesAmortizationLifeYears(n);
+                        }}
+                      />
+                      <span className="text-[10px] text-slate-500">years</span>
+                    </div>
+                    <p className="text-[9px] text-slate-600">
+                      IB standard: 5–10 yrs for customer lists/patents; 3–5 yrs for software; 15–20 yrs for brand/goodwill-like.
+                      Each year&apos;s addition is amortized evenly over this life.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* ── Live Roll-Forward Preview ─────────────────────────────── */}
+          <div className="border-t border-slate-800/80 pt-3">
+            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-2">
+              PP&amp;E Roll-Forward Preview
+            </p>
+            {schedule?.isConfigured ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px] border-collapse">
+                  <thead>
+                    <tr className="text-[10px]">
+                      <th className="text-left py-1 px-1 font-medium text-slate-500">Item</th>
+                      {lastHistYear ? (
+                        <th className="text-right py-1 px-1 font-medium text-amber-400/70">{lastHistYear}A</th>
+                      ) : null}
+                      {projectionYears.map((y) => (
+                        <th key={y} className="text-right py-1 px-1 font-medium text-slate-500">{y}E</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-t border-slate-800">
+                      <td className="py-1 px-1 text-slate-500 text-[10px]">PP&amp;E — Opening</td>
+                      {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}
+                      {projectionYears.map((y) => (
+                        <td key={y} className="py-1 px-1 text-right tabular-nums text-slate-400">
+                          {fmtCell(schedule.ppeOpenByYear[y])}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td className="py-1 px-1 text-slate-500 text-[10px] pl-4">+ Capex</td>
+                      {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}
+                      {projectionYears.map((y) => (
+                        <td key={y} className="py-1 px-1 text-right tabular-nums text-slate-400">
+                          {fmtCell(schedule.totalCapexByYear[y])}
+                        </td>
+                      ))}
+                    </tr>
+                    <tr>
+                      <td className="py-1 px-1 text-slate-500 text-[10px] pl-4">− Depreciation</td>
+                      {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}
+                      {projectionYears.map((y) => (
+                        <td key={y} className="py-1 px-1 text-right tabular-nums text-slate-400">
+                          ({fmtCell(schedule.dandaByYear[y])})
+                        </td>
+                      ))}
+                    </tr>
+                    <tr className="border-t border-slate-700/60">
+                      <td className="py-1.5 px-1 text-slate-200 font-semibold">PP&amp;E — Ending</td>
+                      {lastHistYear ? (
+                        <td className="py-1.5 px-1 text-right tabular-nums text-amber-400/80 font-mono font-semibold">
+                          {fmtCell(schedule.lastHistPPE)}
+                        </td>
+                      ) : null}
+                      {projectionYears.map((y) => (
+                        <td key={y} className="py-1.5 px-1 text-right tabular-nums text-slate-200 font-mono font-semibold">
+                          {fmtCell(schedule.ppeEndByYear[y])}
+                        </td>
+                      ))}
+                    </tr>
+                    {schedule.intangiblesOutput ? (
+                      <>
+                        <tr className="border-t border-slate-800">
+                          <td className="py-1 px-1 text-slate-500 text-[10px]">Intangibles — Ending</td>
+                          {lastHistYear ? (
+                            <td className="py-1 px-1 text-right tabular-nums text-amber-400/70">
+                              {fmtCell(schedule.lastHistIntangibles)}
+                            </td>
+                          ) : null}
+                          {projectionYears.map((y) => (
+                            <td key={y} className="py-1 px-1 text-right tabular-nums text-slate-400">
+                              {fmtCell(schedule.intangiblesOutput!.endByYear[y])}
+                            </td>
+                          ))}
+                        </tr>
+                        <tr>
+                          <td className="py-1 px-1 text-slate-500 text-[10px] pl-4">Amortization</td>
+                          {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}
+                          {projectionYears.map((y) => (
+                            <td key={y} className="py-1 px-1 text-right tabular-nums text-slate-400">
+                              ({fmtCell(schedule.intangiblesOutput!.amortByYear[y])})
+                            </td>
+                          ))}
+                        </tr>
+                      </>
+                    ) : null}
+                    <tr className="border-t border-slate-700/60">
+                      <td className="py-1.5 px-1 text-slate-100 font-bold">Total D&amp;A</td>
+                      {lastHistYear ? <td className="py-1.5 px-1 text-right tabular-nums text-slate-600">—</td> : null}
+                      {projectionYears.map((y) => (
+                        <td key={y} className="py-1.5 px-1 text-right tabular-nums text-slate-100 font-mono font-bold">
+                          {fmtCell(schedule.totalDandaByYear[y])}
+                        </td>
+                      ))}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-[10px] text-slate-600 italic">
+                Enter Capex % and useful life above to see the roll-forward.
+              </p>
+            )}
+          </div>
+
+          {/* Footer note */}
+          <p className="text-[9px] text-slate-600 leading-relaxed">
+            Straight-line depreciation (IB standard). Advanced configuration (per-bucket allocation helper, historical
+            Capex by bucket) is available in the{" "}
+            <span className="text-slate-500 font-medium">Balance Sheet Build → Capex &amp; D&amp;A</span> tab.
           </p>
+
+          {/* Confirm / Apply button */}
+          <div className="border-t border-slate-800 pt-3 flex items-center justify-between gap-3">
+            {dandaConfirmed && schedule?.isConfigured ? (
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold rounded px-2 py-1 bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+                  ✓ D&amp;A Schedule active — feeding depreciation into the model
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDandaConfirmed(false)}
+                  className="text-[9px] text-slate-600 hover:text-slate-400 underline"
+                >
+                  Edit
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={!schedule?.isConfigured}
+                onClick={() => {
+                  if (schedule?.isConfigured) {
+                    setDandaConfirmed(true);
+                    setOpen(false);
+                  }
+                }}
+                className="flex-1 rounded px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {schedule?.isConfigured ? "✓ Confirm &amp; Activate Schedule" : "Configure Capex &amp; depreciation above first"}
+              </button>
+            )}
+          </div>
         </div>
       ) : null}
     </div>
@@ -1262,7 +2274,7 @@ export default function NonOperatingSchedulesPhase2Panel() {
             balanceSheet={balanceSheet}
             lastHistoricYear={lastHistYear}
           />
-          <Phase2AmortizationSchedulePlaceholderCard />
+          <Phase2DandAScheduleBuilder />
           {placeholder && scheduledLines.some((l) => l.lineId === placeholder.lineId) ? (
             <div className="rounded-lg border border-violet-800/40 bg-violet-950/15 p-4 space-y-2">
               <h3 className="text-xs font-semibold text-violet-200">

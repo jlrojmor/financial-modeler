@@ -23,7 +23,8 @@ export function createDefaultDebtTranche(
     trancheName: index === 0 ? "Term loan" : `Debt tranche ${index + 1}`,
     trancheType: "term_debt",
     isEnabled: true,
-    openingBalanceSource: "manual",
+    openingBalanceSource: "detected_historical_bs",
+    openingDebtBucket: "all_funded",
     openingBalanceManual: 0,
     openingHistoricalAllocationPct: 100,
     drawsByYear: emptyYearMap(projectionYears),
@@ -101,6 +102,7 @@ export function debtScheduleBodiesEqual(a: DebtScheduleConfigBodyV1, b: DebtSche
       x.trancheType !== y.trancheType ||
       x.isEnabled !== y.isEnabled ||
       x.openingBalanceSource !== y.openingBalanceSource ||
+      (x.openingDebtBucket ?? "all_funded") !== (y.openingDebtBucket ?? "all_funded") ||
       x.openingBalanceManual !== y.openingBalanceManual ||
       x.openingHistoricalAllocationPct !== y.openingHistoricalAllocationPct ||
       x.interestRateMethod !== y.interestRateMethod ||

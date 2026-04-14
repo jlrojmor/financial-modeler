@@ -3,7 +3,7 @@
  * Debt math stays in debt-schedule-engine.ts only.
  */
 
-import type { DebtTrancheConfigV1 } from "@/types/debt-schedule-v1";
+import type { DebtTrancheConfigV1, DebtTrancheTypeV1 } from "@/types/debt-schedule-v1";
 
 export type DebtScheduleAdvisory = {
   title: string;
@@ -42,13 +42,13 @@ export function getDebtScheduleTrancheAdvisory(tranche: DebtTrancheConfigV1): De
         "Manual-by-year rates fit step-ups, refinancing, or management guidance. Use a single fixed rate when the borrowing cost is stable across the forecast.",
     });
   }
-  if (tranche.trancheType === "revolver") {
+  if (tranche.trancheType === "revolver" || tranche.trancheType === "bank_line") {
     out.push({
-      title: "Revolver",
+      title: "Line of credit",
       source: "Built-in guidance",
       confidencePct: 60,
       reason:
-        "Revolver draws and paydowns are manual in this version. Future phases can add cash-driven draws, minimum cash, and sweep — not circular in v1.",
+        "Revolving and line-of-credit draws and paydowns are manual in this version. Future phases can add cash-driven draws, minimum cash, and sweep — not circular in v1.",
     });
   }
   const draws = Object.values(tranche.drawsByYear).reduce((a, b) => a + (b ?? 0), 0);
@@ -65,4 +65,40 @@ export function getDebtScheduleTrancheAdvisory(tranche: DebtTrancheConfigV1): De
     });
   }
   return out;
+}
+
+/** One- or two-sentence structure hint for the “Start here” onboarding card (deterministic fallback when AI is off). */
+export function getDebtScheduleStartHereStructureRecommendation(params: {
+  shortTerm: number | null;
+  longTerm: number | null;
+}): string {
+  const st = params.shortTerm ?? 0;
+  const lt = params.longTerm ?? 0;
+  if (st > 0 && lt > 0) {
+    return "Suggested structure: one bank line of credit for short-term debt and one bank term loan for long-term debt.";
+  }
+  if (lt > 0 && st <= 0) {
+    return "Suggested structure: one bank term loan starting from your long-term debt balance.";
+  }
+  if (st > 0 && lt <= 0) {
+    return "Suggested structure: one bank line of credit starting from your short-term debt balance.";
+  }
+  return "Add a facility manually and enter an opening balance, or connect historical debt lines on your balance sheet.";
+}
+
+/** Subtle repayment-style hint by facility type (non-blocking). */
+export function getDebtScheduleRepaymentStyleHint(trancheType: DebtTrancheTypeV1): string | null {
+  switch (trancheType) {
+    case "term_loan":
+    case "term_debt":
+    case "mortgage":
+      return "Straight-line principal is a common default for term-style debt; adjust if your loan documents say otherwise.";
+    case "bank_line":
+    case "revolver":
+      return "Lines of credit are often interest-only until cash sweep logic is added; choose “None / interest-only” if that fits.";
+    case "shareholder_loan":
+      return "Shareholder loans vary—confirm repayment terms with your advisor.";
+    default:
+      return null;
+  }
 }

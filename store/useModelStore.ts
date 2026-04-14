@@ -85,6 +85,7 @@ import { displayToStored } from "@/lib/currency-utils";
 import { applyAnchorForecastDriver, applyAnchorHistoricalNature } from "@/lib/cfs-forecast-drivers";
 import { backfillClassificationCompleteness } from "@/lib/classification-completeness";
 import { backfillTaxonomy, applyTaxonomyToRow } from "@/lib/row-taxonomy";
+import { enrichBalanceSheetRowWithDebtMetadata, enrichEntireBalanceSheet } from "@/lib/bs-debt-metadata";
 import { backfillCfsMetadataNature } from "@/lib/cfs-metadata-backfill";
 import { getFinalOperatingSubgroup } from "@/lib/cfs-operating-subgroups";
 
@@ -3118,7 +3119,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
           state.sbcDisclosureEnabled ?? true
         );
       });
-      
+
+      if (statement === "balanceSheet") {
+        recalculatedRows = enrichEntireBalanceSheet(recalculatedRows);
+      }
+
       // Final verification (parent may be nested)
       const finalParentRow = findRowDeep(recalculatedRows, parentId);
       console.log("addChildRow: Final parent row children count:", finalParentRow?.children?.length);
@@ -3143,10 +3148,17 @@ export const useModelStore = create<ModelState & ModelActions>()(
         (statement === "balanceSheet" && row && isCoreBsRow(row.id)) ||
         (statement === "cashFlow" && row && Object.prototype.hasOwnProperty.call(CFS_ANCHOR_HISTORICAL_NATURE, row.id));
       if (row && !isTemplate) {
-        updated = updateRowDeep(updated, rowId, (r) => {
-          const withTax = applyTaxonomyToRow({ ...r, label: trimmed }, statement);
-          return { ...withTax, forecastMetadataStatus: "needs_review" as const, taxonomyStatus: "needs_review" as const };
-        });
+        if (statement === "balanceSheet") {
+          updated = updateRowDeep(updated, rowId, (r) => {
+            const withTax = applyTaxonomyToRow({ ...r, label: trimmed }, statement);
+            return enrichBalanceSheetRowWithDebtMetadata(withTax, updated, -1);
+          });
+        } else {
+          updated = updateRowDeep(updated, rowId, (r) => {
+            const withTax = applyTaxonomyToRow({ ...r, label: trimmed }, statement);
+            return { ...withTax, forecastMetadataStatus: "needs_review" as const, taxonomyStatus: "needs_review" as const };
+          });
+        }
       }
       return { ...state, [statement]: updated };
     });
@@ -3158,6 +3170,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const rowWithTaxonomy = applyTaxonomyToRow(row, statement);
       const currentRows = [...(state[statement] ?? [])];
       currentRows.splice(index, 0, rowWithTaxonomy);
+      if (statement === "balanceSheet") {
+        currentRows[index] = enrichBalanceSheetRowWithDebtMetadata(currentRows[index]!, currentRows, index);
+      }
       // Enforce canonical WC structure: any operating row that resolves to working_capital must live in wc_change.children
       let rowsToUse: Row[] = statement === "cashFlow" ? normalizeWcStructure(currentRows) : currentRows;
 
@@ -3170,7 +3185,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       allYears.forEach((year) => {
         const allStatements = {
           incomeStatement: state.incomeStatement,
-          balanceSheet: state.balanceSheet,
+          balanceSheet: statement === "balanceSheet" ? recalculatedRows : state.balanceSheet,
           cashFlow: statement === "cashFlow" ? recalculatedRows : state.cashFlow,
         };
         const sbcBreakdowns = state.sbcBreakdowns;

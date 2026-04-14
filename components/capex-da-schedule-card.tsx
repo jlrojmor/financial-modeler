@@ -294,6 +294,85 @@ export default function CapexDaScheduleCard() {
   const [section2Open, setSection2Open] = useState(true);
   const [section3Open, setSection3Open] = useState(true);
 
+  // AI suggest state
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiSuggestion, setAiSuggestion] = useState<{ rationaleCapex?: string; rationaleUsefulLife?: string; confidence?: string; suggestedCapexPctRevenue?: number; suggestedUsefulLifeSingle?: number } | null>(null);
+
+  const companyContext = useModelStore((s) => s.companyContext);
+
+  // PP&E gross/split detection
+  const grossPpeLikeRows = useMemo(() => {
+    if (!balanceSheet) return [];
+    return balanceSheet.filter((r) => {
+      if (r.id === "ppe") return false;
+      const lbl = (r.label ?? "").toLowerCase();
+      return (lbl.includes("gross") || lbl.includes("property") || lbl.includes("plant")) &&
+        (lbl.includes("equipment") || lbl.includes("pp&e") || lbl.includes("ppe"));
+    });
+  }, [balanceSheet]);
+  const accumDepLikeRows = useMemo(() => {
+    if (!balanceSheet) return [];
+    return balanceSheet.filter((r) => {
+      const lbl = (r.label ?? "").toLowerCase();
+      return lbl.includes("accumulated") && (lbl.includes("depreciation") || lbl.includes("amortization"));
+    });
+  }, [balanceSheet]);
+  const hasGrossSplitBS = grossPpeLikeRows.length > 0 || accumDepLikeRows.length > 0;
+
+  const lastHistRevenue = useMemo(() => {
+    if (!lastHistYear) return 0;
+    const revRow = incomeStatement?.find((r) => r.id === "rev");
+    return revRow?.values?.[lastHistYear] ?? 0;
+  }, [incomeStatement, lastHistYear]);
+
+  const handleAiSuggest = async (quickStart = false) => {
+    setAiLoading(true);
+    setAiError(null);
+    if (quickStart) setAiSuggestion(null);
+    try {
+      const histCapexPcts = (diagnostics?.capexIntensity ?? []).map((r) => r.capexPctRevenue ?? 0).filter((v) => v > 0);
+      const histPpePcts = (diagnostics?.ppeIntensity ?? []).map((r) => r.ppePctRevenue ?? 0).filter((v) => v > 0);
+      const res = await fetch("/api/ai/capex-da-suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyContext,
+          historicalCapexPctRevenue: histCapexPcts,
+          historicalPpePctRevenue: histPpePcts,
+          lastHistPPE,
+          lastHistRevenue,
+          projectionYears,
+          currencyUnit: unit,
+        }),
+      });
+      const data = (await res.json()) as { suggestion?: { suggestedCapexPctRevenue: number; suggestedUsefulLifeSingle: number; suggestedUsefulLifeByBucket: Record<string, number>; suggestedAllocationPct: Record<string, number>; rationaleCapex: string; rationaleUsefulLife: string; confidence: string }; error?: string };
+      if (data.suggestion) {
+        const s = data.suggestion;
+        setAiSuggestion(s);
+        setCapexForecastMethod("pct_revenue");
+        setCapexPctRevenue(s.suggestedCapexPctRevenue);
+        setPpeUsefulLifeSingle(s.suggestedUsefulLifeSingle);
+        for (const [id, life] of Object.entries(s.suggestedUsefulLifeByBucket)) {
+          setPpeUsefulLifeByBucket(id, life as number);
+        }
+        if (quickStart) {
+          for (const [id, pct] of Object.entries(s.suggestedAllocationPct)) {
+            setCapexBucketAllocationPct(id, pct as number);
+          }
+          const hasBuckets = Object.values(s.suggestedAllocationPct).some((v) => (v as number) > 0);
+          if (hasBuckets) setCapexSplitByBucket(true);
+        }
+      } else {
+        setAiError(data.error ?? "AI suggestion unavailable.");
+      }
+    } catch {
+      setAiError("Failed to reach AI service.");
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   const formatVal = (v: number) => {
     if (v === 0) return "—";
     const d = storedToDisplay(v, unit);
@@ -307,9 +386,47 @@ export default function CapexDaScheduleCard() {
       colorClass="purple"
       defaultExpanded={true}
     >
-      <p className="text-xs text-slate-500 mb-4">
+      <p className="text-xs text-slate-500 mb-3">
         Four sections: (1) Historical diagnostics, (2) Capex forecast setup, (3) D&A setup, (4) Schedule output. Statement links to IS/BS/CF will be connected in a later phase.
       </p>
+
+      {/* Quick Start with AI */}
+      <div className="rounded-lg border border-violet-800/40 bg-violet-950/15 p-3 mb-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-violet-200">✦ Quick Start with AI</p>
+            <p className="text-[11px] text-slate-400 mt-0.5 leading-snug max-w-sm">
+              AI pre-fills Capex %, useful lives per bucket, and allocation weights based on your company profile
+              and historical data. Review and adjust any value after.
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={aiLoading}
+            onClick={() => handleAiSuggest(true)}
+            className="shrink-0 rounded px-4 py-1.5 text-sm font-medium bg-violet-700 hover:bg-violet-600 disabled:opacity-50 text-white transition-colors"
+          >
+            {aiLoading ? "Thinking…" : "AI Suggest All"}
+          </button>
+        </div>
+        {aiError ? (
+          <p className="text-[11px] text-red-400 mt-2">{aiError}</p>
+        ) : aiSuggestion ? (
+          <div className="mt-2 border-t border-violet-800/30 pt-2 space-y-1">
+            <p className="text-[11px] text-violet-300 font-medium">
+              Applied: {aiSuggestion.suggestedCapexPctRevenue?.toFixed(1)}% Capex ·{" "}
+              {aiSuggestion.suggestedUsefulLifeSingle}yr avg life ·{" "}
+              <span className="capitalize">{aiSuggestion.confidence}</span> confidence
+            </p>
+            {aiSuggestion.rationaleCapex ? (
+              <p className="text-[10px] text-slate-400 leading-snug">{aiSuggestion.rationaleCapex}</p>
+            ) : null}
+            {aiSuggestion.rationaleUsefulLife ? (
+              <p className="text-[10px] text-slate-500 leading-snug">{aiSuggestion.rationaleUsefulLife}</p>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
       {/* Section 1 — Historical Diagnostics */}
       <div className="rounded-lg border border-slate-700 bg-slate-900/30 p-3 mb-4">
@@ -443,6 +560,27 @@ export default function CapexDaScheduleCard() {
                     </table>
                   </div>
                 </div>
+
+                {/* E) PP&E net/gross detection notice */}
+                {lastHistPPE === 0 && hasGrossSplitBS ? (
+                  <div className="rounded border border-amber-700/50 bg-amber-950/20 px-3 py-2">
+                    <p className="text-[11px] text-amber-200 font-medium">Gross PP&amp;E / Accumulated Depreciation detected</p>
+                    <p className="text-[10px] text-slate-400 leading-snug mt-1">
+                      Your balance sheet appears to have gross PP&amp;E and accumulated depreciation on separate rows.
+                      The model uses the <strong className="text-slate-300">net PP&amp;E</strong> row (id: <code className="text-[9px]">ppe</code>) as the opening balance — this is the IB standard.
+                      Check your Balance Sheet classification tab to confirm the net row is correctly tagged.
+                    </p>
+                  </div>
+                ) : lastHistPPE === 0 && !hasGrossSplitBS ? (
+                  <div className="rounded border border-amber-700/50 bg-amber-950/20 px-3 py-2">
+                    <p className="text-[11px] text-amber-200 font-medium">No PP&amp;E found in your Balance Sheet</p>
+                    <p className="text-[10px] text-slate-400 leading-snug mt-1">
+                      If your business owns fixed assets, check your Balance Sheet import and classification.
+                      If this is an asset-light business, you can enter a manual opening PP&amp;E value in the Capex section below,
+                      or skip the PP&amp;E schedule entirely.
+                    </p>
+                  </div>
+                ) : null}
               </>
             )}
           </div>
@@ -472,6 +610,22 @@ export default function CapexDaScheduleCard() {
                 <option value="manual">Manual by year</option>
                 <option value="growth">Growth rate</option>
               </select>
+            </div>
+            {/* AI Suggest for Capex % */}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={aiLoading}
+                onClick={() => handleAiSuggest(false)}
+                className="rounded px-2.5 py-1 text-[11px] font-medium bg-violet-800/60 hover:bg-violet-700/70 disabled:opacity-50 text-violet-200 border border-violet-700/50 transition-colors"
+              >
+                {aiLoading ? "Thinking…" : "✦ AI Suggest Capex %"}
+              </button>
+              {aiSuggestion?.suggestedCapexPctRevenue != null ? (
+                <span className="text-[10px] text-violet-300">
+                  AI: {aiSuggestion.suggestedCapexPctRevenue.toFixed(1)}% · {aiSuggestion.rationaleCapex?.slice(0, 80)}
+                </span>
+              ) : null}
             </div>
             {capexForecastMethod === "pct_revenue" && (
               <div>
@@ -653,6 +807,22 @@ export default function CapexDaScheduleCard() {
         {section3Open && (
           <div className="mt-3 pl-5 space-y-4">
             <p className="text-[11px] text-slate-400">Useful life is always required for D&A: one value when forecasting total Capex, or per bucket when using categories in Section 2.</p>
+
+            {/* AI Suggest useful lives */}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={aiLoading}
+                onClick={() => handleAiSuggest(false)}
+                className="rounded px-2.5 py-1 text-[11px] font-medium bg-violet-800/60 hover:bg-violet-700/70 disabled:opacity-50 text-violet-200 border border-violet-700/50 transition-colors"
+              >
+                {aiLoading ? "Thinking…" : "✦ AI Suggest useful lives"}
+              </button>
+              {aiSuggestion?.rationaleUsefulLife ? (
+                <span className="text-[10px] text-violet-300">{aiSuggestion.rationaleUsefulLife.slice(0, 100)}</span>
+              ) : null}
+            </div>
+
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1">PP&E useful life (years)</label>
               {capexSplitByBucket ? (

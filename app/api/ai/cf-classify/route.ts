@@ -34,7 +34,7 @@ RULES:
 DEFINITIONS:
 - working_capital: Operating current assets/liabilities excluding cash and short-term debt (receivables, payables, inventory, prepaid, accrued, deferred revenue, other operating CA/CL).
 - investing: Long-term assets, investments, capitalized costs (PP&E, intangibles, strategic investments, restricted cash, marketable securities if non-current).
-- financing: Debt (short/long-term), equity balances (common stock, APIC, treasury, dividends payable).
+- financing: Debt (short/long-term borrowings, notes payable, bonds, term loans, revolver, current portion of LTD, credit facilities), equity balances (common stock, APIC, treasury, dividends payable). Do not classify notes payable or borrowings as working_capital unless the label clearly indicates trade/operating payables.
 - non_cash: Accounting-only or schedule-handled elsewhere (e.g. goodwill, some other equity, DTA/DTL, ROU assets/liabilities that are not debt).
 
 `;

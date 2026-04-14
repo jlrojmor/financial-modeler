@@ -41,6 +41,24 @@ export interface Row {
   cashFlowBehavior?: "working_capital" | "investing" | "financing" | "non_cash" | "unclassified";
   /** Optional: which schedule owns this row's projections (wc/capex/intangibles/debt). */
   scheduleOwner?: "wc" | "capex" | "intangibles" | "debt" | "none";
+  /**
+   * Balance Sheet: normalized debt classification for Historicals + debt schedule opening detection (persisted).
+   * Lease liabilities are distinct from funded debt unless modeled as finance lease debt elsewhere.
+   */
+  normalizedDebtCategory?:
+    | "debt_short_term"
+    | "debt_long_term"
+    | "debt_current_portion_ltd"
+    | "revolver"
+    | "notes_payable"
+    | "lease_liability_current"
+    | "lease_liability_noncurrent"
+    | "debt_other"
+    | "not_debt";
+  /** True when this line is funded / interest-bearing debt for the debt schedule (excludes typical operating lease liabilities). */
+  bsFundedDebtLine?: boolean;
+  /** Ambiguous debt label or placement — keep in review until user confirms. */
+  bsDebtClassificationAmbiguous?: boolean;
   /** Income Statement: section this row belongs to (for custom rows; template rows have implicit section). operating_expenses = structural parent row for the Operating Expenses block. */
   sectionOwner?: "revenue" | "cogs" | "sga" | "rd" | "other_operating" | "non_operating" | "tax" | "operating_expenses";
   /** Income Statement: true = above EBIT (operating), false = Interest & Other (non-operating). */

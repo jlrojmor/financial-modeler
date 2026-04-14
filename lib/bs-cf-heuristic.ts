@@ -26,13 +26,24 @@ const INVESTING_PATTERNS = [
 /** Financing: debt, borrowings, lease liability (financing), stock, equity (issuance/repurchase). */
 const FINANCING_PATTERNS = [
   "debt",
+  "notes payable",
+  "note payable",
   "borrowing",
+  "borrowings",
   "loan",
   "bond",
+  "revolver",
+  "revolving",
+  "credit facility",
+  "line of credit",
+  "commercial paper",
+  "term loan",
   "lease liability",
   "finance lease",
   "short-term debt",
   "long-term debt",
+  "current portion",
+  "maturities of long",
   "common stock",
   "apic",
   "treasury",
@@ -60,14 +71,15 @@ const WORKING_CAPITAL_PATTERNS = [
  */
 export function suggestCashFlowBehaviorFromLabel(label: string): SuggestedCashFlowBehavior | null {
   const lower = LOWER_LABEL(label);
+  // Financing (debt, notes payable) before working capital so "notes payable" is not WC/AP
+  for (const p of FINANCING_PATTERNS) {
+    if (lower.includes(p)) return "financing";
+  }
   for (const p of WORKING_CAPITAL_PATTERNS) {
     if (lower.includes(p)) return "working_capital";
   }
   for (const p of INVESTING_PATTERNS) {
     if (lower.includes(p)) return "investing";
-  }
-  for (const p of FINANCING_PATTERNS) {
-    if (lower.includes(p)) return "financing";
   }
   return null;
 }

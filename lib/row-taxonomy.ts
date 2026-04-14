@@ -503,7 +503,31 @@ function getFallbackBsTaxonomy(label: string, row: Row): BSTaxonomy {
     return { category: "fixed_asset", type: "asset_investments", label };
   }
 
-  // Current Liabilities
+  // Current Liabilities — debt before generic payables so "notes payable" is not AP
+  if (
+    /short[\s-]term\s*debt|\bst\s*debt\b/.test(lower) ||
+    /short[\s-]term\s*borrow/.test(lower) ||
+    /current\s*portion\s*of\s*(long[\s-]term\s*debt|ltd)\b/.test(lower) ||
+    /current\s*portion\s*of\s*long[\s-]term/.test(lower) ||
+    /\bcpltd\b/.test(lower) ||
+    /current\s*maturit(y|ies)\s+of\s*long[\s-]term/.test(lower) ||
+    /current\s*maturit(y|ies)\s+of\s+ltd\b/.test(lower) ||
+    /current\s*maturit(y|ies)\s+(of\s+)?(long[\s-]term\s*borrow|long[\s-]term\s*debt)/.test(lower) ||
+    /(?<![a-z-])current\s+debt\b/.test(lower) ||
+    /debt\s*due\s*within|debt\s*obligations?\s*due/.test(lower) ||
+    /revolv(er|ing)|\brevolver\b|revolving\s+(credit\s+)?(facility|line)/.test(lower) ||
+    /bank\s*line\s*of\s*credit|line\s*of\s*credit|\bcredit\s+line\b|bank\s*overdraft/.test(lower) ||
+    /commercial\s*paper/.test(lower) ||
+    /current\s*borrow/.test(lower)
+  ) {
+    return { category: "current_liability", type: "liab_short_term_debt", label };
+  }
+  if (/notes?\s*payable|promissory\s*note/.test(lower)) {
+    if (/long[\s-]term|non[\s-]current|senior\s*notes?/.test(lower)) {
+      return { category: "non_current_liability", type: "liab_long_term_debt", label };
+    }
+    return { category: "current_liability", type: "liab_short_term_debt", label };
+  }
   if (/payable|ap\b/.test(lower)) {
     return { category: "current_liability", type: "liab_payables", label };
   }
@@ -513,15 +537,21 @@ function getFallbackBsTaxonomy(label: string, row: Row): BSTaxonomy {
   if (/deferred\s*rev/.test(lower)) {
     return { category: "current_liability", type: "liab_deferred_revenue", label };
   }
-  if (/short.term\s*debt|st\s*debt|current.*(debt|loan|borrow)/.test(lower)) {
-    return { category: "current_liability", type: "liab_short_term_debt", label };
-  }
   if (/current\s*lease|lease.*current/.test(lower)) {
     return { category: "current_liability", type: "liab_current_lease", label };
   }
 
-  // Non-Current Liabilities
-  if (/long.term\s*debt|lt\s*debt|senior\s*note|bond/.test(lower)) {
+  // Non-Current Liabilities (funded debt)
+  if (
+    /long[\s-]term\s*debt|\blt\s*debt\b/.test(lower) ||
+    /long[\s-]term\s*borrow/.test(lower) ||
+    /\bnon[\s-]?current\s+debt\b/.test(lower) ||
+    /bonds?\s*payable|debentures?|senior\s*notes?/.test(lower) ||
+    /\bfunded\s+debt\b|\bbank\s+debt\b|\bsenior\s+debt\b/.test(lower) ||
+    /non[\s-]current\s*borrow/.test(lower) ||
+    (/\bdebt\s*obligations?\b/.test(lower) && !/due\s*within|current\s*portion/.test(lower)) ||
+    (/term\s*loan/.test(lower) && !/current\s*portion/.test(lower))
+  ) {
     return { category: "non_current_liability", type: "liab_long_term_debt", label };
   }
   if (/deferred\s*tax\s*liab/.test(lower)) {
@@ -532,6 +562,20 @@ function getFallbackBsTaxonomy(label: string, row: Row): BSTaxonomy {
   }
   if (/lease\s*obligation|operating\s*lease/.test(lower)) {
     return { category: "non_current_liability", type: "liab_lease_obligations", label };
+  }
+
+  // Ambiguous funded-debt labels: route to debt taxonomy (metadata marks ambiguous)
+  if (
+    /\bborrowings?\b/.test(lower) ||
+    /\bborrow\b/.test(lower) ||
+    /(^|[^a-z])(loan|loans)\s+payable\b/.test(lower) ||
+    (/\bcredit\s+facility\b/.test(lower) && !/revolv/.test(lower)) ||
+    /\bcredit\s*agreement\b/.test(lower)
+  ) {
+    if (/long[\s-]term|non[\s-]current|senior|bond|debenture|funded|bank\s+debt/.test(lower)) {
+      return { category: "non_current_liability", type: "liab_long_term_debt", label };
+    }
+    return { category: "current_liability", type: "liab_short_term_debt", label };
   }
 
   // Equity

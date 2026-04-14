@@ -21,17 +21,32 @@ import WorkingCapitalScheduleCard from "@/components/working-capital-schedule-ca
 import CapexDaScheduleCard from "@/components/capex-da-schedule-card";
 import { getFinalRowClassificationState } from "@/lib/final-row-classification";
 import { buildModelingContext } from "@/lib/modeling-context";
+import { inferBalanceSheetDebtMetadata } from "@/lib/bs-debt-metadata";
 
 // UUID helper
 function uuid() {
   return `id_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
-/** Resolve cash flow behavior: glossary section first, then keyword heuristic, else unclassified. */
+/** Resolve cash flow behavior: funded debt wins over glossary CFO=non-cash; then glossary; then heuristic. */
 function resolveCashFlowBehaviorForNewRow(
   label: string,
-  cfsSection?: string
+  cfsSection?: string,
+  bsCategory?: BalanceSheetCategory | null
 ): "working_capital" | "investing" | "financing" | "non_cash" | "unclassified" {
+  const placement =
+    bsCategory === "current_liabilities" || bsCategory === "non_current_liabilities" ? bsCategory : null;
+  const debtInf = inferBalanceSheetDebtMetadata(label, placement);
+  if (
+    debtInf.normalizedDebtCategory === "lease_liability_current" ||
+    debtInf.normalizedDebtCategory === "lease_liability_noncurrent"
+  ) {
+    return "financing";
+  }
+  if (debtInf.fundedModelDebt && !debtInf.isAmbiguous && debtInf.confidence >= 0.85) {
+    return "financing";
+  }
+
   const sectionMap: Record<string, "operating" | "investing" | "financing"> = {
     CFO: "operating",
     CFI: "investing",
@@ -276,7 +291,8 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
     }
     newRow.scheduleOwner = "none";
     const { behavior: contextBehavior } = suggestCashFlowBehaviorWithContext(item.concept, modelingProfile ?? null);
-    newRow.cashFlowBehavior = contextBehavior ?? resolveCashFlowBehaviorForNewRow(item.concept, cfsSection ?? undefined);
+    newRow.cashFlowBehavior =
+      contextBehavior ?? resolveCashFlowBehaviorForNewRow(item.concept, cfsSection ?? undefined, category);
     insertRow("balanceSheet", insertIndex, newRow);
   };
 
@@ -318,7 +334,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       }
     }
     newRow.scheduleOwner = "none";
-    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, matchResult?.matchedConcept?.cfsSection);
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(
+      label,
+      matchResult?.matchedConcept?.cfsSection,
+      selectedCategory
+    );
     insertRow("balanceSheet", insertIndex, newRow);
     setNewItemLabel("");
     setShowAddDialog(false);
@@ -695,7 +715,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       }
     }
     newRow.scheduleOwner = "none";
-    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, caMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(
+      label,
+      caMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection,
+      "current_assets"
+    );
     insertRow("balanceSheet", insertIndex, newRow);
     setNewCALabel("");
     setShowAddCADialog(false);
@@ -775,7 +799,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       }
     }
     newRow.scheduleOwner = "none";
-    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, nclMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(
+      label,
+      nclMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection,
+      "non_current_liabilities"
+    );
     insertRow("balanceSheet", insertIndex, newRow);
     setNewNCLLabel("");
     setShowAddNCLDialog(false);
@@ -829,7 +857,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       }
     }
     newRow.scheduleOwner = "none";
-    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, equityMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(
+      label,
+      equityMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection,
+      "equity"
+    );
     insertRow("balanceSheet", insertIndex, newRow);
     setNewEquityLabel("");
     setShowAddEquityDialog(false);
@@ -870,7 +902,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       }
     }
     newRow.scheduleOwner = "none";
-    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, clMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(
+      label,
+      clMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection,
+      "current_liabilities"
+    );
     insertRow("balanceSheet", insertIndex, newRow);
     setNewCLLabel("");
     setShowAddCLDialog(false);
@@ -911,7 +947,11 @@ export default function BalanceSheetBuilderUnified({ stepId }: { stepId?: "histo
       }
     }
     newRow.scheduleOwner = "none";
-    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(label, faMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection);
+    newRow.cashFlowBehavior = resolveCashFlowBehaviorForNewRow(
+      label,
+      faMatchResult?.matchedConcept?.cfsSection ?? findGlossaryItem(trimmed)?.cfsSection,
+      "fixed_assets"
+    );
     insertRow("balanceSheet", insertIndex, newRow);
     setNewFALabel("");
     setShowAddFADialog(false);

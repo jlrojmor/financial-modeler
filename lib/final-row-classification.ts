@@ -63,7 +63,9 @@ const STANDARD_BS_PATTERNS: string[] = [
   "deferred tax assets", "deferred tax liabilities", "property, plant", "ppe", "goodwill",
   "intangible assets", "right-of-use", "rou assets", "lease assets",
   "preferred stock", "treasury stock", "accumulated other comprehensive", "aoci", "other comprehensive income",
-  "long-term debt", "short-term debt", "lease liabilities", "accounts payable", "accrued",
+  "long-term debt", "short-term debt", "current portion of long-term debt", "current maturities",
+  "notes payable", "borrowings", "credit facility", "revolving", "revolver", "term loan", "bonds payable",
+  "lease liabilities", "accounts payable", "accrued",
   "deferred revenue", "retained earnings", "common stock", "additional paid-in", "apic",
 ];
 const STANDARD_CFS_PATTERNS: string[] = [

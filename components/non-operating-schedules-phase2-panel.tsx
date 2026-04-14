@@ -229,6 +229,7 @@ function Phase2DandAScheduleBuilder() {
   const [aiSuggestion, setAiSuggestion] = useState<CapexDaAiSuggestion | null>(null);
   const [ppeSkipped, setPpeSkipped] = useState(false);
   const [manualPpe, setManualPpe] = useState<string>("");
+  const [showBucketBreakdown, setShowBucketBreakdown] = useState(false);
 
   const meta = useModelStore((s) => s.meta);
   const balanceSheet = useModelStore((s) => s.balanceSheet ?? []);
@@ -456,9 +457,12 @@ function Phase2DandAScheduleBuilder() {
 
     let dandaByYear: Record<string, number>;
     let ppeEndByYear: Record<string, number>;
+    let byBucket: Record<string, import("@/lib/capex-da-engine").CapexBucketSchedule> | null = null;
+    let bucketIdsForDisplay: string[] = [];
 
     if (capexSplitByBucket) {
       const allBucketIds = [...CAPEX_DEFAULT_BUCKET_IDS, ...(capexCustomBucketIds ?? [])];
+      bucketIdsForDisplay = allBucketIds;
       const landDisplay = lastHistYear && capexHelperPpeByBucketByYear?.["cap_b1"]?.[lastHistYear];
       const initialLand =
         landDisplay != null && typeof landDisplay === "number" && !Number.isNaN(landDisplay)
@@ -476,6 +480,7 @@ function Phase2DandAScheduleBuilder() {
       });
       dandaByYear = bucketOut.totalDandaByYear;
       ppeEndByYear = bucketOut.totalPpeByYear;
+      byBucket = bucketOut.byBucket;
     } else {
       const daOut = computeCapexDaSchedule(capexEngineInput);
       dandaByYear = daOut.dandaByYear;
@@ -522,6 +527,8 @@ function Phase2DandAScheduleBuilder() {
       intangiblesOutput,
       totalDandaByYear,
       isConfigured,
+      byBucket,
+      bucketIdsForDisplay,
     };
   }, [
     projectionYears,
@@ -554,13 +561,24 @@ function Phase2DandAScheduleBuilder() {
 
   const summaryText = schedule?.isConfigured
     ? (() => {
-        const values = projectionYears.map((y) => schedule.totalDandaByYear[y] ?? 0).filter((v) => v > 0);
-        if (values.length === 0) return null;
-        const minV = Math.min(...values);
-        const maxV = Math.max(...values);
-        const fmt = (v: number) =>
-          `${storedToDisplay(v, currencyUnit).toLocaleString(undefined, { maximumFractionDigits: 0 })} ${unitLabel}`;
-        return minV === maxV ? `D&A: ${fmt(minV)}/yr` : `D&A: ${fmt(minV)}–${fmt(maxV)}/yr`;
+        const dandaVals = projectionYears.map((y) => schedule.totalDandaByYear[y] ?? 0).filter((v) => v > 0);
+        const capexVals = projectionYears.map((y) => schedule.totalCapexByYear[y] ?? 0).filter((v) => v > 0);
+        if (dandaVals.length === 0 && capexVals.length === 0) return null;
+        const fmtNum = (v: number) =>
+          storedToDisplay(v, currencyUnit).toLocaleString(undefined, { maximumFractionDigits: 0 });
+        const dandaMin = dandaVals.length ? Math.min(...dandaVals) : 0;
+        const dandaMax = dandaVals.length ? Math.max(...dandaVals) : 0;
+        const capexAvg = capexVals.length
+          ? capexVals.reduce((a, b) => a + b, 0) / capexVals.length
+          : 0;
+        const dandaPart =
+          dandaVals.length === 0
+            ? ""
+            : dandaMin === dandaMax
+            ? `D&A: ${fmtNum(dandaMin)} ${unitLabel}/yr`
+            : `D&A: ${fmtNum(dandaMin)}–${fmtNum(dandaMax)} ${unitLabel}/yr`;
+        const capexPart = capexAvg > 0 ? `Capex: ~${fmtNum(capexAvg)} ${unitLabel}/yr` : "";
+        return [capexPart, dandaPart].filter(Boolean).join(" · ");
       })()
     : null;
 
@@ -1112,7 +1130,19 @@ function Phase2DandAScheduleBuilder() {
                       ))}
                     </tr>
                     <tr>
-                      <td className="py-1 px-1 text-slate-500 text-[10px] pl-4">+ Capex</td>
+                      <td className="py-1 px-1 text-[10px] pl-4">
+                        <button
+                          type="button"
+                          onClick={() => setShowBucketBreakdown((v) => !v)}
+                          className="flex items-center gap-1 text-slate-400 hover:text-slate-200 transition-colors"
+                          title={schedule.byBucket ? "Toggle bucket breakdown" : undefined}
+                        >
+                          <span>+ Capex</span>
+                          {schedule.byBucket ? (
+                            <span className="text-slate-600 text-[9px]">{showBucketBreakdown ? "▲" : "▼"}</span>
+                          ) : null}
+                        </button>
+                      </td>
                       {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}
                       {projectionYears.map((y) => (
                         <td key={y} className="py-1 px-1 text-right tabular-nums text-slate-400">
@@ -1120,6 +1150,32 @@ function Phase2DandAScheduleBuilder() {
                         </td>
                       ))}
                     </tr>
+                    {/* Per-bucket Capex breakdown (collapsed by default) */}
+                    {showBucketBreakdown && schedule.byBucket
+                      ? schedule.bucketIdsForDisplay
+                          .filter((id) => {
+                            const b = schedule.byBucket![id];
+                            return b && projectionYears.some((y) => (b.capexByYear[y] ?? 0) > 0);
+                          })
+                          .map((id) => {
+                            const b = schedule.byBucket![id]!;
+                            const label = CAPEX_BUCKET_LABELS[id] ?? id;
+                            const pct = capexBucketAllocationPct?.[id];
+                            return (
+                              <tr key={id} className="bg-slate-900/30">
+                                <td className="py-0.5 px-1 text-[9px] text-slate-600 pl-7">
+                                  {label}{pct != null ? ` (${pct}%)` : ""}
+                                </td>
+                                {lastHistYear ? <td className="py-0.5 px-1 text-right text-slate-700 text-[9px]">—</td> : null}
+                                {projectionYears.map((y) => (
+                                  <td key={y} className="py-0.5 px-1 text-right tabular-nums text-slate-600 text-[9px]">
+                                    {fmtCell(b.capexByYear[y])}
+                                  </td>
+                                ))}
+                              </tr>
+                            );
+                          })
+                      : null}
                     <tr>
                       <td className="py-1 px-1 text-slate-500 text-[10px] pl-4">− Depreciation</td>
                       {lastHistYear ? <td className="py-1 px-1 text-right tabular-nums text-slate-600">—</td> : null}
@@ -1199,7 +1255,7 @@ function Phase2DandAScheduleBuilder() {
             {dandaConfirmed && schedule?.isConfigured ? (
               <div className="flex items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[10px] font-semibold rounded px-2 py-1 bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
-                  ✓ D&amp;A Schedule active — feeding depreciation into the model
+                  ✓ PP&amp;E &amp; D&amp;A schedule active — depreciation flowing into model
                 </span>
                 <button
                   type="button"
@@ -1221,7 +1277,7 @@ function Phase2DandAScheduleBuilder() {
                 }}
                 className="flex-1 rounded px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
-                {schedule?.isConfigured ? "✓ Confirm &amp; Activate Schedule" : "Configure Capex &amp; depreciation above first"}
+                {schedule?.isConfigured ? "✓ Confirm & Activate Schedule" : "Configure Capex & depreciation above first"}
               </button>
             )}
           </div>

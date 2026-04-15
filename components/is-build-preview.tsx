@@ -73,6 +73,8 @@ import {
   resolveCogsPctOfRevenueByYear,
 } from "@/lib/cogs-forecast-v1";
 import NonOperatingPhase2Preview from "@/components/non-operating-phase2-preview";
+import WcDriversPreview from "@/components/wc-drivers-preview";
+import OtherBsItemsPreview from "@/components/other-bs-items-preview";
 
 /** Driver preview: unit counts only — no statement K/M scaling. */
 function formatVolumeDriverCount(n: number): string {
@@ -1919,6 +1921,14 @@ export default function ISBuildPreview() {
 
   if (forecastDriversSubTab === "non_operating_schedules") {
     return <NonOperatingPhase2Preview />;
+  }
+
+  if (forecastDriversSubTab === "wc_drivers") {
+    return <WcDriversPreview />;
+  }
+
+  if (forecastDriversSubTab === "other_bs_items") {
+    return <OtherBsItemsPreview />;
   }
 
   if (forecastDriversSubTab === "operating_costs") {

@@ -82,6 +82,17 @@ import {
 } from "@/lib/capex-da-engine";
 import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
 import { displayToStored } from "@/lib/currency-utils";
+import { computeDebtScheduleEngine } from "@/lib/debt-schedule-engine";
+import { computeInterestIncomeSchedule } from "@/lib/interest-income-engine";
+import { computeTaxSchedule } from "@/lib/tax-schedule-engine";
+import { collectNonOperatingIncomeLeaves, findIsRowById, defaultPhase2Bucket } from "@/lib/non-operating-phase2-lines";
+import { projectAppliedNonOperatingDirectBody } from "@/lib/non-operating-phase2-direct-preview";
+import { collectOperatingExpenseLeafLines } from "@/lib/opex-line-ingest";
+import { getOpExLineLastHistoricalValue, projectOpExLineForecastByYear } from "@/lib/opex-forecast-projection-v1";
+import { computeEquityRollforward, defaultEquityRollforwardConfig } from "@/lib/equity-rollforward-engine";
+import type { EquityRollforwardConfig } from "@/lib/equity-rollforward-engine";
+import { getOtherBsItems, computeOtherBsProjectedBalances } from "@/lib/other-bs-items";
+import { computeProjectedEbitByYear, computeProjectedRevCogs } from "@/lib/projected-ebit";
 import { applyAnchorForecastDriver, applyAnchorHistoricalNature } from "@/lib/cfs-forecast-drivers";
 import { backfillClassificationCompleteness } from "@/lib/classification-completeness";
 import { backfillTaxonomy, applyTaxonomyToRow } from "@/lib/row-taxonomy";
@@ -522,7 +533,18 @@ export type ForecastDriversSubTab =
   | "operating_costs"
   | "non_operating_schedules"
   | "wc_drivers"
+  | "other_bs_items"
   | "financing_taxes";
+
+/** Forecast method for a single "Other BS Item" (non-WC, non-schedule-managed BS row). */
+export type OtherBsItemMethod = "flat" | "growth_pct" | "pct_revenue" | "manual";
+export type OtherBsItemForecast = {
+  method: OtherBsItemMethod;
+  growthPct: number;
+  growthPctByYear: Record<string, number>;
+  pctRevenue: number;
+  manualByYear: Record<string, number>;
+};
 
 export type ModelMeta = {
   companyName: string;
@@ -647,6 +669,59 @@ export type ProjectSnapshot = {
   nonOperatingPhase2InterestExpenseScheduleByLine?: Record<string, InterestExpenseScheduleLinePersist>;
   /** Phase 2 debt schedule (applied drives preview interest + debt roll-forward). */
   debtSchedulePhase2Persist?: DebtSchedulePhase2Persist;
+
+  // ── Interest Income Schedule (Non-Op Phase 2) ─────────────────────
+  intIncomeMethod: "pct_avg_cash" | "flat_value" | "growth_pct" | "manual_by_year";
+  intIncomeRatePct: number;
+  intIncomeFlatValue: number;
+  intIncomeGrowthPct: number;
+  intIncomeManualByYear: Record<string, number>;
+  intIncomeScheduleConfirmed: boolean;
+
+  // ── D&A Schedule confirmed flag (Non-Op Phase 2) ──────────────────
+  dandaScheduleConfirmed: boolean;
+
+  // ── WC Drivers confirmed flag (Forecast Drivers WC tab) ───────────
+  wcDriversConfirmed: boolean;
+
+  // ── Other BS Items (Forecast Drivers Phase 2) ──────────────────────
+  otherBsForecastByItemId: Record<string, OtherBsItemForecast>;
+  otherBsConfirmed: boolean;
+
+  // ── Equity Roll-Forward (Forecast Drivers Phase 3) ─────────────────
+  equityDividendMethod: "none" | "payout_ratio" | "fixed_amount" | "manual_by_year";
+  equityDividendPayoutRatio: number;
+  equityDividendFixedAmount: number;
+  equityDividendManualByYear: Record<string, number>;
+  equityBuybackMethod: "none" | "fixed_amount" | "pct_net_income" | "pct_fcf" | "manual_by_year";
+  equityBuybackFixedAmount: number;
+  equityBuybackPctNetIncome: number;
+  equityBuybackManualByYear: Record<string, number>;
+  equitySharesReissuedMethod: "none" | "fixed_amount" | "manual_by_year";
+  equitySharesReissuedFixedAmount: number;
+  equitySharesReissuedManualByYear: Record<string, number>;
+  equityIssuanceMethod: "none" | "fixed_amount" | "manual_by_year";
+  equityIssuanceFixedAmount: number;
+  equityIssuanceManualByYear: Record<string, number>;
+  equityOptionProceedsMethod: "none" | "fixed_amount" | "pct_revenue" | "manual_by_year";
+  equityOptionProceedsFixedAmount: number;
+  equityOptionProceedsManualByYear: Record<string, number>;
+  equityEsppMethod: "none" | "fixed_amount" | "manual_by_year";
+  equityEsppFixedAmount: number;
+  equityEsppManualByYear: Record<string, number>;
+  equitySbcMethod: "auto" | "flat_hist" | "pct_revenue" | "manual_by_year";
+  equityManualSbcByYear: Record<string, number>;
+  equitySbcPctRevenue: number;
+  equityRollforwardConfirmed: boolean;
+
+  // ── Tax Schedule (Non-Op Phase 2) ─────────────────────────────────
+  taxForecastMethod: "flat_rate" | "rate_by_year" | "flat_expense";
+  taxEffectiveRatePct: number;
+  taxRateByYear: Record<string, number>;
+  taxFlatExpense: number;
+  taxAllowBenefit: boolean;
+  taxScheduleConfirmed: boolean;
+
   /** Company Context (step before Historicals): user inputs, AI context, overrides. */
   companyContext: CompanyContext;
 };
@@ -789,6 +864,53 @@ export type ModelState = {
   nonOperatingPhase2ClassificationLockedByLine: Record<string, boolean>;
   nonOperatingPhase2InterestExpenseScheduleByLine: Record<string, InterestExpenseScheduleLinePersist>;
   debtSchedulePhase2Persist: DebtSchedulePhase2Persist;
+
+  // ── Interest Income Schedule ──────────────────────────────────────
+  intIncomeMethod: "pct_avg_cash" | "flat_value" | "growth_pct" | "manual_by_year";
+  intIncomeRatePct: number;
+  intIncomeFlatValue: number;
+  intIncomeGrowthPct: number;
+  intIncomeManualByYear: Record<string, number>;
+  intIncomeScheduleConfirmed: boolean;
+  dandaScheduleConfirmed: boolean;
+  wcDriversConfirmed: boolean;
+  otherBsForecastByItemId: Record<string, OtherBsItemForecast>;
+  otherBsConfirmed: boolean;
+
+  // ── Equity Roll-Forward ───────────────────────────────────────────
+  equityDividendMethod: "none" | "payout_ratio" | "fixed_amount" | "manual_by_year";
+  equityDividendPayoutRatio: number;
+  equityDividendFixedAmount: number;
+  equityDividendManualByYear: Record<string, number>;
+  equityBuybackMethod: "none" | "fixed_amount" | "pct_net_income" | "pct_fcf" | "manual_by_year";
+  equityBuybackFixedAmount: number;
+  equityBuybackPctNetIncome: number;
+  equityBuybackManualByYear: Record<string, number>;
+  equitySharesReissuedMethod: "none" | "fixed_amount" | "manual_by_year";
+  equitySharesReissuedFixedAmount: number;
+  equitySharesReissuedManualByYear: Record<string, number>;
+  equityIssuanceMethod: "none" | "fixed_amount" | "manual_by_year";
+  equityIssuanceFixedAmount: number;
+  equityIssuanceManualByYear: Record<string, number>;
+  equityOptionProceedsMethod: "none" | "fixed_amount" | "pct_revenue" | "manual_by_year";
+  equityOptionProceedsFixedAmount: number;
+  equityOptionProceedsManualByYear: Record<string, number>;
+  equityEsppMethod: "none" | "fixed_amount" | "manual_by_year";
+  equityEsppFixedAmount: number;
+  equityEsppManualByYear: Record<string, number>;
+  equitySbcMethod: "auto" | "flat_hist" | "pct_revenue" | "manual_by_year";
+  equityManualSbcByYear: Record<string, number>;
+  equitySbcPctRevenue: number;
+  equityRollforwardConfirmed: boolean;
+
+  // ── Tax Schedule ──────────────────────────────────────────────────
+  taxForecastMethod: "flat_rate" | "rate_by_year" | "flat_expense";
+  taxEffectiveRatePct: number;
+  taxRateByYear: Record<string, number>;
+  taxFlatExpense: number;
+  taxAllowBenefit: boolean;
+  taxScheduleConfirmed: boolean;
+
   /** Company Context step: user inputs, AI context, overrides. */
   companyContext: CompanyContext;
 };
@@ -1015,6 +1137,59 @@ export type ModelActions = {
   setNonOperatingPhase2DirectLine: (lineId: string, value: NonOperatingPhase2DirectLinePersist) => void;
   setNonOperatingPhase2InterestExpenseSchedule: (lineId: string, value: InterestExpenseScheduleLinePersist) => void;
   setDebtSchedulePhase2Persist: (value: DebtSchedulePhase2Persist) => void;
+
+  // Interest Income Schedule setters
+  setIntIncomeMethod: (method: "pct_avg_cash" | "flat_value" | "growth_pct" | "manual_by_year") => void;
+  setIntIncomeRatePct: (pct: number) => void;
+  setIntIncomeFlatValue: (value: number) => void;
+  setIntIncomeGrowthPct: (pct: number) => void;
+  setIntIncomeManualByYear: (year: string, value: number) => void;
+  setIntIncomeScheduleConfirmed: (confirmed: boolean) => void;
+
+  // D&A Schedule confirmed setter
+  setDandaScheduleConfirmed: (confirmed: boolean) => void;
+
+  // WC Drivers confirmed setter
+  setWcDriversConfirmed: (confirmed: boolean) => void;
+
+  // Other BS Items setters
+  setOtherBsForecast: (itemId: string, patch: Partial<OtherBsItemForecast>) => void;
+  setOtherBsConfirmed: (confirmed: boolean) => void;
+
+  // Equity Roll-Forward setters
+  setEquityDividendMethod: (method: "none" | "payout_ratio" | "fixed_amount" | "manual_by_year") => void;
+  setEquityDividendPayoutRatio: (pct: number) => void;
+  setEquityDividendFixedAmount: (value: number) => void;
+  setEquityDividendManualByYear: (year: string, value: number) => void;
+  setEquityBuybackMethod: (method: "none" | "fixed_amount" | "pct_net_income" | "pct_fcf" | "manual_by_year") => void;
+  setEquityBuybackFixedAmount: (value: number) => void;
+  setEquityBuybackPctNetIncome: (pct: number) => void;
+  setEquityBuybackManualByYear: (year: string, value: number) => void;
+  setEquitySharesReissuedMethod: (method: "none" | "fixed_amount" | "manual_by_year") => void;
+  setEquitySharesReissuedFixedAmount: (value: number) => void;
+  setEquitySharesReissuedManualByYear: (year: string, value: number) => void;
+  setEquityIssuanceMethod: (method: "none" | "fixed_amount" | "manual_by_year") => void;
+  setEquityIssuanceFixedAmount: (value: number) => void;
+  setEquityIssuanceManualByYear: (year: string, value: number) => void;
+  setEquityOptionProceedsMethod: (method: "none" | "fixed_amount" | "pct_revenue" | "manual_by_year") => void;
+  setEquityOptionProceedsFixedAmount: (value: number) => void;
+  setEquityOptionProceedsManualByYear: (year: string, value: number) => void;
+  setEquityEsppMethod: (method: "none" | "fixed_amount" | "manual_by_year") => void;
+  setEquityEsppFixedAmount: (value: number) => void;
+  setEquityEsppManualByYear: (year: string, value: number) => void;
+  setEquitySbcMethod: (method: "auto" | "flat_hist" | "pct_revenue" | "manual_by_year") => void;
+  setEquityManualSbcByYear: (year: string, value: number) => void;
+  setEquitySbcPctRevenue: (pct: number) => void;
+  setEquityRollforwardConfirmed: (confirmed: boolean) => void;
+
+  // Tax Schedule setters
+  setTaxForecastMethod: (method: "flat_rate" | "rate_by_year" | "flat_expense") => void;
+  setTaxEffectiveRatePct: (pct: number) => void;
+  setTaxRateByYear: (year: string, pct: number) => void;
+  setTaxFlatExpense: (value: number) => void;
+  setTaxAllowBenefit: (allow: boolean) => void;
+  setTaxScheduleConfirmed: (confirmed: boolean) => void;
+
   mergeNonOperatingPhase2AiSuggestions: (suggestions: NonOperatingPhase2AiLineSuggestion[]) => void;
   setNonOperatingPhase2ClassificationLocked: (lineId: string, locked: boolean) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
@@ -1187,6 +1362,53 @@ const defaultState: ModelState = {
   nonOperatingPhase2ClassificationLockedByLine: {},
   nonOperatingPhase2InterestExpenseScheduleByLine: {},
   debtSchedulePhase2Persist: defaultDebtSchedulePhase2Persist(),
+
+  // Interest Income Schedule defaults
+  intIncomeMethod: "pct_avg_cash",
+  intIncomeRatePct: 4.5,
+  intIncomeFlatValue: 0,
+  intIncomeGrowthPct: 0,
+  intIncomeManualByYear: {},
+  intIncomeScheduleConfirmed: false,
+  dandaScheduleConfirmed: false,
+  wcDriversConfirmed: false,
+  otherBsForecastByItemId: {},
+  otherBsConfirmed: false,
+
+  // Equity Roll-Forward defaults
+  equityDividendMethod: "none",
+  equityDividendPayoutRatio: 30,
+  equityDividendFixedAmount: 0,
+  equityDividendManualByYear: {},
+  equityBuybackMethod: "none",
+  equityBuybackFixedAmount: 0,
+  equityBuybackPctNetIncome: 0,
+  equityBuybackManualByYear: {},
+  equitySharesReissuedMethod: "none",
+  equitySharesReissuedFixedAmount: 0,
+  equitySharesReissuedManualByYear: {},
+  equityIssuanceMethod: "none",
+  equityIssuanceFixedAmount: 0,
+  equityIssuanceManualByYear: {},
+  equityOptionProceedsMethod: "none",
+  equityOptionProceedsFixedAmount: 0,
+  equityOptionProceedsManualByYear: {},
+  equityEsppMethod: "none",
+  equityEsppFixedAmount: 0,
+  equityEsppManualByYear: {},
+  equitySbcMethod: "auto",
+  equityManualSbcByYear: {},
+  equitySbcPctRevenue: 0,
+  equityRollforwardConfirmed: false,
+
+  // Tax Schedule defaults
+  taxForecastMethod: "flat_rate",
+  taxEffectiveRatePct: 28,
+  taxRateByYear: {},
+  taxFlatExpense: 0,
+  taxAllowBenefit: false,
+  taxScheduleConfirmed: false,
+
   companyContext: getDefaultCompanyContext(),
 };
 
@@ -1252,7 +1474,7 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     capexHistoricByBucketByYear: state.capexHistoricByBucketByYear ?? {},
     capexHelperPpeByBucketByYear: state.capexHelperPpeByBucketByYear ?? {},
     capexIncludeInAllocationByBucket: state.capexIncludeInAllocationByBucket ?? {},
-    capexModelIntangibles: true,
+    capexModelIntangibles: state.capexModelIntangibles ?? true,
     intangiblesForecastMethod: (String(state.intangiblesForecastMethod) === "growth" ? "pct_revenue" : state.intangiblesForecastMethod) ?? "pct_revenue",
     intangiblesAmortizationLifeYears: state.intangiblesAmortizationLifeYears ?? 7,
     intangiblesPctRevenue: state.intangiblesPctRevenue ?? 0,
@@ -1267,6 +1489,50 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     nonOperatingPhase2ClassificationLockedByLine: state.nonOperatingPhase2ClassificationLockedByLine ?? {},
     nonOperatingPhase2InterestExpenseScheduleByLine: state.nonOperatingPhase2InterestExpenseScheduleByLine ?? {},
     debtSchedulePhase2Persist: state.debtSchedulePhase2Persist ?? defaultDebtSchedulePhase2Persist(),
+
+    intIncomeMethod: state.intIncomeMethod ?? "pct_avg_cash",
+    intIncomeRatePct: state.intIncomeRatePct ?? 4.5,
+    intIncomeFlatValue: state.intIncomeFlatValue ?? 0,
+    intIncomeGrowthPct: state.intIncomeGrowthPct ?? 0,
+    intIncomeManualByYear: state.intIncomeManualByYear ?? {},
+    intIncomeScheduleConfirmed: state.intIncomeScheduleConfirmed ?? false,
+    dandaScheduleConfirmed: state.dandaScheduleConfirmed ?? false,
+    wcDriversConfirmed: state.wcDriversConfirmed ?? false,
+    otherBsForecastByItemId: state.otherBsForecastByItemId ?? {},
+    otherBsConfirmed: state.otherBsConfirmed ?? false,
+
+    equityDividendMethod: state.equityDividendMethod ?? "none",
+    equityDividendPayoutRatio: state.equityDividendPayoutRatio ?? 30,
+    equityDividendFixedAmount: state.equityDividendFixedAmount ?? 0,
+    equityDividendManualByYear: state.equityDividendManualByYear ?? {},
+    equityBuybackMethod: state.equityBuybackMethod ?? "none",
+    equityBuybackFixedAmount: state.equityBuybackFixedAmount ?? 0,
+    equityBuybackPctNetIncome: state.equityBuybackPctNetIncome ?? 0,
+    equityBuybackManualByYear: state.equityBuybackManualByYear ?? {},
+    equitySharesReissuedMethod: state.equitySharesReissuedMethod ?? "none",
+    equitySharesReissuedFixedAmount: state.equitySharesReissuedFixedAmount ?? 0,
+    equitySharesReissuedManualByYear: state.equitySharesReissuedManualByYear ?? {},
+    equityIssuanceMethod: state.equityIssuanceMethod ?? "none",
+    equityIssuanceFixedAmount: state.equityIssuanceFixedAmount ?? 0,
+    equityIssuanceManualByYear: state.equityIssuanceManualByYear ?? {},
+    equityOptionProceedsMethod: state.equityOptionProceedsMethod ?? "none",
+    equityOptionProceedsFixedAmount: state.equityOptionProceedsFixedAmount ?? 0,
+    equityOptionProceedsManualByYear: state.equityOptionProceedsManualByYear ?? {},
+    equityEsppMethod: state.equityEsppMethod ?? "none",
+    equityEsppFixedAmount: state.equityEsppFixedAmount ?? 0,
+    equityEsppManualByYear: state.equityEsppManualByYear ?? {},
+    equitySbcMethod: state.equitySbcMethod ?? "auto",
+    equityManualSbcByYear: state.equityManualSbcByYear ?? {},
+    equitySbcPctRevenue: state.equitySbcPctRevenue ?? 0,
+    equityRollforwardConfirmed: state.equityRollforwardConfirmed ?? false,
+
+    taxForecastMethod: state.taxForecastMethod ?? "flat_rate",
+    taxEffectiveRatePct: state.taxEffectiveRatePct ?? 28,
+    taxRateByYear: state.taxRateByYear ?? {},
+    taxFlatExpense: state.taxFlatExpense ?? 0,
+    taxAllowBenefit: state.taxAllowBenefit ?? false,
+    taxScheduleConfirmed: state.taxScheduleConfirmed ?? false,
+
     companyContext: state.companyContext ?? getDefaultCompanyContext(),
   };
 }
@@ -1374,7 +1640,7 @@ function applyProjectSnapshot(
     capexHistoricByBucketByYear: snapshot.capexHistoricByBucketByYear ?? {},
     capexHelperPpeByBucketByYear: snapshot.capexHelperPpeByBucketByYear ?? {},
     capexIncludeInAllocationByBucket: snapshot.capexIncludeInAllocationByBucket ?? {},
-    capexModelIntangibles: true,
+    capexModelIntangibles: snapshot.capexModelIntangibles ?? true,
     intangiblesForecastMethod: (String(snapshot.intangiblesForecastMethod) === "growth" ? "pct_revenue" : snapshot.intangiblesForecastMethod) ?? "pct_revenue",
     intangiblesAmortizationLifeYears: snapshot.intangiblesAmortizationLifeYears ?? 7,
     intangiblesPctRevenue: snapshot.intangiblesPctRevenue ?? 0,
@@ -1389,6 +1655,50 @@ function applyProjectSnapshot(
     nonOperatingPhase2ClassificationLockedByLine: snapshot.nonOperatingPhase2ClassificationLockedByLine ?? {},
     nonOperatingPhase2InterestExpenseScheduleByLine: snapshot.nonOperatingPhase2InterestExpenseScheduleByLine ?? {},
     debtSchedulePhase2Persist: snapshot.debtSchedulePhase2Persist ?? defaultDebtSchedulePhase2Persist(),
+
+    intIncomeMethod: snapshot.intIncomeMethod ?? "pct_avg_cash",
+    intIncomeRatePct: snapshot.intIncomeRatePct ?? 4.5,
+    intIncomeFlatValue: snapshot.intIncomeFlatValue ?? 0,
+    intIncomeGrowthPct: snapshot.intIncomeGrowthPct ?? 0,
+    intIncomeManualByYear: snapshot.intIncomeManualByYear ?? {},
+    intIncomeScheduleConfirmed: snapshot.intIncomeScheduleConfirmed ?? false,
+    dandaScheduleConfirmed: snapshot.dandaScheduleConfirmed ?? false,
+    wcDriversConfirmed: snapshot.wcDriversConfirmed ?? false,
+    otherBsForecastByItemId: snapshot.otherBsForecastByItemId ?? {},
+    otherBsConfirmed: snapshot.otherBsConfirmed ?? false,
+
+    equityDividendMethod: snapshot.equityDividendMethod ?? "none",
+    equityDividendPayoutRatio: snapshot.equityDividendPayoutRatio ?? 30,
+    equityDividendFixedAmount: snapshot.equityDividendFixedAmount ?? 0,
+    equityDividendManualByYear: snapshot.equityDividendManualByYear ?? {},
+    equityBuybackMethod: snapshot.equityBuybackMethod ?? "none",
+    equityBuybackFixedAmount: snapshot.equityBuybackFixedAmount ?? 0,
+    equityBuybackPctNetIncome: snapshot.equityBuybackPctNetIncome ?? 0,
+    equityBuybackManualByYear: snapshot.equityBuybackManualByYear ?? {},
+    equitySharesReissuedMethod: snapshot.equitySharesReissuedMethod ?? "none",
+    equitySharesReissuedFixedAmount: snapshot.equitySharesReissuedFixedAmount ?? 0,
+    equitySharesReissuedManualByYear: snapshot.equitySharesReissuedManualByYear ?? {},
+    equityIssuanceMethod: snapshot.equityIssuanceMethod ?? "none",
+    equityIssuanceFixedAmount: snapshot.equityIssuanceFixedAmount ?? 0,
+    equityIssuanceManualByYear: snapshot.equityIssuanceManualByYear ?? {},
+    equityOptionProceedsMethod: snapshot.equityOptionProceedsMethod ?? "none",
+    equityOptionProceedsFixedAmount: snapshot.equityOptionProceedsFixedAmount ?? 0,
+    equityOptionProceedsManualByYear: snapshot.equityOptionProceedsManualByYear ?? {},
+    equityEsppMethod: snapshot.equityEsppMethod ?? "none",
+    equityEsppFixedAmount: snapshot.equityEsppFixedAmount ?? 0,
+    equityEsppManualByYear: snapshot.equityEsppManualByYear ?? {},
+    equitySbcMethod: snapshot.equitySbcMethod ?? "auto",
+    equityManualSbcByYear: snapshot.equityManualSbcByYear ?? {},
+    equitySbcPctRevenue: snapshot.equitySbcPctRevenue ?? 0,
+    equityRollforwardConfirmed: snapshot.equityRollforwardConfirmed ?? false,
+
+    taxForecastMethod: snapshot.taxForecastMethod ?? "flat_rate",
+    taxEffectiveRatePct: snapshot.taxEffectiveRatePct ?? 28,
+    taxRateByYear: snapshot.taxRateByYear ?? {},
+    taxFlatExpense: snapshot.taxFlatExpense ?? 0,
+    taxAllowBenefit: snapshot.taxAllowBenefit ?? false,
+    taxScheduleConfirmed: snapshot.taxScheduleConfirmed ?? false,
+
     companyContext: (() => {
       const def = getDefaultCompanyContext();
       const snap = snapshot.companyContext;
@@ -2009,6 +2319,46 @@ export const useModelStore = create<ModelState & ModelActions>()(
             nonOperatingPhase2ClassificationLockedByLine: {},
             nonOperatingPhase2InterestExpenseScheduleByLine: {},
             debtSchedulePhase2Persist: defaultDebtSchedulePhase2Persist(),
+            intIncomeMethod: "pct_avg_cash" as const,
+            intIncomeRatePct: 4.5,
+            intIncomeFlatValue: 0,
+            intIncomeGrowthPct: 0,
+            intIncomeManualByYear: {},
+            intIncomeScheduleConfirmed: false,
+            dandaScheduleConfirmed: false,
+            wcDriversConfirmed: false,
+            otherBsForecastByItemId: {},
+            otherBsConfirmed: false,
+            equityDividendMethod: "none" as const,
+            equityDividendPayoutRatio: 30,
+            equityDividendFixedAmount: 0,
+            equityDividendManualByYear: {},
+            equityBuybackMethod: "none" as const,
+            equityBuybackFixedAmount: 0,
+            equityBuybackPctNetIncome: 0,
+            equityBuybackManualByYear: {},
+            equitySharesReissuedMethod: "none" as const,
+            equitySharesReissuedFixedAmount: 0,
+            equitySharesReissuedManualByYear: {},
+            equityIssuanceMethod: "none" as const,
+            equityIssuanceFixedAmount: 0,
+            equityIssuanceManualByYear: {},
+            equityOptionProceedsMethod: "none" as const,
+            equityOptionProceedsFixedAmount: 0,
+            equityOptionProceedsManualByYear: {},
+            equityEsppMethod: "none" as const,
+            equityEsppFixedAmount: 0,
+            equityEsppManualByYear: {},
+            equitySbcMethod: "auto" as const,
+            equityManualSbcByYear: {},
+            equitySbcPctRevenue: 0,
+            equityRollforwardConfirmed: false,
+            taxForecastMethod: "flat_rate" as const,
+            taxEffectiveRatePct: 28,
+            taxRateByYear: {},
+            taxFlatExpense: 0,
+            taxAllowBenefit: false,
+            taxScheduleConfirmed: false,
           }
         : {};
 
@@ -3522,16 +3872,29 @@ export const useModelStore = create<ModelState & ModelActions>()(
     const projectionYears = state.meta?.years?.projection ?? [];
     if (projectionYears.length === 0) return;
 
-    const { incomeStatement, balanceSheet, cashFlow, meta, sbcBreakdowns, danaBreakdowns } = state;
-    const allYears = [...(meta?.years?.historical ?? []), ...projectionYears];
+    // Ensure WC children are in sync with BS before computing projections
+    get().ensureWcChildrenFromBS();
+    // Re-read state after ensureWcChildrenFromBS may have updated BS/CFS
+    const freshState = get();
+
+    const { incomeStatement, meta, sbcBreakdowns, danaBreakdowns } = freshState;
+    const balanceSheet = freshState.balanceSheet;
+    const cashFlow = freshState.cashFlow;
+    const histYearsAll = meta?.years?.historical ?? [];
+    const lastHistYear = histYearsAll.length > 0 ? histYearsAll[histYearsAll.length - 1] : null;
+    const allYears = [...histYearsAll, ...projectionYears];
     const allStatements = { incomeStatement, balanceSheet, cashFlow };
 
-    // Revenue and COGS by year (for WC and Capex/Intangibles engines)
+    // Revenue and COGS by year — use forecast engines for projection years
+    // so that WC, Capex, and OpEx computations get correct values even
+    // before IS rows are updated.
     const revenueByYear: Record<string, number> = {};
     const cogsByYear: Record<string, number> = {};
     const revRow = incomeStatement.find((r) => r.id === "rev");
     const cogsRow = incomeStatement.find((r) => r.id === "cogs");
-    for (const year of allYears) {
+
+    // Historical values from IS rows
+    for (const year of histYearsAll) {
       revenueByYear[year] = revRow
         ? computeRowValue(revRow, year, incomeStatement, incomeStatement, allStatements, sbcBreakdowns, danaBreakdowns)
         : 0;
@@ -3540,24 +3903,53 @@ export const useModelStore = create<ModelState & ModelActions>()(
         : 0;
     }
 
+    // Projection values from forecast engines (not row values which may be empty)
+    if (lastHistYear) {
+      const projResult = computeProjectedRevCogs({
+        incomeStatement,
+        projectionYears,
+        lastHistoricYear: lastHistYear,
+        revenueForecastConfigV1: freshState.revenueForecastConfigV1,
+        revenueForecastTreeV1: freshState.revenueForecastTreeV1 ?? [],
+        revenueProjectionConfig: freshState.revenueProjectionConfig,
+        cogsForecastConfigV1: freshState.cogsForecastConfigV1,
+        allStatements,
+        sbcBreakdowns: sbcBreakdowns ?? {},
+        danaBreakdowns: danaBreakdowns ?? {},
+        currencyUnit: (meta?.currencyUnit ?? "millions") as CurrencyUnit,
+      });
+      for (const y of projectionYears) {
+        revenueByYear[y] = projResult.revByYear[y] ?? revenueByYear[y] ?? 0;
+        cogsByYear[y] = projResult.cogsByYear[y] ?? cogsByYear[y] ?? 0;
+      }
+    }
+
+    // Flatten BS for deep lookups (custom items may be nested)
+    const flatBsLookup = (rows: Row[]): Row[] => {
+      const out: Row[] = [];
+      for (const r of rows) { out.push(r); if (r.children?.length) out.push(...flatBsLookup(r.children)); }
+      return out;
+    };
+    const flatBs = flatBsLookup(balanceSheet);
+
     // WC projected balances
     const wcScheduleItems = getWcScheduleItems(cashFlow, balanceSheet);
     const balanceByItemByYear: Record<string, Record<string, number>> = {};
     for (const item of wcScheduleItems) {
-      const row = balanceSheet.find((r) => r.id === item.id);
+      const row = flatBs.find((r) => r.id === item.id);
       balanceByItemByYear[item.id] = {};
       for (const y of allYears) {
         balanceByItemByYear[item.id][y] = row?.values?.[y] ?? 0;
       }
     }
     const wcDriverState: WcDriverState = {
-      wcDriverTypeByItemId: state.wcDriverTypeByItemId ?? {},
-      wcDaysByItemId: state.wcDaysByItemId ?? {},
-      wcDaysByItemIdByYear: state.wcDaysByItemIdByYear ?? {},
-      wcDaysBaseByItemId: state.wcDaysBaseByItemId ?? {},
-      wcPctBaseByItemId: state.wcPctBaseByItemId ?? {},
-      wcPctByItemId: state.wcPctByItemId ?? {},
-      wcPctByItemIdByYear: state.wcPctByItemIdByYear ?? {},
+      wcDriverTypeByItemId: freshState.wcDriverTypeByItemId ?? {},
+      wcDaysByItemId: freshState.wcDaysByItemId ?? {},
+      wcDaysByItemIdByYear: freshState.wcDaysByItemIdByYear ?? {},
+      wcDaysBaseByItemId: freshState.wcDaysBaseByItemId ?? {},
+      wcPctBaseByItemId: freshState.wcPctBaseByItemId ?? {},
+      wcPctByItemId: freshState.wcPctByItemId ?? {},
+      wcPctByItemIdByYear: freshState.wcPctByItemIdByYear ?? {},
     };
     const wcProjected =
       wcScheduleItems.length > 0
@@ -3572,9 +3964,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
         : {};
 
     // Capex: last historical PP&E and Capex
-    const histYears = meta?.years?.historical ?? [];
-    const lastHistYear = histYears.length > 0 ? histYears[histYears.length - 1] : null;
-    const lastHistPPE = lastHistYear ? (balanceSheet.find((r) => r.id === "ppe")?.values?.[lastHistYear] ?? 0) : 0;
+    const histYears = histYearsAll;
+    const lastHistPPE = lastHistYear ? (flatBs.find((r) => r.id === "ppe")?.values?.[lastHistYear] ?? 0) : 0;
     const lastHistCapex = lastHistYear ? (cashFlow.find((r) => r.id === "capex")?.values?.[lastHistYear] ?? 0) : 0;
     const revenueByYearProj: Record<string, number> = {};
     for (const y of projectionYears) revenueByYearProj[y] = revenueByYear[y] ?? 0;
@@ -3628,8 +4019,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
     // Intangibles
     const lastHistIntangibles =
-      lastHistYear && balanceSheet.find((r) => r.id === "intangible_assets")
-        ? (balanceSheet.find((r) => r.id === "intangible_assets")!.values?.[lastHistYear] ?? 0)
+      lastHistYear && flatBs.find((r) => r.id === "intangible_assets")
+        ? (flatBs.find((r) => r.id === "intangible_assets")!.values?.[lastHistYear] ?? 0)
         : 0;
     const intangiblesOutput =
       state.capexModelIntangibles && state.intangiblesAmortizationLifeYears > 0
@@ -3648,11 +4039,523 @@ export const useModelStore = create<ModelState & ModelActions>()(
         : null;
     const intangiblesEndByYear = intangiblesOutput?.endByYear ?? {};
 
+    // ── Debt schedule writeback (STD / LTD) ────────────────────────────────────
+    const debtStdByYear: Record<string, number> = {};
+    const debtLtdByYear: Record<string, number> = {};
+    const debtAppliedBody = state.debtSchedulePhase2Persist?.applied ?? null;
+    if (debtAppliedBody) {
+      const debtResult = computeDebtScheduleEngine({
+        config: debtAppliedBody,
+        projectionYears,
+        lastHistoricYear: lastHistYear,
+        balanceSheet,
+      });
+      const enabled = debtAppliedBody.tranches.filter((t) => t.isEnabled);
+      const locTranche = enabled.find((t) => t.trancheType === "bank_line" || t.trancheType === "revolver");
+      const termTranche = enabled.find((t) => t.trancheType === "term_loan" || t.trancheType === "term_debt");
+      const isRevolverPath = enabled.length === 2 && locTranche != null && termTranche != null && locTranche.trancheId !== termTranche.trancheId;
+      const isCurrentPortionPath = !isRevolverPath && enabled.length === 1 && (enabled[0].trancheType === "term_loan" || enabled[0].trancheType === "term_debt") && enabled[0].detectedFromBucket === "long_term";
+
+      for (const y of projectionYears) {
+        if (isCurrentPortionPath) {
+          const tot = debtResult.totalsByYear[y]?.totalEndingDebt ?? 0;
+          const mand = debtResult.totalsByYear[y]?.totalMandatoryRepayment ?? 0;
+          debtStdByYear[y] = Math.min(mand, tot);
+          debtLtdByYear[y] = Math.max(0, tot - debtStdByYear[y]);
+        } else if (isRevolverPath) {
+          debtStdByYear[y] = debtResult.perTrancheByYear[locTranche!.trancheId]?.[y]?.endingDebt ?? 0;
+          debtLtdByYear[y] = debtResult.perTrancheByYear[termTranche!.trancheId]?.[y]?.endingDebt ?? 0;
+        } else {
+          debtStdByYear[y] = 0;
+          debtLtdByYear[y] = debtResult.totalsByYear[y]?.totalEndingDebt ?? 0;
+        }
+      }
+    }
+
+    // ── Equity roll-forward writeback (CS, APIC, Treasury, RE) ─────────────────
+    const equityByAccount: Record<string, Record<string, number>> = {};
+    if (state.equityRollforwardConfirmed) {
+      const findBsVal = (tt: string) => {
+        const row = flatBs.find((r) => r.taxonomyType === tt);
+        return row?.values?.[lastHistYear ?? ""] ?? 0;
+      };
+
+      // Compute projected NI (EBIT as proxy) and Revenue
+      const ebitInput = {
+        incomeStatement,
+        projectionYears,
+        lastHistoricYear: lastHistYear!,
+        revenueForecastConfigV1: state.revenueForecastConfigV1,
+        revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
+        revenueProjectionConfig: state.revenueProjectionConfig,
+        cogsForecastConfigV1: state.cogsForecastConfigV1,
+        opexForecastConfigV1: state.opexForecastConfigV1,
+        allStatements,
+        sbcBreakdowns: state.sbcBreakdowns ?? {},
+        danaBreakdowns: state.danaBreakdowns ?? {},
+        currencyUnit: (state.meta?.currencyUnit ?? "millions") as CurrencyUnit,
+      };
+      const ebitByYear = lastHistYear ? computeProjectedEbitByYear(ebitInput) : {};
+      const projNiByYear: Record<string, number> = {};
+      for (const y of projectionYears) projNiByYear[y] = ebitByYear[y] ?? 0;
+
+      const { revByYear: projRevByYear } = lastHistYear
+        ? computeProjectedRevCogs({
+            incomeStatement,
+            projectionYears,
+            lastHistoricYear: lastHistYear,
+            revenueForecastConfigV1: state.revenueForecastConfigV1,
+            revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
+            revenueProjectionConfig: state.revenueProjectionConfig,
+            cogsForecastConfigV1: state.cogsForecastConfigV1,
+            allStatements,
+            sbcBreakdowns: state.sbcBreakdowns ?? {},
+            danaBreakdowns: state.danaBreakdowns ?? {},
+            currencyUnit: (state.meta?.currencyUnit ?? "millions") as CurrencyUnit,
+          })
+        : { revByYear: {} as Record<string, number> };
+
+      // Compute SBC by year based on user's chosen method
+      const sbcByYear: Record<string, number> = {};
+      const isRows = incomeStatement ?? [];
+      const cfsRows = cashFlow ?? [];
+      if (state.equitySbcMethod === "manual_by_year") {
+        for (const y of projectionYears) sbcByYear[y] = Math.max(0, state.equityManualSbcByYear[y] ?? 0);
+      } else if (state.equitySbcMethod === "pct_revenue") {
+        for (const y of projectionYears) sbcByYear[y] = (projRevByYear[y] ?? 0) * (state.equitySbcPctRevenue / 100);
+      } else if (state.equitySbcMethod === "flat_hist") {
+        const isRow = isRows.find((r) => r.taxonomyType === "opex_sbc");
+        const cfsRow = cfsRows.find((r) => r.taxonomyType === "cfo_sbc" || r.id === "sbc");
+        const histYrs = Object.keys(isRow?.values ?? cfsRow?.values ?? {}).filter((y) => !projectionYears.includes(y)).sort();
+        const lastHistSbc = Math.abs((isRow?.values?.[histYrs[histYrs.length - 1]] ?? 0) || (cfsRow?.values?.[histYrs[histYrs.length - 1]] ?? 0));
+        for (const y of projectionYears) sbcByYear[y] = lastHistSbc;
+      } else {
+        // "auto": sbcBreakdowns → IS/CFS rows → 0
+        let hasBreakdowns = false;
+        for (const y of projectionYears) {
+          let sum = 0;
+          for (const bucket of Object.values(state.sbcBreakdowns ?? {})) sum += Math.abs(bucket[y] ?? 0);
+          sbcByYear[y] = sum;
+          if (sum > 0) hasBreakdowns = true;
+        }
+        if (!hasBreakdowns) {
+          const isRow = isRows.find((r) => r.taxonomyType === "opex_sbc");
+          const cfsRow = cfsRows.find((r) => r.taxonomyType === "cfo_sbc" || r.id === "sbc");
+          for (const y of projectionYears) {
+            const fromIs = Math.abs(isRow?.values?.[y] ?? 0);
+            const fromCfs = Math.abs(cfsRow?.values?.[y] ?? 0);
+            sbcByYear[y] = fromIs > 0 ? fromIs : fromCfs;
+          }
+        }
+      }
+
+      const equityConfig: EquityRollforwardConfig = {
+        ...defaultEquityRollforwardConfig(),
+        dividendMethod:       state.equityDividendMethod,
+        dividendPayoutRatio:  state.equityDividendPayoutRatio,
+        dividendFixedAmount:  state.equityDividendFixedAmount,
+        dividendManualByYear: state.equityDividendManualByYear,
+        buybackMethod:        state.equityBuybackMethod,
+        buybackFixedAmount:   state.equityBuybackFixedAmount,
+        buybackPctNetIncome:  state.equityBuybackPctNetIncome,
+        buybackManualByYear:  state.equityBuybackManualByYear,
+        reissuedMethod:       state.equitySharesReissuedMethod,
+        reissuedFixedAmount:  state.equitySharesReissuedFixedAmount,
+        reissuedManualByYear: state.equitySharesReissuedManualByYear,
+        issuanceMethod:       state.equityIssuanceMethod,
+        issuanceFixedAmount:  state.equityIssuanceFixedAmount,
+        issuanceManualByYear: state.equityIssuanceManualByYear,
+        optionProceedsMethod:       state.equityOptionProceedsMethod,
+        optionProceedsFixedAmount:  state.equityOptionProceedsFixedAmount,
+        optionProceedsManualByYear: state.equityOptionProceedsManualByYear,
+        esppMethod:       state.equityEsppMethod,
+        esppFixedAmount:  state.equityEsppFixedAmount,
+        esppManualByYear: state.equityEsppManualByYear,
+      };
+
+      const equityResult = computeEquityRollforward({
+        config: equityConfig,
+        projectionYears,
+        netIncomeByYear: projNiByYear,
+        fcfByYear: projNiByYear,
+        revenueByYear: projRevByYear,
+        sbcByYear,
+        lastHistCommonStock:      findBsVal("equity_common_stock"),
+        lastHistApic:             findBsVal("equity_apic"),
+        lastHistTreasuryStock:    findBsVal("equity_treasury_stock"),
+        lastHistRetainedEarnings: findBsVal("equity_retained_earnings"),
+      });
+
+      equityByAccount["equity_common_stock"]      = equityResult.commonStockByYear;
+      equityByAccount["equity_apic"]              = equityResult.apicByYear;
+      equityByAccount["equity_treasury_stock"]    = equityResult.treasuryStockByYear;
+      equityByAccount["equity_retained_earnings"] = equityResult.retainedEarningsByYear;
+    }
+
+    // ── Other BS items writeback ───────────────────────────────────────────────
+    const otherBsProjected: Record<string, Record<string, number>> = {};
+    if (state.otherBsConfirmed) {
+      const otherItems = getOtherBsItems(balanceSheet, cashFlow, histYears);
+      if (otherItems.length > 0) {
+        const revByYearAll: Record<string, number> = {};
+        for (const y of allYears) revByYearAll[y] = revenueByYear[y] ?? 0;
+        const projected = computeOtherBsProjectedBalances(
+          otherItems,
+          projectionYears,
+          state.otherBsForecastByItemId ?? {},
+          revByYearAll,
+          balanceSheet,
+          histYears
+        );
+        for (const [itemId, byYear] of Object.entries(projected)) {
+          otherBsProjected[itemId] = byYear;
+        }
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // IS PROJECTION: write projected values for all forecasted IS lines
+    // ══════════════════════════════════════════════════════════════════════════
+    const isProjectedByRowId: Record<string, Record<string, number>> = {};
+
+    // Flatten IS rows for taxonomy lookups
+    const flatIsAll = (rows: Row[]): Row[] => { const out: Row[] = []; for (const r of rows) { out.push(r); if (r.children?.length) out.push(...flatIsAll(r.children)); } return out; };
+    const flatIs = flatIsAll(incomeStatement);
+    const isRowIdByTaxonomy: Record<string, string> = {};
+    for (const r of flatIs) {
+      if (r.taxonomyType) isRowIdByTaxonomy[r.taxonomyType as string] = r.id;
+    }
+
+    // ── Revenue and COGS: write forecast engine values to IS rows ──
+    // Without this, recomputeCalculations sees 0 for revenue/COGS and GP/EBIT/NI break.
+    {
+      const revRowId = flatIs.find((r) => r.id === "rev")?.id;
+      const cogsRowId = flatIs.find((r) => r.id === "cogs")?.id;
+      if (revRowId) {
+        const byYear: Record<string, number> = {};
+        for (const y of projectionYears) byYear[y] = revenueByYear[y] ?? 0;
+        if (Object.values(byYear).some((v) => v !== 0)) isProjectedByRowId[revRowId] = byYear;
+      }
+      if (cogsRowId) {
+        const byYear: Record<string, number> = {};
+        for (const y of projectionYears) byYear[y] = cogsByYear[y] ?? 0;
+        if (Object.values(byYear).some((v) => v !== 0)) isProjectedByRowId[cogsRowId] = byYear;
+      }
+    }
+
+    // ── Interest expense from debt schedule ──
+    // Sign: NEGATIVE — displayed with parentheses in IB format.
+    // calculations.ts EBT formula uses Math.abs to always subtract correctly.
+    if (debtAppliedBody) {
+      const debtResult = computeDebtScheduleEngine({
+        config: debtAppliedBody,
+        projectionYears,
+        lastHistoricYear: lastHistYear,
+        balanceSheet,
+      });
+      const intExpRowId = isRowIdByTaxonomy["non_op_interest_expense"]
+        ?? flatIs.find((r) => r.id === "interest_expense")?.id;
+      if (intExpRowId) {
+        const byYear: Record<string, number> = {};
+        for (const y of projectionYears) {
+          const v = debtResult.interestExpenseTotalByYear[y];
+          byYear[y] = v != null ? -Math.abs(v) : 0;
+        }
+        isProjectedByRowId[intExpRowId] = byYear;
+      }
+    }
+
+    // ── Interest income from schedule ──
+    if (state.intIncomeScheduleConfirmed) {
+      const cashRow = flatBs.find((r) => r.taxonomyType === "asset_cash" || r.id === "cash");
+      const cashByYear: Record<string, number> = {};
+      for (const y of allYears) cashByYear[y] = cashRow?.values?.[y] ?? 0;
+      const lastHistCash = lastHistYear ? (cashRow?.values?.[lastHistYear] ?? 0) : 0;
+
+      const intIncRow = flatIs.find((r) => r.taxonomyType === "non_op_interest_income" || r.id === "interest_income");
+      const lastHistIntIncome = lastHistYear ? Math.abs(intIncRow?.values?.[lastHistYear] ?? 0) : 0;
+
+      const intIncResult = computeInterestIncomeSchedule({
+        projectionYears,
+        cashByYear,
+        lastHistCash,
+        lastHistInterestIncome: lastHistIntIncome,
+        method: state.intIncomeMethod,
+        ratePct: state.intIncomeRatePct,
+        flatValue: state.intIncomeFlatValue,
+        growthPct: state.intIncomeGrowthPct,
+        manualByYear: state.intIncomeManualByYear ?? {},
+      });
+      const intIncRowId = isRowIdByTaxonomy["non_op_interest_income"]
+        ?? flatIs.find((r) => r.id === "interest_income")?.id;
+      if (intIncRowId) {
+        isProjectedByRowId[intIncRowId] = intIncResult.interestIncomeByYear;
+      }
+    }
+
+    // ── D&A on IS from capex/intangibles schedule ──
+    if (state.dandaScheduleConfirmed) {
+      const totalDandaByYear: Record<string, number> = {};
+      if (capexScheduleOutput && "totalDandaByYear" in capexScheduleOutput) {
+        const bucketed = capexScheduleOutput as { totalDandaByYear: Record<string, number> };
+        for (const y of projectionYears) totalDandaByYear[y] = bucketed.totalDandaByYear[y] ?? 0;
+      } else if (capexScheduleOutput && "dandaByYear" in capexScheduleOutput) {
+        const simple = capexScheduleOutput as { dandaByYear: Record<string, number> };
+        for (const y of projectionYears) totalDandaByYear[y] = simple.dandaByYear[y] ?? 0;
+      }
+      const intAmort = intangiblesOutput?.amortByYear ?? {};
+      for (const y of projectionYears) {
+        totalDandaByYear[y] = (totalDandaByYear[y] ?? 0) + (intAmort[y] ?? 0);
+      }
+
+      const daRowId = isRowIdByTaxonomy["opex_danda"]
+        ?? isRowIdByTaxonomy["opex_depreciation"]
+        ?? flatIs.find((r) => r.id === "da" || r.id === "danda")?.id;
+      if (daRowId) {
+        const byYear: Record<string, number> = {};
+        for (const y of projectionYears) byYear[y] = totalDandaByYear[y] ?? 0;
+        isProjectedByRowId[daRowId] = byYear;
+      }
+
+      // Handle all possible IS configurations for depreciation & amortization:
+      // Case A: Both separate rows exist → split depreciation vs amortization
+      // Case B: Only amortization row exists (e.g. Lululemon) → write intangibles amort there
+      // Case C: Only depreciation row exists → write capex depreciation there
+      // Case D: Neither exists → D&A may be embedded in COGS/SGA; CFS add-back handled separately
+      const depRowId = isRowIdByTaxonomy["opex_depreciation"];
+      const amortRowId = isRowIdByTaxonomy["opex_amortization"];
+
+      const capexDepByYear: Record<string, number> = {};
+      if (capexScheduleOutput && "totalDandaByYear" in capexScheduleOutput) {
+        const bucketed = capexScheduleOutput as { totalDandaByYear: Record<string, number> };
+        for (const y of projectionYears) capexDepByYear[y] = bucketed.totalDandaByYear[y] ?? 0;
+      } else if (capexScheduleOutput && "dandaByYear" in capexScheduleOutput) {
+        const simple = capexScheduleOutput as { dandaByYear: Record<string, number> };
+        for (const y of projectionYears) capexDepByYear[y] = simple.dandaByYear[y] ?? 0;
+      }
+
+      if (depRowId && amortRowId && depRowId !== daRowId && amortRowId !== daRowId) {
+        // Case A: both separate rows
+        const depBy: Record<string, number> = {};
+        const amBy: Record<string, number> = {};
+        for (const y of projectionYears) { depBy[y] = capexDepByYear[y] ?? 0; amBy[y] = intAmort[y] ?? 0; }
+        isProjectedByRowId[depRowId] = depBy;
+        isProjectedByRowId[amortRowId] = amBy;
+      } else if (amortRowId && amortRowId !== daRowId) {
+        // Case B: only amortization row (no separate depreciation line)
+        const amBy: Record<string, number> = {};
+        for (const y of projectionYears) amBy[y] = intAmort[y] ?? 0;
+        isProjectedByRowId[amortRowId] = amBy;
+      } else if (depRowId && depRowId !== daRowId) {
+        // Case C: only depreciation row (no separate amortization line)
+        const depBy: Record<string, number> = {};
+        for (const y of projectionYears) depBy[y] = capexDepByYear[y] ?? 0;
+        isProjectedByRowId[depRowId] = depBy;
+      }
+    }
+
+    // ── SBC on IS (opex_sbc) ──
+    if (state.equitySbcMethod !== "auto" || state.dandaScheduleConfirmed) {
+      const sbcIsRowId = isRowIdByTaxonomy["opex_sbc"]
+        ?? flatIs.find((r) => r.id === "sbc")?.id;
+      if (sbcIsRowId) {
+        const sbcByYearIs: Record<string, number> = {};
+        // SBC was already computed above for equity roll-forward
+        // Recompute it here consistently
+        const sbcIsRows = incomeStatement;
+        const sbcCfsRows = cashFlow;
+        if (state.equitySbcMethod === "manual_by_year") {
+          for (const y of projectionYears) sbcByYearIs[y] = Math.abs(state.equityManualSbcByYear[y] ?? 0);
+        } else if (state.equitySbcMethod === "pct_revenue") {
+          for (const y of projectionYears) sbcByYearIs[y] = (revenueByYear[y] ?? 0) * (state.equitySbcPctRevenue / 100);
+        } else if (state.equitySbcMethod === "flat_hist") {
+          const isRow = sbcIsRows.find((r) => r.taxonomyType === "opex_sbc");
+          const cfsRow = sbcCfsRows.find((r) => r.taxonomyType === "cfo_sbc" || r.id === "sbc");
+          const hYrs = Object.keys(isRow?.values ?? cfsRow?.values ?? {}).filter((y) => !projectionYears.includes(y)).sort();
+          const lastHistSbc = Math.abs((isRow?.values?.[hYrs[hYrs.length - 1]] ?? 0) || (cfsRow?.values?.[hYrs[hYrs.length - 1]] ?? 0));
+          for (const y of projectionYears) sbcByYearIs[y] = lastHistSbc;
+        }
+        if (Object.keys(sbcByYearIs).length > 0) {
+          isProjectedByRowId[sbcIsRowId] = sbcByYearIs;
+        }
+      }
+    }
+
+    // ── OpEx lines (forecast_direct from opexForecastConfigV1) ──
+    if (state.opexForecastConfigV1) {
+      const opexLeaves = collectOperatingExpenseLeafLines(incomeStatement);
+      const opexLines = state.opexForecastConfigV1.lines ?? {};
+      for (const leaf of opexLeaves) {
+        const lineCfg = opexLines[leaf.lineId];
+        if (!lineCfg || lineCfg.routeStatus !== "forecast_direct") continue;
+        // Skip lines already written by schedule (D&A, SBC)
+        if (isProjectedByRowId[leaf.lineId]) continue;
+        const lastHistVal = lastHistYear
+          ? getOpExLineLastHistoricalValue(leaf.lineId, incomeStatement, lastHistYear, allStatements, state.sbcBreakdowns ?? {}, state.danaBreakdowns ?? {})
+          : null;
+        const projByYear = projectOpExLineForecastByYear(lineCfg, {
+          projectionYears,
+          revenueTotalByYear: revenueByYear,
+          lastHistValue: lastHistVal,
+        });
+        if (Object.keys(projByYear).length > 0) {
+          isProjectedByRowId[leaf.lineId] = projByYear;
+        }
+      }
+    }
+
+    // ── SGA pct-based items (old IS Build mechanism — fallback for items not in opexForecastConfigV1) ──
+    if (Object.keys(state.sgaPctByItemId ?? {}).length > 0) {
+      const opexLeavesSga = collectOperatingExpenseLeafLines(incomeStatement);
+      for (const leaf of opexLeavesSga) {
+        if (isProjectedByRowId[leaf.lineId]) continue;
+        const pctMode = state.sgaPctModeByItemId?.[leaf.lineId];
+        const pctConst = state.sgaPctByItemId?.[leaf.lineId];
+        if (pctConst == null && !pctMode) continue;
+        const byYear: Record<string, number> = {};
+        for (const y of projectionYears) {
+          const pct = pctMode === "custom"
+            ? (state.sgaPctByItemIdByYear?.[leaf.lineId]?.[y] ?? pctConst ?? 0)
+            : (pctConst ?? 0);
+          const rev = revenueByYear[y] ?? 0;
+          byYear[y] = rev * (pct / 100);
+        }
+        if (Object.values(byYear).some((v) => v !== 0)) {
+          isProjectedByRowId[leaf.lineId] = byYear;
+        }
+      }
+    }
+
+    // ── Non-operating direct lines ──
+    const nonOpDirectByLine = state.nonOperatingPhase2DirectByLine ?? {};
+    const nonOpLeaves = collectNonOperatingIncomeLeaves(incomeStatement);
+    const nonOpBucketOverrides = state.nonOperatingPhase2BucketOverrides ?? {};
+    for (const leaf of nonOpLeaves) {
+      const row = findIsRowById(incomeStatement, leaf.lineId);
+      const effectiveBucket = nonOpBucketOverrides[leaf.lineId] ?? (row ? defaultPhase2Bucket(row) : "review");
+      if (effectiveBucket !== "direct") continue;
+      const st = nonOpDirectByLine[leaf.lineId];
+      const applied = st?.applied;
+      if (!applied) continue;
+      const lastHistVal = lastHistYear
+        ? getOpExLineLastHistoricalValue(leaf.lineId, incomeStatement, lastHistYear, allStatements, state.sbcBreakdowns ?? {}, state.danaBreakdowns ?? {})
+        : null;
+      const byYear = projectAppliedNonOperatingDirectBody(applied, {
+        projectionYears,
+        revenueTotalByYear: revenueByYear,
+        lastHistLineValue: lastHistVal,
+      });
+      if (Object.keys(byYear).length > 0) {
+        isProjectedByRowId[leaf.lineId] = byYear;
+      }
+    }
+
+    // ── Tax (needs EBT = EBIT + interest + non-op) ──
+    if (state.taxScheduleConfirmed) {
+      const ebitInput = {
+        incomeStatement,
+        projectionYears,
+        lastHistoricYear: lastHistYear!,
+        revenueForecastConfigV1: state.revenueForecastConfigV1,
+        revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
+        revenueProjectionConfig: state.revenueProjectionConfig,
+        cogsForecastConfigV1: state.cogsForecastConfigV1,
+        opexForecastConfigV1: state.opexForecastConfigV1,
+        allStatements,
+        sbcBreakdowns: state.sbcBreakdowns ?? {},
+        danaBreakdowns: state.danaBreakdowns ?? {},
+        currencyUnit: (state.meta?.currencyUnit ?? "millions") as CurrencyUnit,
+      };
+      const ebitByYearRaw = lastHistYear ? computeProjectedEbitByYear(ebitInput) : {};
+      const ebtByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        let ebt = ebitByYearRaw[y] ?? 0;
+        // Add interest items and non-op items
+        for (const [rowId, byYear] of Object.entries(isProjectedByRowId)) {
+          const isRow = flatIs.find((r) => r.id === rowId);
+          const tt = isRow?.taxonomyType as string | undefined;
+          if (tt?.startsWith("non_op_") || tt === "tax_expense") {
+            if (tt === "tax_expense") continue;
+            ebt += byYear[y] ?? 0;
+          }
+        }
+        ebtByYear[y] = ebt;
+      }
+
+      const taxResult = computeTaxSchedule({
+        projectionYears,
+        ebtByYear,
+        method: state.taxForecastMethod,
+        flatRatePct: state.taxEffectiveRatePct,
+        rateByYear: state.taxRateByYear ?? {},
+        flatExpense: state.taxFlatExpense,
+        allowTaxBenefit: state.taxAllowBenefit,
+      });
+      const taxRowId = isRowIdByTaxonomy["tax_expense"]
+        ?? flatIs.find((r) => r.id === "tax" || r.id === "tax_expense")?.id;
+      if (taxRowId) {
+        const byYear: Record<string, number> = {};
+        for (const y of projectionYears) byYear[y] = Math.abs(taxResult.taxExpenseByYear[y] ?? 0);
+        isProjectedByRowId[taxRowId] = byYear;
+      }
+    }
+
+    // ── Write IS projected values to incomeStatement rows ──
+    const isIdsToWrite = new Set(Object.keys(isProjectedByRowId));
+    const applyIsProjectionsToRow = (row: Row): Row => {
+      const updatedChildren = row.children?.map(applyIsProjectionsToRow);
+      if (!isIdsToWrite.has(row.id)) {
+        return updatedChildren ? { ...row, children: updatedChildren } : row;
+      }
+      const newValues = { ...(row.values ?? {}) };
+      const projValues = isProjectedByRowId[row.id];
+      if (projValues) {
+        for (const y of projectionYears) {
+          if (projValues[y] !== undefined) newValues[y] = projValues[y];
+        }
+      }
+      return { ...row, values: newValues, ...(updatedChildren ? { children: updatedChildren } : {}) };
+    };
+    let newIS = incomeStatement.map(applyIsProjectionsToRow);
+    for (const year of projectionYears) {
+      const st = { incomeStatement: newIS, balanceSheet, cashFlow };
+      newIS = recomputeCalculations(newIS, year, newIS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // BS PROJECTION
+    // ══════════════════════════════════════════════════════════════════════════
+
     // Build updated balanceSheet: only projection years, never touch cash or historical
     const wcItemIds = new Set(wcScheduleItems.map((i) => i.id));
     const idsToWrite = new Set([...wcItemIds, "ppe", "intangible_assets"]);
-    let newBS = balanceSheet.map((row) => {
-      if (!idsToWrite.has(row.id)) return row;
+
+    // Helper: find BS row by taxonomyType (reuse flatBs from above)
+    const bsRowIdByTaxonomy: Record<string, string> = {};
+    for (const r of flatBs) {
+      if (r.taxonomyType) bsRowIdByTaxonomy[r.taxonomyType as string] = r.id;
+    }
+
+    // Add debt row IDs
+    const stdRowId = bsRowIdByTaxonomy["liab_short_term_debt"];
+    const ltdRowId = bsRowIdByTaxonomy["liab_long_term_debt"];
+    if (stdRowId && Object.keys(debtStdByYear).length > 0) idsToWrite.add(stdRowId);
+    if (ltdRowId && Object.keys(debtLtdByYear).length > 0) idsToWrite.add(ltdRowId);
+
+    // Add equity row IDs
+    for (const tt of Object.keys(equityByAccount)) {
+      const rowId = bsRowIdByTaxonomy[tt];
+      if (rowId) idsToWrite.add(rowId);
+    }
+
+    // Add other BS item IDs
+    for (const itemId of Object.keys(otherBsProjected)) idsToWrite.add(itemId);
+
+    const applyProjectionsToRow = (row: Row): Row => {
+      const updatedChildren = row.children?.map(applyProjectionsToRow);
+      if (!idsToWrite.has(row.id)) {
+        return updatedChildren ? { ...row, children: updatedChildren } : row;
+      }
       const newValues = { ...(row.values ?? {}) };
       for (const y of projectionYears) {
         if (row.id === "cash") continue;
@@ -3665,41 +4568,52 @@ export const useModelStore = create<ModelState & ModelActions>()(
         } else if (row.id === "intangible_assets") {
           const v = intangiblesEndByYear[y];
           if (v !== undefined) newValues[y] = v;
+        } else if (row.id === stdRowId) {
+          const v = debtStdByYear[y];
+          if (v !== undefined) newValues[y] = v;
+        } else if (row.id === ltdRowId) {
+          const v = debtLtdByYear[y];
+          if (v !== undefined) newValues[y] = v;
+        } else if (row.taxonomyType && equityByAccount[row.taxonomyType as string]) {
+          const v = equityByAccount[row.taxonomyType as string][y];
+          if (v !== undefined) newValues[y] = v;
+        } else if (otherBsProjected[row.id]) {
+          const v = otherBsProjected[row.id][y];
+          if (v !== undefined) newValues[y] = v;
         }
       }
-      // Step 3C: tag schedule-owned rows when applying
+      const extra: Partial<Row> = {};
       if (row.id === "ppe") {
-        return {
-          ...row,
-          values: newValues,
-          scheduleOwner: row.scheduleOwner ?? "capex",
-          cashFlowBehavior: row.cashFlowBehavior ?? "investing",
-        };
+        extra.scheduleOwner = row.scheduleOwner ?? "capex";
+        extra.cashFlowBehavior = row.cashFlowBehavior ?? "investing";
+      } else if (row.id === "intangible_assets") {
+        extra.scheduleOwner = row.scheduleOwner ?? "intangibles";
+        extra.cashFlowBehavior = row.cashFlowBehavior ?? "investing";
+      } else if (row.id === stdRowId || row.id === ltdRowId) {
+        extra.scheduleOwner = "debt";
       }
-      if (row.id === "intangible_assets") {
-        return {
-          ...row,
-          values: newValues,
-          scheduleOwner: row.scheduleOwner ?? "intangibles",
-          cashFlowBehavior: row.cashFlowBehavior ?? "investing",
-        };
-      }
-      return { ...row, values: newValues };
-    });
+      return { ...row, ...extra, values: newValues, ...(updatedChildren ? { children: updatedChildren } : {}) };
+    };
+    let newBS = balanceSheet.map(applyProjectionsToRow);
 
     // Recompute balanceSheet totals for each projection year
     for (const year of projectionYears) {
       const st = { ...allStatements, balanceSheet: newBS };
       newBS = recomputeCalculations(newBS, year, newBS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
-    // Recompute cashFlow for each projection year (wc_change and operating_cf use new BS)
+    // Recompute IS totals once more with final BS to keep calc rows consistent
+    for (const year of projectionYears) {
+      const st = { incomeStatement: newIS, balanceSheet: newBS, cashFlow };
+      newIS = recomputeCalculations(newIS, year, newIS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+    }
+    // Recompute cashFlow for each projection year (wc_change and operating_cf use new BS + IS)
     let newCF = cashFlow;
     for (const year of projectionYears) {
-      const st = { incomeStatement, balanceSheet: newBS, cashFlow: newCF };
+      const st = { incomeStatement: newIS, balanceSheet: newBS, cashFlow: newCF };
       newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
 
-    set({ balanceSheet: newBS, cashFlow: newCF });
+    set({ incomeStatement: newIS, balanceSheet: newBS, cashFlow: newCF });
   },
 
   reorderCashFlowTopLevel: (fromIndex, toIndex) => {
@@ -4185,6 +5099,46 @@ export const useModelStore = create<ModelState & ModelActions>()(
       nonOperatingPhase2ClassificationLockedByLine: {},
       nonOperatingPhase2InterestExpenseScheduleByLine: {},
       debtSchedulePhase2Persist: defaultDebtSchedulePhase2Persist(),
+      intIncomeMethod: "pct_avg_cash" as const,
+      intIncomeRatePct: 4.5,
+      intIncomeFlatValue: 0,
+      intIncomeGrowthPct: 0,
+      intIncomeManualByYear: {},
+      intIncomeScheduleConfirmed: false,
+      dandaScheduleConfirmed: false,
+      wcDriversConfirmed: false,
+      otherBsForecastByItemId: {},
+      otherBsConfirmed: false,
+      equityDividendMethod: "none" as const,
+      equityDividendPayoutRatio: 30,
+      equityDividendFixedAmount: 0,
+      equityDividendManualByYear: {},
+      equityBuybackMethod: "none" as const,
+      equityBuybackFixedAmount: 0,
+      equityBuybackPctNetIncome: 0,
+      equityBuybackManualByYear: {},
+      equitySharesReissuedMethod: "none" as const,
+      equitySharesReissuedFixedAmount: 0,
+      equitySharesReissuedManualByYear: {},
+      equityIssuanceMethod: "none" as const,
+      equityIssuanceFixedAmount: 0,
+      equityIssuanceManualByYear: {},
+      equityOptionProceedsMethod: "none" as const,
+      equityOptionProceedsFixedAmount: 0,
+      equityOptionProceedsManualByYear: {},
+      equityEsppMethod: "none" as const,
+      equityEsppFixedAmount: 0,
+      equityEsppManualByYear: {},
+      equitySbcMethod: "auto" as const,
+      equityManualSbcByYear: {},
+      equitySbcPctRevenue: 0,
+      equityRollforwardConfirmed: false,
+      taxForecastMethod: "flat_rate" as const,
+      taxEffectiveRatePct: 28,
+      taxRateByYear: {},
+      taxFlatExpense: 0,
+      taxAllowBenefit: false,
+      taxScheduleConfirmed: false,
     });
     get().recalculateAll();
   },
@@ -5139,7 +6093,104 @@ export const useModelStore = create<ModelState & ModelActions>()(
           },
         })),
 
-      setDebtSchedulePhase2Persist: (value) => set(() => ({ debtSchedulePhase2Persist: value })),
+      setDebtSchedulePhase2Persist: (value) => {
+        set(() => ({ debtSchedulePhase2Persist: value }));
+        if (value.applied) get().applyBsBuildProjectionsToModel();
+      },
+
+      // Interest Income Schedule setters
+      setIntIncomeMethod: (method) => set(() => ({ intIncomeMethod: method })),
+      setIntIncomeRatePct: (pct) => set(() => ({ intIncomeRatePct: Math.max(0, pct) })),
+      setIntIncomeFlatValue: (value) => set(() => ({ intIncomeFlatValue: value })),
+      setIntIncomeGrowthPct: (pct) => set(() => ({ intIncomeGrowthPct: pct })),
+      setIntIncomeManualByYear: (year, value) =>
+        set((s) => ({
+          intIncomeManualByYear: { ...s.intIncomeManualByYear, [year]: value },
+        })),
+      setIntIncomeScheduleConfirmed: (confirmed) => {
+        set(() => ({ intIncomeScheduleConfirmed: confirmed }));
+        if (confirmed) get().applyBsBuildProjectionsToModel();
+      },
+      setDandaScheduleConfirmed: (confirmed) => {
+        set(() => ({ dandaScheduleConfirmed: confirmed }));
+        if (confirmed) get().applyBsBuildProjectionsToModel();
+      },
+      setWcDriversConfirmed: (confirmed) => {
+        set(() => ({ wcDriversConfirmed: confirmed }));
+        if (confirmed) get().applyBsBuildProjectionsToModel();
+      },
+
+      // Other BS Items setters
+      setOtherBsForecast: (itemId, patch) =>
+        set((s) => {
+          const existing: OtherBsItemForecast = s.otherBsForecastByItemId[itemId] ?? {
+            method: "flat",
+            growthPct: 0,
+            growthPctByYear: {},
+            pctRevenue: 0,
+            manualByYear: {},
+          };
+          return {
+            otherBsForecastByItemId: {
+              ...s.otherBsForecastByItemId,
+              [itemId]: { ...existing, ...patch },
+            },
+          };
+        }),
+      setOtherBsConfirmed: (confirmed) => {
+        set(() => ({ otherBsConfirmed: confirmed }));
+        if (confirmed) get().applyBsBuildProjectionsToModel();
+      },
+
+      // Equity Roll-Forward setters
+      setEquityDividendMethod: (method) => set(() => ({ equityDividendMethod: method })),
+      setEquityDividendPayoutRatio: (pct) => set(() => ({ equityDividendPayoutRatio: Math.max(0, Math.min(100, pct)) })),
+      setEquityDividendFixedAmount: (value) => set(() => ({ equityDividendFixedAmount: Math.max(0, value) })),
+      setEquityDividendManualByYear: (year, value) =>
+        set((s) => ({ equityDividendManualByYear: { ...s.equityDividendManualByYear, [year]: Math.max(0, value) } })),
+      setEquityBuybackMethod: (method) => set(() => ({ equityBuybackMethod: method })),
+      setEquityBuybackFixedAmount: (value) => set(() => ({ equityBuybackFixedAmount: Math.max(0, value) })),
+      setEquityBuybackPctNetIncome: (pct) => set(() => ({ equityBuybackPctNetIncome: Math.max(0, Math.min(100, pct)) })),
+      setEquityBuybackManualByYear: (year, value) =>
+        set((s) => ({ equityBuybackManualByYear: { ...s.equityBuybackManualByYear, [year]: Math.max(0, value) } })),
+      setEquitySharesReissuedMethod: (method) => set(() => ({ equitySharesReissuedMethod: method })),
+      setEquitySharesReissuedFixedAmount: (value) => set(() => ({ equitySharesReissuedFixedAmount: Math.max(0, value) })),
+      setEquitySharesReissuedManualByYear: (year, value) =>
+        set((s) => ({ equitySharesReissuedManualByYear: { ...s.equitySharesReissuedManualByYear, [year]: Math.max(0, value) } })),
+      setEquityIssuanceMethod: (method) => set(() => ({ equityIssuanceMethod: method })),
+      setEquityIssuanceFixedAmount: (value) => set(() => ({ equityIssuanceFixedAmount: Math.max(0, value) })),
+      setEquityIssuanceManualByYear: (year, value) =>
+        set((s) => ({ equityIssuanceManualByYear: { ...s.equityIssuanceManualByYear, [year]: Math.max(0, value) } })),
+      setEquityOptionProceedsMethod: (method) => set(() => ({ equityOptionProceedsMethod: method })),
+      setEquityOptionProceedsFixedAmount: (value) => set(() => ({ equityOptionProceedsFixedAmount: Math.max(0, value) })),
+      setEquityOptionProceedsManualByYear: (year, value) =>
+        set((s) => ({ equityOptionProceedsManualByYear: { ...s.equityOptionProceedsManualByYear, [year]: Math.max(0, value) } })),
+      setEquityEsppMethod: (method) => set(() => ({ equityEsppMethod: method })),
+      setEquityEsppFixedAmount: (value) => set(() => ({ equityEsppFixedAmount: Math.max(0, value) })),
+      setEquityEsppManualByYear: (year, value) =>
+        set((s) => ({ equityEsppManualByYear: { ...s.equityEsppManualByYear, [year]: Math.max(0, value) } })),
+      setEquitySbcMethod: (method) => set(() => ({ equitySbcMethod: method })),
+      setEquityManualSbcByYear: (year, value) =>
+        set((s) => ({ equityManualSbcByYear: { ...s.equityManualSbcByYear, [year]: Math.max(0, value) } })),
+      setEquitySbcPctRevenue: (pct) => set(() => ({ equitySbcPctRevenue: Math.max(0, Math.min(100, pct)) })),
+      setEquityRollforwardConfirmed: (confirmed) => {
+        set(() => ({ equityRollforwardConfirmed: confirmed }));
+        if (confirmed) get().applyBsBuildProjectionsToModel();
+      },
+
+      // Tax Schedule setters
+      setTaxForecastMethod: (method) => set(() => ({ taxForecastMethod: method })),
+      setTaxEffectiveRatePct: (pct) => set(() => ({ taxEffectiveRatePct: Math.max(0, Math.min(100, pct)) })),
+      setTaxRateByYear: (year, pct) =>
+        set((s) => ({
+          taxRateByYear: { ...s.taxRateByYear, [year]: Math.max(0, Math.min(100, pct)) },
+        })),
+      setTaxFlatExpense: (value) => set(() => ({ taxFlatExpense: value })),
+      setTaxAllowBenefit: (allow) => set(() => ({ taxAllowBenefit: allow })),
+      setTaxScheduleConfirmed: (confirmed) => {
+        set(() => ({ taxScheduleConfirmed: confirmed }));
+        if (confirmed) get().applyBsBuildProjectionsToModel();
+      },
 
       mergeNonOperatingPhase2AiSuggestions: (suggestions) =>
         set((s) => {

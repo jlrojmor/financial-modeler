@@ -57,6 +57,10 @@ import {
 import { computeCapexDiagnostics } from "@/lib/capex-da-diagnostics";
 import type { CapexDaAiSuggestion } from "@/types/capex-da-ai";
 import { getProjectedRevenueTotalByYear } from "@/lib/non-operating-phase2-direct-preview";
+import { computeInterestIncomeSchedule } from "@/lib/interest-income-engine";
+import { computeHistoricalEtr, computeTaxSchedule } from "@/lib/tax-schedule-engine";
+import { computeRowValue } from "@/lib/calculations";
+import { computeProjectedEbitByYear } from "@/lib/projected-ebit";
 
 const CAPEX_BUCKET_LABELS: Record<string, string> = {
   cap_b1: "Land",
@@ -223,7 +227,8 @@ function lastHistoricalSnippet(row: Row | null, lastHistYear: string | null): st
 
 function Phase2DandAScheduleBuilder() {
   const [open, setOpen] = useState(false);
-  const [dandaConfirmed, setDandaConfirmed] = useState(false);
+  const dandaConfirmed = useModelStore((s) => s.dandaScheduleConfirmed ?? false);
+  const setDandaConfirmed = useModelStore((s) => s.setDandaScheduleConfirmed);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiSuggestion, setAiSuggestion] = useState<CapexDaAiSuggestion | null>(null);
@@ -611,11 +616,11 @@ function Phase2DandAScheduleBuilder() {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-slate-100">PP&amp;E, Capex &amp; D&amp;A Schedule</span>
             {dandaConfirmed && schedule?.isConfigured ? (
-              <span className="inline-flex items-center gap-1 text-[9px] font-semibold rounded px-1.5 py-0.5 bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
                 ✓ Active
               </span>
             ) : schedule?.isConfigured ? (
-              <span className="inline-flex items-center gap-1 text-[9px] rounded px-1.5 py-0.5 bg-amber-950/40 text-amber-400 border border-amber-700/40">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-amber-950/40 text-amber-300 border border-amber-700/40">
                 Pending confirm
               </span>
             ) : null}
@@ -1315,6 +1320,869 @@ function Phase2DandAScheduleBuilder() {
   );
 }
 
+// ─── Interest Income Schedule Builder ──────────────────────────────────────────
+
+function Phase2InterestIncomeBuilder() {
+  const [open, setOpen] = useState(true);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiRationale, setAiRationale] = useState<string | null>(null);
+  const [shouldSkip, setShouldSkip] = useState<boolean | null>(null);
+
+  const meta = useModelStore((s) => s.meta);
+  const incomeStatement = useModelStore((s) => s.incomeStatement ?? []);
+  const balanceSheet = useModelStore((s) => s.balanceSheet ?? []);
+  const companyContext = useModelStore((s) => s.companyContext);
+
+  const intIncomeMethod = useModelStore((s) => s.intIncomeMethod);
+  const intIncomeRatePct = useModelStore((s) => s.intIncomeRatePct);
+  const intIncomeFlatValue = useModelStore((s) => s.intIncomeFlatValue);
+  const intIncomeGrowthPct = useModelStore((s) => s.intIncomeGrowthPct);
+  const intIncomeManualByYear = useModelStore((s) => s.intIncomeManualByYear);
+  const intIncomeScheduleConfirmed = useModelStore((s) => s.intIncomeScheduleConfirmed);
+
+  const setIntIncomeMethod = useModelStore((s) => s.setIntIncomeMethod);
+  const setIntIncomeRatePct = useModelStore((s) => s.setIntIncomeRatePct);
+  const setIntIncomeFlatValue = useModelStore((s) => s.setIntIncomeFlatValue);
+  const setIntIncomeGrowthPct = useModelStore((s) => s.setIntIncomeGrowthPct);
+  const setIntIncomeManualByYear = useModelStore((s) => s.setIntIncomeManualByYear);
+  const setIntIncomeScheduleConfirmed = useModelStore((s) => s.setIntIncomeScheduleConfirmed);
+
+  const projectionYears = meta?.years?.projection ?? [];
+  const historicalYears = meta?.years?.historical ?? [];
+  const lastHistYear = historicalYears.at(-1) ?? null;
+  const currencyUnit = meta?.currencyUnit ?? "millions";
+
+  // Detect interest income from IS
+  const intIncomeRow = useMemo(
+    () => incomeStatement.find((r) => r.taxonomyType === "non_op_interest_income" || r.id === "interest_income"),
+    [incomeStatement]
+  );
+
+  // Detect cash from BS
+  const cashRow = useMemo(
+    () => balanceSheet.find((r) => r.taxonomyType === "asset_cash" || r.id === "cash"),
+    [balanceSheet]
+  );
+
+  // Stored (base currency) values — engines and fmt work in stored units
+  const histInterestIncome = useMemo(
+    () =>
+      historicalYears.map((y) => {
+        const v = intIncomeRow?.values?.[y];
+        return typeof v === "number" ? Math.abs(v) : 0;  // stored
+      }),
+    [historicalYears, intIncomeRow]
+  );
+
+  const histCash = useMemo(
+    () =>
+      historicalYears.map((y) => {
+        const v = cashRow?.values?.[y];
+        return typeof v === "number" ? Math.abs(v) : 0;  // stored
+      }),
+    [historicalYears, cashRow]
+  );
+
+  const avgHistIncome = histInterestIncome.length > 0
+    ? histInterestIncome.reduce((a, b) => a + b, 0) / histInterestIncome.length
+    : 0;
+  const avgHistCash = histCash.length > 0
+    ? histCash.reduce((a, b) => a + b, 0) / histCash.length
+    : 0;
+
+  const lastHistCash = histCash.at(-1) ?? 0;  // stored
+  const lastHistInterestIncome = histInterestIncome.at(-1) ?? 0;  // stored
+
+  // Build cashByYear from BS — STORED values (engine multiplies rate × stored cash)
+  const cashByYear = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const y of [...historicalYears, ...projectionYears]) {
+      const v = cashRow?.values?.[y];
+      if (typeof v === "number") out[y] = Math.abs(v);  // stored
+    }
+    return out;
+  }, [historicalYears, projectionYears, cashRow]);
+
+  // Compute preview — all values in stored units
+  const preview = useMemo(() => {
+    return computeInterestIncomeSchedule({
+      projectionYears,
+      cashByYear,
+      lastHistCash,
+      lastHistInterestIncome,
+      method: intIncomeMethod,
+      ratePct: intIncomeRatePct,
+      flatValue: intIncomeFlatValue,  // stored
+      growthPct: intIncomeGrowthPct,
+      manualByYear: intIncomeManualByYear,  // stored
+    });
+  }, [projectionYears, cashByYear, lastHistCash, lastHistInterestIncome, intIncomeMethod, intIncomeRatePct, intIncomeFlatValue, intIncomeGrowthPct, intIncomeManualByYear]);
+
+  // Format stored values for display (consistent with formatBridgeAmount pattern)
+  const fmtCell = (storedVal: number) => {
+    if (!Number.isFinite(storedVal) || storedVal === 0) return "—";
+    const d = storedToDisplay(Math.abs(storedVal), currencyUnit);
+    const l = getUnitLabel(currencyUnit);
+    return `${d.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${l}`;
+  };
+
+  const visibleYears = [lastHistYear, ...projectionYears.slice(0, 4)].filter(Boolean) as string[];
+  const hasHistory = avgHistIncome > 0;
+
+  async function handleAiSuggest() {
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const res = await fetch("/api/ai/interest-income-suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyContext,
+          // Send display values to AI for human-readable context
+          historicalInterestIncome: histInterestIncome.map((v) => storedToDisplay(v, currencyUnit)),
+          historicalCashBalances: histCash.map((v) => storedToDisplay(v, currencyUnit)),
+          historicalRevenue: [],
+          currencyUnit,
+        }),
+      });
+      const data = await res.json() as { suggestion?: { suggestedRatePct: number; shouldSkip: boolean; rationale: string }; error?: string };
+      if (data.error || !data.suggestion) {
+        setAiError(data.error ?? "Unknown AI error");
+      } else {
+        setIntIncomeMethod("pct_avg_cash");
+        setIntIncomeRatePct(data.suggestion.suggestedRatePct);
+        setShouldSkip(data.suggestion.shouldSkip);
+        setAiRationale(data.suggestion.rationale);
+      }
+    } catch (e) {
+      setAiError(String(e));
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  const statusBadge = intIncomeScheduleConfirmed ? (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+      ✓ Active
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-amber-950/40 text-amber-300 border border-amber-700/40">
+      Pending confirm
+    </span>
+  );
+
+  return (
+    <div className="rounded-lg border border-slate-700/50 bg-slate-900/40 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-800/30 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-slate-100">Interest Income Schedule</span>
+          {statusBadge}
+        </div>
+        <span className="text-slate-500 text-xs">{open ? "▲" : "▼"}</span>
+      </button>
+
+      {open && (
+        <div className="px-4 pb-4 space-y-4 border-t border-slate-700/40">
+          {/* Step 1 — Historical detection */}
+          <div className="pt-3 space-y-1">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Step 1 — Historical detection</p>
+            {hasHistory ? (
+              <div className="flex items-center gap-2 rounded bg-slate-800/50 px-3 py-2">
+                <span className="text-emerald-400 text-sm">✓</span>
+                <span className="text-[11px] text-slate-300">
+                  Detected avg <span className="text-white font-semibold">{fmtCell(avgHistIncome)}/yr</span> interest income
+                  {avgHistCash > 0
+                    ? ` on avg cash of ${fmtCell(avgHistCash)} (implied ~${avgHistCash > 0 ? ((avgHistIncome / avgHistCash) * 100).toFixed(1) : "0"}% rate)`
+                    : ""}
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 rounded bg-amber-950/30 border border-amber-800/30 px-3 py-2">
+                <span className="text-amber-400 text-sm">⚠</span>
+                <span className="text-[11px] text-amber-200">
+                  No interest income found in historical statements — safe to skip or set to 0.
+                </span>
+              </div>
+            )}
+            {avgHistCash === 0 && (
+              <p className="text-[10px] text-amber-400 px-1">
+                Low or no cash balance detected — interest income may be immaterial.
+              </p>
+            )}
+          </div>
+
+          {/* Step 2 — AI suggest */}
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Step 2 — AI Suggest</p>
+            <button
+              type="button"
+              onClick={() => void handleAiSuggest()}
+              disabled={aiLoading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded text-[11px] font-semibold bg-violet-900/40 text-violet-200 border border-violet-700/40 hover:bg-violet-800/50 disabled:opacity-50 transition-colors"
+            >
+              {aiLoading ? "Analyzing…" : "✦ AI Suggest rate"}
+            </button>
+            {aiRationale && (
+              <p className="text-[10px] text-slate-400 px-1 italic">{aiRationale}</p>
+            )}
+            {shouldSkip === true && (
+              <div className="rounded bg-slate-800/50 border border-slate-700/40 px-3 py-2">
+                <p className="text-[11px] text-amber-300">AI recommends skipping — set to 0 or use flat value of $0.</p>
+              </div>
+            )}
+            {aiError && <p className="text-[10px] text-red-400">{aiError}</p>}
+          </div>
+
+          {/* Step 3 — Forecast method */}
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Step 3 — Forecast method</p>
+            <div className="flex flex-wrap gap-1.5">
+              {(["pct_avg_cash", "flat_value", "growth_pct", "manual_by_year"] as const).map((m) => {
+                const labels: Record<string, string> = {
+                  pct_avg_cash: "% of avg cash",
+                  flat_value: "Flat value",
+                  growth_pct: "Growth %",
+                  manual_by_year: "Manual by year",
+                };
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setIntIncomeMethod(m)}
+                    className={`px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ${
+                      intIncomeMethod === m
+                        ? "bg-violet-700/60 text-violet-100 border-violet-600/60"
+                        : "bg-slate-800/50 text-slate-400 border-slate-700/40 hover:text-slate-200"
+                    }`}
+                  >
+                    {labels[m]}
+                  </button>
+                );
+              })}
+            </div>
+
+            {intIncomeMethod === "pct_avg_cash" && (
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-slate-400 w-36">Rate (% of avg cash)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="15"
+                  value={intIncomeRatePct}
+                  onChange={(e) => setIntIncomeRatePct(parseFloat(e.target.value) || 0)}
+                  className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-violet-500"
+                />
+                <span className="text-[11px] text-slate-500">%</span>
+              </div>
+            )}
+            {intIncomeMethod === "flat_value" && (
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-slate-400 w-36">Flat value/yr ({getUnitLabel(currencyUnit) || currencyUnit})</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={storedToDisplay(intIncomeFlatValue, currencyUnit)}
+                  onChange={(e) => setIntIncomeFlatValue(displayToStored(parseFloat(e.target.value) || 0, currencyUnit))}
+                  className="w-24 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-violet-500"
+                />
+              </div>
+            )}
+            {intIncomeMethod === "growth_pct" && (
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-slate-400 w-36">Annual growth %</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={intIncomeGrowthPct}
+                  onChange={(e) => setIntIncomeGrowthPct(parseFloat(e.target.value) || 0)}
+                  className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-violet-500"
+                />
+                <span className="text-[11px] text-slate-500">%</span>
+              </div>
+            )}
+            {intIncomeMethod === "manual_by_year" && (
+              <div className="space-y-1">
+                {projectionYears.map((y) => (
+                  <div key={y} className="flex items-center gap-2">
+                    <label className="text-[11px] text-slate-400 w-16">{y}</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={storedToDisplay(intIncomeManualByYear[y] ?? 0, currencyUnit)}
+                      onChange={(e) => setIntIncomeManualByYear(y, displayToStored(parseFloat(e.target.value) || 0, currencyUnit))}
+                      className="w-24 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-violet-500"
+                    />
+                    <span className="text-[10px] text-slate-500">{getUnitLabel(currencyUnit) || currencyUnit}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Preview table */}
+          <div className="space-y-1">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Preview</p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px] border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-700/50">
+                    <th className="text-left text-slate-500 py-1 pr-3 font-normal w-36">Item</th>
+                    {visibleYears.map((y) => (
+                      <th
+                        key={y}
+                        className={`text-right py-1 px-2 font-semibold ${
+                          y === lastHistYear ? "text-amber-400/80" : "text-slate-400"
+                        }`}
+                      >
+                        {y}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b border-slate-800/50">
+                    <td className="py-1 pr-3 text-slate-400">Avg cash balance</td>
+                    {visibleYears.map((y) => {
+                      const isHist = y === lastHistYear;
+                      const val = isHist ? lastHistCash : (preview.avgCashByYear[y] ?? 0);
+                      return (
+                        <td key={y} className={`text-right px-2 py-1 ${isHist ? "text-amber-300/80" : "text-slate-300"}`}>
+                          {fmtCell(val)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                  <tr className="border-b border-slate-800/50">
+                    <td className="py-1 pr-3 text-slate-400">× Rate</td>
+                    {visibleYears.map((y) => {
+                      const isHist = y === lastHistYear;
+                      return (
+                        <td key={y} className={`text-right px-2 py-1 ${isHist ? "text-amber-300/80 italic" : "text-slate-300"}`}>
+                          {isHist ? "—" : `${intIncomeRatePct.toFixed(1)}%`}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                  <tr className="font-semibold">
+                    <td className="py-1 pr-3 text-slate-200">= Int. income</td>
+                    {visibleYears.map((y) => {
+                      const isHist = y === lastHistYear;
+                      const val = isHist ? lastHistInterestIncome : (preview.interestIncomeByYear[y] ?? 0);
+                      return (
+                        <td key={y} className={`text-right px-2 py-1 ${isHist ? "text-amber-300/80" : "text-emerald-300"}`}>
+                          {fmtCell(val)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Confirm button */}
+          <div className="flex items-center gap-3 pt-1">
+            {!intIncomeScheduleConfirmed ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setIntIncomeScheduleConfirmed(true);
+                  setOpen(false);
+                }}
+                className="px-4 py-2 rounded text-[12px] font-semibold bg-emerald-800/60 text-emerald-200 border border-emerald-700/50 hover:bg-emerald-700/60 transition-colors"
+              >
+                ✓ Confirm & Activate Schedule
+              </button>
+            ) : (
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] text-emerald-400 font-semibold">✓ Interest income schedule active</span>
+                <button
+                  type="button"
+                  onClick={() => setIntIncomeScheduleConfirmed(false)}
+                  className="text-[10px] text-slate-500 hover:text-slate-300"
+                >
+                  Edit
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Tax Schedule Builder ───────────────────────────────────────────────────────
+
+function Phase2TaxScheduleBuilder() {
+  const [open, setOpen] = useState(true);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiRationale, setAiRationale] = useState<string | null>(null);
+  const [aiEntityNote, setAiEntityNote] = useState<string | null>(null);
+  const [aiErraticExplanation, setAiErraticExplanation] = useState<string | null>(null);
+
+  const meta = useModelStore((s) => s.meta);
+  const incomeStatement = useModelStore((s) => s.incomeStatement ?? []);
+  const balanceSheet = useModelStore((s) => s.balanceSheet ?? []);
+  const cashFlow = useModelStore((s) => s.cashFlow ?? []);
+  const companyContext = useModelStore((s) => s.companyContext);
+  const cogsForecastConfigV1 = useModelStore((s) => s.cogsForecastConfigV1);
+  const opexForecastConfigV1 = useModelStore((s) => s.opexForecastConfigV1);
+  const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
+  const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
+  const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
+  const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns ?? {});
+  const danaBreakdowns = useModelStore((s) => s.danaBreakdowns ?? {});
+
+  const taxForecastMethod = useModelStore((s) => s.taxForecastMethod);
+  const taxEffectiveRatePct = useModelStore((s) => s.taxEffectiveRatePct);
+  const taxRateByYear = useModelStore((s) => s.taxRateByYear);
+  const taxFlatExpense = useModelStore((s) => s.taxFlatExpense);
+  const taxAllowBenefit = useModelStore((s) => s.taxAllowBenefit);
+  const taxScheduleConfirmed = useModelStore((s) => s.taxScheduleConfirmed);
+
+  const setTaxForecastMethod = useModelStore((s) => s.setTaxForecastMethod);
+  const setTaxEffectiveRatePct = useModelStore((s) => s.setTaxEffectiveRatePct);
+  const setTaxRateByYear = useModelStore((s) => s.setTaxRateByYear);
+  const setTaxFlatExpense = useModelStore((s) => s.setTaxFlatExpense);
+  const setTaxAllowBenefit = useModelStore((s) => s.setTaxAllowBenefit);
+  const setTaxScheduleConfirmed = useModelStore((s) => s.setTaxScheduleConfirmed);
+
+  const projectionYears = meta?.years?.projection ?? [];
+  const historicalYears = meta?.years?.historical ?? [];
+  const lastHistYear = historicalYears.at(-1) ?? null;
+  const currencyUnit = meta?.currencyUnit ?? "millions";
+
+  // Detect EBT and tax rows from IS
+  const ebtRow = useMemo(
+    () => incomeStatement.find((r) => r.taxonomyType === "calc_ebt" || r.id === "ebt"),
+    [incomeStatement]
+  );
+  const taxRow = useMemo(
+    () => incomeStatement.find((r) => r.taxonomyType === "tax_expense" || r.id === "tax_expense"),
+    [incomeStatement]
+  );
+
+  // Historical ETR diagnostic — stored values (ETR is a ratio so units cancel out)
+  const historicalEtrRows = useMemo(() => {
+    const ebtByYear: Record<string, number> = {};
+    const taxByYear: Record<string, number> = {};
+    for (const y of historicalYears) {
+      const e = ebtRow?.values?.[y];
+      const t = taxRow?.values?.[y];
+      ebtByYear[y] = typeof e === "number" ? e : 0;  // stored
+      taxByYear[y] = typeof t === "number" ? Math.abs(t) : 0;  // stored
+    }
+    return computeHistoricalEtr(historicalYears, ebtByYear, taxByYear);
+  }, [historicalYears, ebtRow, taxRow]);
+
+  const hasErraticEtr = historicalEtrRows.some((r) => r.flagged);
+  const normalizedAvgEtr = useMemo(() => {
+    const validEtrs = historicalEtrRows.filter((r) => r.etr != null && !r.flagged).map((r) => r.etr!);
+    return validEtrs.length > 0
+      ? validEtrs.reduce((a, b) => a + b, 0) / validEtrs.length
+      : historicalEtrRows.filter((r) => r.etr != null).reduce((sum, r) => sum + (r.etr ?? 0), 0) / Math.max(historicalEtrRows.filter((r) => r.etr != null).length, 1);
+  }, [historicalEtrRows]);
+
+  // Preview EBT: use forecast engines (revenue − COGS − OpEx) to get projected EBIT as EBT proxy.
+  // computeRowValue(ebtRow) returns 0 for projection years because IS input rows have no stored projected values.
+  const allStForTax = useMemo(
+    () => ({ incomeStatement, balanceSheet, cashFlow }),
+    [incomeStatement, balanceSheet, cashFlow]
+  );
+  const ebtByYearForPreview = useMemo(() => {
+    const ebitOut = computeProjectedEbitByYear({
+      incomeStatement,
+      projectionYears,
+      lastHistoricYear: lastHistYear ?? "",
+      revenueForecastConfigV1,
+      revenueForecastTreeV1,
+      revenueProjectionConfig,
+      cogsForecastConfigV1,
+      opexForecastConfigV1,
+      allStatements: allStForTax,
+      sbcBreakdowns,
+      danaBreakdowns,
+      currencyUnit: (meta?.currencyUnit ?? "millions") as "units" | "thousands" | "millions",
+    });
+    const out: Record<string, number> = {};
+    for (const y of projectionYears) {
+      const v = ebitOut[y];
+      if (v != null && Number.isFinite(v)) {
+        out[y] = v;
+      } else {
+        // Fallback: last historical EBT value
+        const lastEbt = lastHistYear ? ebtRow?.values?.[lastHistYear] : undefined;
+        out[y] = typeof lastEbt === "number" ? lastEbt : 0;
+      }
+    }
+    return out;
+  }, [
+    incomeStatement, projectionYears, lastHistYear,
+    revenueForecastConfigV1, revenueForecastTreeV1, revenueProjectionConfig,
+    cogsForecastConfigV1, opexForecastConfigV1, allStForTax,
+    sbcBreakdowns, danaBreakdowns, meta?.currencyUnit, ebtRow,
+  ]);
+
+  const taxPreview = useMemo(() => {
+    return computeTaxSchedule({
+      projectionYears,
+      ebtByYear: ebtByYearForPreview,  // stored
+      method: taxForecastMethod,
+      flatRatePct: taxEffectiveRatePct,
+      rateByYear: taxRateByYear,
+      flatExpense: taxFlatExpense,  // stored
+      allowTaxBenefit: taxAllowBenefit,
+    });
+  }, [projectionYears, ebtByYearForPreview, taxForecastMethod, taxEffectiveRatePct, taxRateByYear, taxFlatExpense, taxAllowBenefit]);
+
+  // Format stored values for display
+  const fmtCell = (storedVal: number) => {
+    if (!Number.isFinite(storedVal) || storedVal === 0) return "—";
+    const d = storedToDisplay(Math.abs(storedVal), currencyUnit);
+    const l = getUnitLabel(currencyUnit);
+    return `${d.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${l}`;
+  };
+  const fmtPct = (v: number) => `${(v * 100).toFixed(1)}%`;
+
+  const visibleYears = projectionYears.slice(0, 4);
+
+  async function handleAiSuggest() {
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const histEtrs = historicalEtrRows.filter((r) => r.etr != null).map((r) => r.etr!);
+      const histYrs = historicalEtrRows.filter((r) => r.etr != null).map((r) => r.year);
+      const res = await fetch("/api/ai/tax-rate-suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          companyContext,
+          historicalEtrs: histEtrs,
+          historicalYears: histYrs,
+          hasErraticEtr,
+          currencyUnit,
+        }),
+      });
+      const data = await res.json() as {
+        suggestion?: {
+          suggestedRatePct: number;
+          entityTypeNote: string | null;
+          rationale: string;
+          erraticFlag: boolean;
+          erraticExplanation: string | null;
+        };
+        error?: string;
+      };
+      if (data.error || !data.suggestion) {
+        setAiError(data.error ?? "Unknown AI error");
+      } else {
+        setTaxEffectiveRatePct(data.suggestion.suggestedRatePct);
+        setAiRationale(data.suggestion.rationale);
+        setAiEntityNote(data.suggestion.entityTypeNote);
+        setAiErraticExplanation(data.suggestion.erraticExplanation);
+      }
+    } catch (e) {
+      setAiError(String(e));
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  const statusBadge = taxScheduleConfirmed ? (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+      ✓ Active
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-amber-950/40 text-amber-300 border border-amber-700/40">
+      Pending confirm
+    </span>
+  );
+
+  return (
+    <div className="rounded-lg border border-slate-700/50 bg-slate-900/40 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-800/30 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-slate-100">Tax Schedule</span>
+          {statusBadge}
+        </div>
+        <span className="text-slate-500 text-xs">{open ? "▲" : "▼"}</span>
+      </button>
+
+      {open && (
+        <div className="px-4 pb-4 space-y-4 border-t border-slate-700/40">
+          {/* Step 1 — Historical ETR diagnostic */}
+          <div className="pt-3 space-y-2">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Step 1 — Historical ETR diagnostic</p>
+            {historicalEtrRows.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px] border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-700/40">
+                      <th className="text-left text-slate-500 py-1 pr-3 font-normal">Year</th>
+                      <th className="text-right text-slate-500 py-1 px-2 font-normal">EBT</th>
+                      <th className="text-right text-slate-500 py-1 px-2 font-normal">Tax</th>
+                      <th className="text-right text-slate-500 py-1 px-2 font-normal">ETR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {historicalEtrRows.map((row) => (
+                      <tr key={row.year} className="border-b border-slate-800/40">
+                        <td className="py-1 pr-3 text-amber-300/80 font-mono">{row.year}</td>
+                        <td className="text-right px-2 py-1 text-slate-300 font-mono">{fmtCell(row.ebt)}</td>
+                        <td className="text-right px-2 py-1 text-slate-300 font-mono">{fmtCell(row.tax)}</td>
+                        <td className={`text-right px-2 py-1 font-mono font-semibold ${row.flagged ? "text-amber-400" : "text-slate-200"}`}>
+                          {row.etr != null ? fmtPct(row.etr) : "N/A"}
+                          {row.flagged && <span className="ml-1 text-[10px]">⚠</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-500 italic">No historical EBT or tax data available.</p>
+            )}
+            {hasErraticEtr && (
+              <div className="rounded bg-amber-950/30 border border-amber-800/30 px-3 py-2">
+                <p className="text-[11px] text-amber-200">
+                  ⚠ ETR varies significantly across years — likely one-time tax items or deferred tax adjustments. Recommend normalizing to{" "}
+                  <span className="font-semibold">{fmtPct(normalizedAvgEtr)}</span> (excluding outliers).
+                </p>
+              </div>
+            )}
+            {aiErraticExplanation && (
+              <p className="text-[10px] text-amber-300 italic px-1">{aiErraticExplanation}</p>
+            )}
+          </div>
+
+          {/* Step 2 — Forecast ETR + AI */}
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Step 2 — Forecast tax rate</p>
+            {aiEntityNote && (
+              <div className="rounded bg-amber-950/30 border border-amber-800/30 px-3 py-2">
+                <p className="text-[11px] text-amber-200">⚠ {aiEntityNote}</p>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => void handleAiSuggest()}
+              disabled={aiLoading}
+              className="flex items-center gap-2 px-3 py-1.5 rounded text-[11px] font-semibold bg-violet-900/40 text-violet-200 border border-violet-700/40 hover:bg-violet-800/50 disabled:opacity-50 transition-colors"
+            >
+              {aiLoading ? "Analyzing…" : "✦ AI Suggest ETR"}
+            </button>
+            {aiRationale && (
+              <p className="text-[10px] text-slate-400 px-1 italic">{aiRationale}</p>
+            )}
+            {aiError && <p className="text-[10px] text-red-400">{aiError}</p>}
+
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-slate-400 w-36">
+                {taxForecastMethod === "flat_expense" ? "Fixed expense/yr" : "Effective tax rate"}
+              </label>
+              {taxForecastMethod === "flat_expense" ? (
+                <>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={storedToDisplay(taxFlatExpense, currencyUnit)}
+                    onChange={(e) => setTaxFlatExpense(displayToStored(parseFloat(e.target.value) || 0, currencyUnit))}
+                    className="w-24 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-violet-500"
+                  />
+                  <span className="text-[11px] text-slate-500">{getUnitLabel(currencyUnit) || currencyUnit}</span>
+                </>
+              ) : (
+                <>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    max="100"
+                    value={taxEffectiveRatePct}
+                    onChange={(e) => setTaxEffectiveRatePct(parseFloat(e.target.value) || 0)}
+                    className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-violet-500"
+                  />
+                  <span className="text-[11px] text-slate-500">%</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Step 3 — Method */}
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Step 3 — Method</p>
+            <div className="flex flex-wrap gap-1.5">
+              {(["flat_rate", "rate_by_year", "flat_expense"] as const).map((m) => {
+                const labels: Record<string, string> = {
+                  flat_rate: "Flat rate for all years",
+                  rate_by_year: "Rate by year",
+                  flat_expense: "Fixed $ amount/yr",
+                };
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setTaxForecastMethod(m)}
+                    className={`px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ${
+                      taxForecastMethod === m
+                        ? "bg-violet-700/60 text-violet-100 border-violet-600/60"
+                        : "bg-slate-800/50 text-slate-400 border-slate-700/40 hover:text-slate-200"
+                    }`}
+                  >
+                    {labels[m]}
+                  </button>
+                );
+              })}
+            </div>
+            {taxForecastMethod === "rate_by_year" && (
+              <div className="space-y-1">
+                {projectionYears.map((y) => (
+                  <div key={y} className="flex items-center gap-2">
+                    <label className="text-[11px] text-slate-400 w-16">{y}</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      max="100"
+                      value={taxRateByYear[y] ?? taxEffectiveRatePct}
+                      onChange={(e) => setTaxRateByYear(y, parseFloat(e.target.value) || 0)}
+                      className="w-20 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-violet-500"
+                    />
+                    <span className="text-[11px] text-slate-500">%</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Step 4 — Loss handling */}
+          <div className="space-y-2">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">Step 4 — Loss year handling</p>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!taxAllowBenefit}
+                onChange={(e) => setTaxAllowBenefit(!e.target.checked)}
+                className="rounded"
+              />
+              <span className="text-[11px] text-slate-300">
+                Zero out tax in loss years <span className="text-slate-500">(conservative — IB standard)</span>
+              </span>
+            </label>
+            {taxAllowBenefit && (
+              <p className="text-[10px] text-amber-300 px-1">
+                Tax benefit on losses enabled — confirm NOL carryforward applies before using this.
+              </p>
+            )}
+          </div>
+
+          {/* Preview */}
+          <div className="space-y-1">
+            <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wide">
+              Preview <span className="text-slate-600 normal-case font-normal">(using projected EBT where available — final values link in the bridge)</span>
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px] border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-700/50">
+                    <th className="text-left text-slate-500 py-1 pr-3 font-normal w-36">Item</th>
+                    {visibleYears.map((y) => (
+                      <th key={y} className="text-right py-1 px-2 font-semibold text-slate-400">{y}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b border-slate-800/50">
+                    <td className="py-1 pr-3 text-slate-400">EBT (projected)</td>
+                    {visibleYears.map((y) => (
+                      <td key={y} className="text-right px-2 py-1 text-slate-300 font-mono">
+                        {fmtCell(ebtByYearForPreview[y] ?? 0)}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr className="border-b border-slate-800/50">
+                    <td className="py-1 pr-3 text-slate-400">Tax rate</td>
+                    {visibleYears.map((y) => (
+                      <td key={y} className="text-right px-2 py-1 text-slate-300 font-mono">
+                        {taxForecastMethod === "flat_expense"
+                          ? "Fixed"
+                          : `${(taxPreview.effectiveRateByYear[y] ?? 0) * 100 > 0 ? ((taxPreview.effectiveRateByYear[y] ?? 0) * 100).toFixed(1) + "%" : "—"}`}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr className="border-b border-slate-800/50">
+                    <td className="py-1 pr-3 text-slate-400">− Tax expense</td>
+                    {visibleYears.map((y) => (
+                      <td key={y} className="text-right px-2 py-1 text-red-300 font-mono">
+                        {fmtCell(taxPreview.taxExpenseByYear[y] ?? 0)}
+                      </td>
+                    ))}
+                  </tr>
+                  <tr className="font-semibold">
+                    <td className="py-1 pr-3 text-slate-200">= Net income</td>
+                    {visibleYears.map((y) => {
+                      const ni = taxPreview.netIncomeByYear[y] ?? 0;
+                      return (
+                        <td key={y} className={`text-right px-2 py-1 font-mono ${ni >= 0 ? "text-emerald-300" : "text-red-400"}`}>
+                          {fmtCell(ni)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Confirm button */}
+          <div className="flex items-center gap-3 pt-1">
+            {!taxScheduleConfirmed ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setTaxScheduleConfirmed(true);
+                  setOpen(false);
+                }}
+                className="px-4 py-2 rounded text-[12px] font-semibold bg-emerald-800/60 text-emerald-200 border border-emerald-700/50 hover:bg-emerald-700/60 transition-colors"
+              >
+                ✓ Confirm & Activate Schedule
+              </button>
+            ) : (
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] text-emerald-400 font-semibold">✓ Tax schedule active</span>
+                <button
+                  type="button"
+                  onClick={() => setTaxScheduleConfirmed(false)}
+                  className="text-[10px] text-slate-500 hover:text-slate-300"
+                >
+                  Edit
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── End of schedule builder components ────────────────────────────────────────
+
 const INTEREST_EXPENSE_LINE_ID = "interest_expense";
 
 function Phase2InterestExpenseDebtLinkedShell(props: {
@@ -1591,10 +2459,10 @@ function Phase2ScheduledLineShell(props: {
                 <button
                   type="button"
                   title="Tracks setup status for this preview shell. Does not yet run schedule calculations."
-                  onClick={() => onStatusChange("applied")}
+                  onClick={() => { onStatusChange("applied"); setOpen(false); }}
                   className="rounded-md border border-slate-600 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 text-left"
                 >
-                  Mark as configured (preview only)
+                  ✓ Mark as configured & Collapse
                 </button>
                 <span className="text-[9px] text-slate-600 max-w-[220px]">
                   Tracks setup status for this preview shell. Does not yet run schedule calculations.
@@ -1666,6 +2534,23 @@ function Phase2DirectForecastLineCard(props: {
   };
 
   const isOtherIncomeTemplate = row?.id === "other_income";
+  const isFxLine =
+    row?.taxonomyType === "non_op_fx_gain" || row?.taxonomyType === "non_op_fx_loss";
+
+  // For FX: compute 3-yr historical average using row values not in projectionYears
+  const fxThreeYrAvg = useMemo(() => {
+    if (!isFxLine || !row?.values) return 0;
+    const projSet = new Set(projectionYears);
+    const histValues = Object.entries(row.values)
+      .filter(([y, v]) => !projSet.has(y) && typeof v === "number")
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-3)
+      .map(([, v]) => storedToDisplay(v as number, currencyUnit));
+    return histValues.length > 0
+      ? histValues.reduce((a, b) => a + b, 0) / histValues.length
+      : 0;
+  }, [isFxLine, row, projectionYears, currencyUnit]);
+
   const aiPrefillDisabled =
     !aiSuggestion?.suggestedDirectMethod ||
     aiSuggestion.directForecastAppropriate === false ||
@@ -1718,6 +2603,38 @@ function Phase2DirectForecastLineCard(props: {
             never forecast in this section; it follows the debt schedule). Same method family as OpEx direct forecasts
             (shell only; no statement write yet).
           </p>
+
+          {/* FX-specific banner */}
+          {isFxLine && (
+            <div className="rounded border border-amber-700/50 bg-amber-950/25 px-3 py-2.5 space-y-2">
+              <p className="text-[11px] text-amber-200 font-semibold">⚠ FX gain/loss — IB modeling guidance</p>
+              <p className="text-[11px] text-amber-100/80">
+                FX gains and losses are typically non-recurring in financial models. IB standard: zero out for forecast
+                years unless this company has structural multi-currency revenue exposure.
+              </p>
+              <div className="flex flex-wrap gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft({ method: "flat_value", flat: 0 });
+                  }}
+                  className="px-2.5 py-1 rounded text-[11px] font-semibold bg-amber-900/50 text-amber-100 border border-amber-700/40 hover:bg-amber-800/60 transition-colors"
+                >
+                  Zero out (recommended)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft({ method: "flat_value", flat: displayToStored(fxThreeYrAvg, currencyUnit) });
+                  }}
+                  className="px-2.5 py-1 rounded text-[11px] font-semibold bg-slate-800/60 text-slate-200 border border-slate-600/50 hover:bg-slate-700/50 transition-colors"
+                >
+                  Use 3-yr avg{fxThreeYrAvg !== 0 ? ` (${fxThreeYrAvg >= 0 ? "+" : ""}${fxThreeYrAvg.toFixed(1)})` : ""}
+                </button>
+              </div>
+            </div>
+          )}
+
           {signHint ? <p className="text-[10px] text-slate-500 border-l-2 border-slate-600 pl-2">{signHint}</p> : null}
           {aiSuggestion ? (
             <div className="rounded-md border border-slate-700/80 bg-slate-900/50 p-2 space-y-1">
@@ -1853,11 +2770,11 @@ function Phase2DirectForecastLineCard(props: {
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={onApply}
+              onClick={() => { onApply(); setOpen(false); }}
               className="rounded-md bg-emerald-700/80 px-3 py-1.5 text-xs font-medium text-emerald-50 hover:bg-emerald-600 disabled:opacity-40"
               disabled={!unsaved}
             >
-              Apply
+              ✓ Apply & Collapse
             </button>
             <button
               type="button"
@@ -2005,6 +2922,11 @@ export default function NonOperatingSchedulesPhase2Panel() {
   const aiByLine = useModelStore((s) => s.nonOperatingPhase2AiByLine ?? {});
   const classificationLockedByLine = useModelStore((s) => s.nonOperatingPhase2ClassificationLockedByLine ?? {});
   const companyContext = useModelStore((s) => s.companyContext);
+
+  // Completeness pill for "Create / configure schedules" accordion
+  const debtSchedulePhase2Persist = useModelStore((s) => s.debtSchedulePhase2Persist);
+  const intIncomeScheduleConfirmed = useModelStore((s) => s.intIncomeScheduleConfirmed);
+  const taxScheduleConfirmed = useModelStore((s) => s.taxScheduleConfirmed);
   const setNonOperatingPhase2ScheduleStatus = useModelStore((s) => s.setNonOperatingPhase2ScheduleStatus);
   const setNonOperatingPhase2BucketOverride = useModelStore((s) => s.setNonOperatingPhase2BucketOverride);
   const setNonOperatingPhase2DirectLine = useModelStore((s) => s.setNonOperatingPhase2DirectLine);
@@ -2112,6 +3034,16 @@ export default function NonOperatingSchedulesPhase2Panel() {
 
   const scheduledLines = leaves.filter((l) => effectiveBucket(l) === "scheduled");
   const directLines = leaves.filter((l) => effectiveBucket(l) === "direct");
+
+  // Filter out lines that are already handled by dedicated schedule builders above.
+  // Interest expense → covered by the Debt Schedule when active.
+  // Interest income  → covered by the Interest Income Schedule when confirmed.
+  const debtScheduleActive = (debtSchedulePhase2Persist?.applied?.tranches?.length ?? 0) > 0;
+  const visibleScheduledLines = scheduledLines.filter((l) => {
+    if (l.lineId === INTEREST_EXPENSE_LINE_ID && debtScheduleActive) return false;
+    if (l.lineId === "interest_income" && intIncomeScheduleConfirmed) return false;
+    return true;
+  });
   const reviewLines = leaves.filter((l) => effectiveBucket(l) === "review");
   const excludedLines = leaves.filter((l) => effectiveBucket(l) === "excluded");
 
@@ -2144,6 +3076,10 @@ export default function NonOperatingSchedulesPhase2Panel() {
 
   const globalSummary = useMemo(() => {
     const eb = (line: NonOperatingLeafLine): Phase2LineBucket => {
+      // Lines managed by dedicated schedule builders don't count as "in progress"
+      // in the global summary — they are handled separately above.
+      if (line.lineId === INTEREST_EXPENSE_LINE_ID && debtScheduleActive) return "excluded";
+      if (line.lineId === "interest_income" && intIncomeScheduleConfirmed) return "excluded";
       const row = findIsRowById(incomeStatement, line.lineId);
       const base = row ? defaultPhase2Bucket(row) : "review";
       return bucketOverrides[line.lineId] ?? base;
@@ -2155,14 +3091,42 @@ export default function NonOperatingSchedulesPhase2Panel() {
       scheduleStatusByLine,
       directByLine,
     });
-  }, [leaves, incomeStatement, bucketOverrides, scheduleStatusByLine, directByLine]);
+  }, [leaves, incomeStatement, bucketOverrides, scheduleStatusByLine, directByLine, debtScheduleActive, intIncomeScheduleConfirmed]);
 
   const startHereSteps = useMemo(() => buildPhase2StartHereSteps(globalSummary), [globalSummary]);
 
+  // Section-level completeness: count how many of the 4 main schedules are confirmed/active
+  const dandaScheduleConfirmed = useModelStore((s) => s.dandaScheduleConfirmed ?? false);
+  const scheduleCompletenessCount = useMemo(() => {
+    let count = 0;
+    if (debtSchedulePhase2Persist?.applied?.tranches && debtSchedulePhase2Persist.applied.tranches.length > 0) count += 1;
+    if (dandaScheduleConfirmed) count += 1;
+    if (intIncomeScheduleConfirmed) count += 1;
+    if (taxScheduleConfirmed) count += 1;
+    return count;
+  }, [debtSchedulePhase2Persist, dandaScheduleConfirmed, intIncomeScheduleConfirmed, taxScheduleConfirmed]);
+
+  const scheduleCompletenessPill = useMemo(() => {
+    // 4 total: Debt, D&A, Interest Income, Tax
+    const total = 4;
+    const active = scheduleCompletenessCount;
+    const color =
+      active === total
+        ? "bg-emerald-900/60 text-emerald-300 border-emerald-700/40"
+        : active > 0
+        ? "bg-amber-900/40 text-amber-300 border-amber-700/40"
+        : "bg-slate-800/60 text-slate-400 border-slate-700/40";
+    return (
+      <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${color}`}>
+        {active} / {total} schedules active
+      </span>
+    );
+  }, [scheduleCompletenessCount]);
+
   const scheduledSummary = useMemo(() => {
-    const n = scheduledLines.length;
-    const needsSetup = scheduledLines.filter((l) => getScheduleStatus(l.lineId) === "not_set_up").length;
-    const inProgress = scheduledLines.filter((l) => getScheduleStatus(l.lineId) === "draft").length;
+    const n = visibleScheduledLines.length;
+    const needsSetup = visibleScheduledLines.filter((l) => getScheduleStatus(l.lineId) === "not_set_up").length;
+    const inProgress = visibleScheduledLines.filter((l) => getScheduleStatus(l.lineId) === "draft").length;
     const bits = ["Debt + amortization placeholders"];
     if (n === 0) bits.push("no IS lines schedule-routed yet");
     else {
@@ -2171,19 +3135,19 @@ export default function NonOperatingSchedulesPhase2Panel() {
       if (inProgress > 0) bits.push(`${inProgress} in progress`);
     }
     return bits.join(" · ");
-  }, [scheduledLines, scheduleStatusByLine]);
+  }, [visibleScheduledLines, scheduleStatusByLine]);
 
   const scheduledReadiness = useMemo(() => {
-    if (scheduledLines.length === 0) return "";
-    const done = scheduledLines.filter((l) => {
+    if (visibleScheduledLines.length === 0) return "";
+    const done = visibleScheduledLines.filter((l) => {
       const s = scheduleStatusByLine[l.lineId] ?? "not_set_up";
       return s === "applied" || s === "complete";
     }).length;
     const fragments: string[] = [];
-    const ns = scheduledLines.filter((l) => (scheduleStatusByLine[l.lineId] ?? "not_set_up") === "not_set_up").length;
+    const ns = visibleScheduledLines.filter((l) => (scheduleStatusByLine[l.lineId] ?? "not_set_up") === "not_set_up").length;
     if (ns > 0) fragments.push(`${ns} needs setup`);
-    return [...fragments, `${done} of ${scheduledLines.length} configured`].filter(Boolean).join(" · ");
-  }, [scheduledLines, scheduleStatusByLine]);
+    return [...fragments, `${done} of ${visibleScheduledLines.length} configured`].filter(Boolean).join(" · ");
+  }, [visibleScheduledLines, scheduleStatusByLine]);
 
   const directSummary = useMemo(() => {
     const n = directLines.length;
@@ -2343,8 +3307,8 @@ export default function NonOperatingSchedulesPhase2Panel() {
       </Phase2SectionAccordion>
 
       <Phase2SectionAccordion
-        title={<span className="text-sm font-semibold text-slate-100">Create / configure schedules</span>}
-        subtitle="Placeholders for dedicated engines (debt → interest expense, amortization, …). Not forecast directly here."
+        title={<span className="text-sm font-semibold text-slate-100">Create / configure schedules{scheduleCompletenessPill}</span>}
+        subtitle="Debt, D&A, Interest Income, and Tax schedule builders. Configure each below."
         summary={scheduledSummary}
         defaultExpanded={scheduledLines.length > 0 && directLines.length === 0}
         readinessHint={scheduledReadiness ? `Schedule setup: ${scheduledReadiness}` : undefined}
@@ -2359,6 +3323,8 @@ export default function NonOperatingSchedulesPhase2Panel() {
             lastHistoricYear={lastHistYear}
           />
           <Phase2DandAScheduleBuilder />
+          <Phase2InterestIncomeBuilder />
+          <Phase2TaxScheduleBuilder />
           {placeholder && scheduledLines.some((l) => l.lineId === placeholder.lineId) ? (
             <div className="rounded-lg border border-violet-800/40 bg-violet-950/15 p-4 space-y-2">
               <h3 className="text-xs font-semibold text-violet-200">
@@ -2384,10 +3350,14 @@ export default function NonOperatingSchedulesPhase2Panel() {
             Income-statement lines routed as schedule-driven appear below. Interest expense links to the debt schedule
             — there is no standalone interest forecast in this section.
           </p>
-          {scheduledLines.length === 0 ? (
+          {visibleScheduledLines.length === 0 && scheduledLines.length > 0 ? (
+            <p className="text-xs text-slate-500 px-1">
+              All schedule-driven lines are handled by dedicated schedule builders above.
+            </p>
+          ) : visibleScheduledLines.length === 0 ? (
             <p className="text-xs text-slate-500 px-1">No lines classified as schedule-driven yet.</p>
           ) : (
-            scheduledLines.map((line) => {
+            visibleScheduledLines.map((line) => {
               const row = findIsRowById(incomeStatement, line.lineId);
               const cat = row ? inferScheduleDisplayCategory(row) : null;
               const schedNudges = getPhase2ScheduledLineNudges({

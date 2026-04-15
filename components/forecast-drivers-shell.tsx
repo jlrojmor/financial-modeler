@@ -6,6 +6,8 @@ import type { ForecastDriversSubTab } from "@/store/useModelStore";
 import RevenueForecastV1Tab from "@/components/revenue-forecast-v1-tab";
 import CogsOpexForecastV1Tab from "@/components/cogs-opex-forecast-v1-tab";
 import NonOperatingSchedulesPhase2Panel from "@/components/non-operating-schedules-phase2-panel";
+import WcDriversPanel from "@/components/wc-drivers-panel";
+import OtherBsItemsPanel from "@/components/other-bs-items-panel";
 import ForecastHelperCard from "@/components/forecast-helper-card";
 import ForecastGuideModal from "@/components/forecast-guide-modal";
 
@@ -14,6 +16,7 @@ const SUB_TABS: { id: ForecastDriversSubTab; label: string }[] = [
   { id: "operating_costs", label: "COGS & Operating Expenses" },
   { id: "non_operating_schedules", label: "Non-operating & Schedules" },
   { id: "wc_drivers", label: "Working Capital Drivers" },
+  { id: "other_bs_items", label: "Other BS Items" },
   { id: "financing_taxes", label: "Financing / Taxes" },
 ];
 
@@ -138,12 +141,11 @@ export default function ForecastDriversShell({
       {subTab === "revenue" && <RevenueForecastV1Tab />}
       {subTab === "operating_costs" && <CogsOpexForecastV1Tab />}
       {subTab === "non_operating_schedules" && <NonOperatingSchedulesPhase2Panel />}
-      {(subTab === "wc_drivers" || subTab === "financing_taxes") && (
+      {subTab === "wc_drivers" && <WcDriversPanel />}
+      {subTab === "other_bs_items" && <OtherBsItemsPanel />}
+      {subTab === "financing_taxes" && (
         <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-6 text-center">
-          <p className="text-sm text-slate-400">
-            {subTab === "wc_drivers" && "Working Capital Drivers — coming in Phase 2."}
-            {subTab === "financing_taxes" && "Financing & Taxes — coming in Phase 2."}
-          </p>
+          <p className="text-sm text-slate-400">Financing / Taxes — coming soon.</p>
         </div>
       )}
     </div>

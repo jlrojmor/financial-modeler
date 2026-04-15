@@ -9,6 +9,7 @@ import BuilderPanel from "@/components/builder-panel";
 import ExcelPreview from "@/components/excel-preview";
 import ISBuildPreview from "@/components/is-build-preview";
 import CompanyContextPreview from "@/components/company-context-preview";
+import ProjectedStatementsPreview from "@/components/projected-statements-preview";
 
 /** Explicit mapping for workspace header: do not derive from sidebar labels. */
 const STEP_LABEL: Record<WizardStepId, string> = {
@@ -156,7 +157,7 @@ export default function ProjectPage() {
             ) : currentStepId === "schedules" ? (
               <ExcelPreview focusStatement="balance" />
             ) : currentStepId === "projected_statements" ? (
-              <ExcelPreview />
+              <ProjectedStatementsPreview />
             ) : (
               <ExcelPreview />
             )}

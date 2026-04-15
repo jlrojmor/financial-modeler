@@ -35,6 +35,9 @@ import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine"
 import {
   CAPEX_DEFAULT_BUCKET_IDS,
 } from "@/lib/capex-defaults";
+import { computeInterestIncomeSchedule } from "@/lib/interest-income-engine";
+import { computeTaxSchedule } from "@/lib/tax-schedule-engine";
+import { computeProjectedEbitByYear } from "@/lib/projected-ebit";
 
 const PHASE2_INTEREST_EXPENSE_LINE_ID = "interest_expense";
 
@@ -208,6 +211,8 @@ export default function NonOperatingPhase2Preview() {
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns ?? {});
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns ?? {});
+  const cogsForecastConfigV1 = useModelStore((s) => s.cogsForecastConfigV1);
+  const opexForecastConfigV1 = useModelStore((s) => s.opexForecastConfigV1);
 
   // Capex & D&A store reads (for roll-forward preview)
   const capexForecastMethod = useModelStore((s) => s.capexForecastMethod);
@@ -227,6 +232,22 @@ export default function NonOperatingPhase2Preview() {
   const intangiblesPctRevenue = useModelStore((s) => s.intangiblesPctRevenue);
   const intangiblesManualByYear = useModelStore((s) => s.intangiblesManualByYear);
   const intangiblesPctOfCapex = useModelStore((s) => s.intangiblesPctOfCapex);
+
+  // Interest Income Schedule fields
+  const intIncomeMethod = useModelStore((s) => s.intIncomeMethod);
+  const intIncomeRatePct = useModelStore((s) => s.intIncomeRatePct);
+  const intIncomeFlatValue = useModelStore((s) => s.intIncomeFlatValue);
+  const intIncomeGrowthPct = useModelStore((s) => s.intIncomeGrowthPct);
+  const intIncomeManualByYear = useModelStore((s) => s.intIncomeManualByYear);
+  const intIncomeScheduleConfirmed = useModelStore((s) => s.intIncomeScheduleConfirmed);
+
+  // Tax Schedule fields
+  const taxForecastMethod = useModelStore((s) => s.taxForecastMethod);
+  const taxEffectiveRatePct = useModelStore((s) => s.taxEffectiveRatePct);
+  const taxRateByYear = useModelStore((s) => s.taxRateByYear);
+  const taxFlatExpense = useModelStore((s) => s.taxFlatExpense);
+  const taxAllowBenefit = useModelStore((s) => s.taxAllowBenefit);
+  const taxScheduleConfirmed = useModelStore((s) => s.taxScheduleConfirmed);
 
   const unit = (meta?.currencyUnit ?? "millions") as CurrencyUnit;
   const showDecimals = false;
@@ -398,26 +419,65 @@ export default function NonOperatingPhase2Preview() {
     ]
   );
 
-  const { ebitVal, ebtVal } = useMemo(() => {
+  // Projected EBIT by year — uses forecast engines (revenue, COGS, opex drivers)
+  // computeRowValue(ebitRow) returns 0 for projection years because input rows have no stored values
+  const ebitByYear = useMemo(() => {
+    return computeProjectedEbitByYear({
+      incomeStatement,
+      projectionYears,
+      lastHistoricYear,
+      revenueForecastConfigV1,
+      revenueForecastTreeV1,
+      revenueProjectionConfig,
+      cogsForecastConfigV1,
+      opexForecastConfigV1,
+      allStatements,
+      sbcBreakdowns,
+      danaBreakdowns,
+      currencyUnit: unit,
+    });
+  }, [
+    incomeStatement,
+    projectionYears,
+    lastHistoricYear,
+    revenueForecastConfigV1,
+    revenueForecastTreeV1,
+    revenueProjectionConfig,
+    cogsForecastConfigV1,
+    opexForecastConfigV1,
+    allStatements,
+    sbcBreakdowns,
+    danaBreakdowns,
+    unit,
+  ]);
+
+  // ebitVal used by completeness badge — taken from forecast-engine result (same as ebitByYear[firstProj])
+  const ebitVal = firstProj != null ? (ebitByYear[firstProj] ?? null) : null;
+  const ebtVal = useMemo(() => {
     const allSt = { incomeStatement, balanceSheet, cashFlow };
-    let ebit: number | null = null;
-    let ebt: number | null = null;
-    if (!firstProj) return { ebitVal: null, ebtVal: null };
-    const ebitRow = incomeStatement.find((r) => r.id === "ebit");
+    if (!firstProj) return null;
     const ebtRow = incomeStatement.find((r) => r.id === "ebt");
-    const tryVal = (row: Row | undefined): number | null => {
-      if (!row) return null;
-      try {
-        const v = computeRowValue(row, firstProj, incomeStatement, incomeStatement, allSt);
-        return v != null && Number.isFinite(v) ? v : null;
-      } catch {
-        return null;
-      }
-    };
-    ebit = tryVal(ebitRow);
-    ebt = tryVal(ebtRow);
-    return { ebitVal: ebit, ebtVal: ebt };
+    if (!ebtRow) return null;
+    try {
+      const v = computeRowValue(ebtRow, firstProj, incomeStatement, incomeStatement, allSt);
+      return v != null && Number.isFinite(v) ? v : null;
+    } catch { return null; }
   }, [incomeStatement, balanceSheet, cashFlow, firstProj]);
+
+  // EBT statement formula row — for comparison in footnote
+  const ebtStatementByYear = useMemo(() => {
+    const allSt = { incomeStatement, balanceSheet, cashFlow };
+    const ebtRow = incomeStatement.find((r) => r.id === "ebt");
+    const out: Record<string, number | null> = {};
+    for (const y of projectionYears) {
+      if (!ebtRow) { out[y] = null; continue; }
+      try {
+        const v = computeRowValue(ebtRow, y, incomeStatement, incomeStatement, allSt);
+        out[y] = v != null && Number.isFinite(v) && v !== 0 ? v : null;
+      } catch { out[y] = null; }
+    }
+    return out;
+  }, [projectionYears, incomeStatement, balanceSheet, cashFlow]);
 
   /** Applied direct lines only; null when none project (row shows —). */
   const directForDisplay =
@@ -454,6 +514,113 @@ export default function NonOperatingPhase2Preview() {
     debtInterestComplete,
     debtEngineResult,
   ]);
+
+  // ── Interest Income Schedule preview — all values in STORED units ─────────
+  const intIncomeByYear = useMemo(() => {
+    if (!intIncomeScheduleConfirmed || projectionYears.length === 0) return null;
+    const cashRow = balanceSheet.find((r) => r.taxonomyType === "asset_cash" || r.id === "cash");
+    const cashByYear: Record<string, number> = {};
+    for (const y of [...historicalYears, ...projectionYears]) {
+      const v = cashRow?.values?.[y];
+      if (typeof v === "number") cashByYear[y] = Math.abs(v);  // stored — engine works with stored values
+    }
+    const lastHistCash = historicalYears.length > 0
+      ? Math.abs(cashRow?.values?.[historicalYears[historicalYears.length - 1]!] ?? 0)
+      : 0;
+    const intIncomeRow = incomeStatement.find((r) => r.taxonomyType === "non_op_interest_income" || r.id === "interest_income");
+    const lastHistInterestIncome = historicalYears.length > 0
+      ? Math.abs(intIncomeRow?.values?.[historicalYears[historicalYears.length - 1]!] ?? 0)
+      : 0;
+    return computeInterestIncomeSchedule({
+      projectionYears,
+      cashByYear,
+      lastHistCash,
+      lastHistInterestIncome,
+      method: intIncomeMethod,
+      ratePct: intIncomeRatePct,
+      flatValue: intIncomeFlatValue,    // stored
+      growthPct: intIncomeGrowthPct,
+      manualByYear: intIncomeManualByYear,  // stored
+    });
+  }, [
+    intIncomeScheduleConfirmed,
+    projectionYears,
+    historicalYears,
+    balanceSheet,
+    incomeStatement,
+    intIncomeMethod,
+    intIncomeRatePct,
+    intIncomeFlatValue,
+    intIncomeGrowthPct,
+    intIncomeManualByYear,
+  ]);
+
+  // ── Tax Schedule preview — all values in STORED units ─────────────────────
+  const taxByYear = useMemo(() => {
+    if (!taxScheduleConfirmed || projectionYears.length === 0) return null;
+    const allSt = { incomeStatement, balanceSheet, cashFlow };
+    const ebtByYearCalc: Record<string, number> = {};
+    const ebtRow = incomeStatement.find((r) => r.id === "ebt");
+    for (const y of projectionYears) {
+      if (ebtRow) {
+        try {
+          const v = computeRowValue(ebtRow, y, incomeStatement, incomeStatement, allSt);
+          ebtByYearCalc[y] = v != null && Number.isFinite(v) ? v : 0;  // stored
+        } catch {
+          ebtByYearCalc[y] = 0;
+        }
+      } else {
+        ebtByYearCalc[y] = 0;
+      }
+    }
+    return computeTaxSchedule({
+      projectionYears,
+      ebtByYear: ebtByYearCalc,  // stored
+      method: taxForecastMethod,
+      flatRatePct: taxEffectiveRatePct,
+      rateByYear: taxRateByYear,
+      flatExpense: taxFlatExpense,  // stored
+      allowTaxBenefit: taxAllowBenefit,
+    });
+  }, [
+    taxScheduleConfirmed,
+    projectionYears,
+    incomeStatement,
+    balanceSheet,
+    cashFlow,
+    taxForecastMethod,
+    taxEffectiveRatePct,
+    taxRateByYear,
+    taxFlatExpense,
+    taxAllowBenefit,
+  ]);
+
+  // ── Bridge completeness badge ──────────────────────────────────────────────
+  const bridgeCompletenessBadge = useMemo(() => {
+    let active = 0;
+    let total = 0;
+    // EBIT — always present when IS has ebit row
+    total += 1;
+    if (ebitVal != null) active += 1;
+    // Interest expense
+    total += 1;
+    if (debtInterestComplete) active += 1;
+    // Interest income
+    total += 1;
+    if (intIncomeScheduleConfirmed && intIncomeByYear != null) active += 1;
+    // Tax
+    total += 1;
+    if (taxScheduleConfirmed && taxByYear != null) active += 1;
+
+    if (active === total) {
+      return { label: "Complete", color: "bg-emerald-900/60 text-emerald-300 border-emerald-700/40" };
+    }
+    const pending = total - active;
+    return {
+      label: `Partial — ${pending} item${pending !== 1 ? "s" : ""} pending`,
+      color: "bg-amber-900/40 text-amber-300 border-amber-700/40",
+    };
+  }, [ebitVal, debtInterestComplete, intIncomeScheduleConfirmed, intIncomeByYear, taxScheduleConfirmed, taxByYear]);
 
   // D&A roll-forward for the preview panel — uses the same revenue engine as the rest of the model
   const dandaPreview = useMemo(() => {
@@ -982,178 +1149,6 @@ export default function NonOperatingPhase2Preview() {
 
         <div className="border-b border-slate-800/60 my-1" />
 
-        <div className="rounded-lg border border-slate-700/80 bg-slate-900/40 p-3 space-y-1">
-          <div className="pb-2 border-b border-slate-800/80">
-            <p className="text-[11px] font-semibold text-slate-300">Pre-tax income bridge</p>
-            <p className="text-[10px] text-slate-500 mt-0.5">
-              EBIT → pre-tax, showing interest and non-operating items
-            </p>
-          </div>
-          <p className="text-[10px] text-slate-500 pt-1 leading-relaxed">
-            First projection year shown for EBIT, interest expense (when the applied debt schedule is complete), applied
-            direct non-operating forecasts, and partial pre-tax. Other schedule-driven lines stay at —;{" "}
-            <span className="text-slate-400">no fabricated schedule values.</span>
-          </p>
-          <div className="text-[10px] text-slate-500 font-mono leading-relaxed py-1 border-b border-slate-800/80">
-            Partial pre-tax ≈ EBIT − interest expense (debt schedule) + direct other (interest income and other
-            schedules still pending)
-          </div>
-
-          <div className="flex justify-between gap-3 border-b border-slate-800 py-2">
-            <div className="min-w-0">
-              <span className="text-slate-300 font-medium">Operating income / EBIT</span>
-              <p className="text-[10px] text-slate-500 mt-0.5">From your income statement formulas.</p>
-            </div>
-            <span className="text-right tabular-nums text-slate-200 shrink-0">
-              {firstProj ? (
-                <>
-                  <span className="text-slate-500 mr-1">{firstProj}</span>
-                  {formatMaybe(ebitVal, unit, showDecimals)}
-                </>
-              ) : (
-                <span className="text-slate-500">—</span>
-              )}
-            </span>
-          </div>
-
-          <div className="flex justify-between gap-3 border-b border-slate-800 py-2">
-            <div className="min-w-0 pr-2">
-              <span className="text-slate-300 font-medium">
-                <span className="text-slate-500 mr-1">−</span>
-                Interest expense
-              </span>
-              <p className="text-[10px] text-slate-500 mt-0.5">
-                {!debtScheduleApplied ? (
-                  <>
-                    <span className="text-slate-400">Apply the debt schedule</span> on the left — interest expense is
-                    derived from tranche balances and rates (positive magnitudes in the engine; shown as an expense
-                    here).{" "}
-                  </>
-                ) : !debtInterestComplete ? (
-                  <>
-                    <span className="text-amber-200/90">Applied schedule incomplete</span> — interest is withheld until
-                    every enabled tranche has opening debt, roll-forward, and rates for all projection years.{" "}
-                  </>
-                ) : (
-                  <>
-                    <span className="text-slate-400">From applied debt schedule</span> — average or ending balance basis
-                    per tranche.{" "}
-                  </>
-                )}
-                <span className="text-slate-600"> {bridgeModel.interestExpense.setupHint}</span>
-              </p>
-            </div>
-            <span className="text-right tabular-nums shrink-0 text-slate-200">
-              {firstProj ? (
-                <>
-                  <span className="text-slate-500 mr-1">{firstProj}</span>
-                  {firstProjInterestExpenseMag != null ? (
-                    formatBridgeAmount(-firstProjInterestExpenseMag, unit, showDecimals)
-                  ) : (
-                    <span className="text-slate-500">—</span>
-                  )}
-                </>
-              ) : (
-                <span className="text-slate-500">—</span>
-              )}
-            </span>
-          </div>
-
-          <div className="flex justify-between gap-3 border-b border-slate-800 py-2">
-            <div className="min-w-0 pr-2">
-              <span className="text-slate-300 font-medium">
-                <span className="text-slate-500 mr-1">+</span>
-                Interest income
-              </span>
-              <p className="text-[10px] text-slate-500 mt-0.5">
-                <span className="text-slate-400">Pending</span> — future schedule- or cash/investment-driven treatment.{""}
-                <span className="text-slate-600"> {bridgeModel.interestIncome.setupHint}</span>
-              </p>
-            </div>
-            <span className="text-slate-500 shrink-0 text-right tabular-nums">—</span>
-          </div>
-
-          <div className="flex justify-between gap-3 border-b border-slate-800 py-2">
-            <div className="min-w-0 pr-2">
-              <span className="text-slate-300 font-medium">
-                <span className="text-slate-500 mr-1">±</span>
-                Other scheduled below EBIT
-              </span>
-              <p className="text-[10px] text-slate-500 mt-0.5">
-                Amortization, lease, SBC, and other schedule-driven lines.{""}
-                <span className="text-slate-600"> {bridgeModel.otherScheduled.setupHint}</span>
-              </p>
-            </div>
-            <span className="text-slate-500 shrink-0 text-right tabular-nums">—</span>
-          </div>
-
-          <div className="flex justify-between gap-3 border-b border-slate-800 py-2">
-            <div className="min-w-0 pr-2">
-              <span className="text-slate-300 font-medium">
-                <span className="text-slate-500 mr-1">±</span>
-                Direct other income / expense
-              </span>
-              <p className="text-[10px] text-slate-500 mt-0.5">
-                Sum of applied direct non-operating lines only (drafts excluded). Signs match saved assumptions.{""}
-                <span className="text-slate-600"> {bridgeModel.directOther.setupHint}</span>
-              </p>
-            </div>
-            <span className="text-right tabular-nums text-slate-200 shrink-0">
-              {firstProj ? (
-                <>
-                  <span className="text-slate-500 mr-1">{firstProj}</span>
-                  {formatBridgeAmount(directForDisplay, unit, showDecimals)}
-                </>
-              ) : (
-                <span className="text-slate-500">—</span>
-              )}
-            </span>
-          </div>
-
-          <div className="flex justify-between gap-3 py-2 border-b border-slate-800">
-            <div className="min-w-0">
-              <span className="text-slate-300 font-medium">Pre-tax income / EBT (partial)</span>
-              <p className="text-[10px] text-slate-500 mt-0.5 leading-snug">
-                EBIT minus interest expense when the applied debt schedule is complete, plus applied direct other income
-                / expense. Interest income and other schedule-driven rows are not in this subtotal yet — the label stays
-                partial.
-              </p>
-            </div>
-            <span className="text-right tabular-nums text-emerald-200/95 font-medium shrink-0">
-              {firstProj ? (
-                <>
-                  <span className="text-slate-500 mr-1 font-normal">{firstProj}</span>
-                  {formatBridgeAmount(partialPretax, unit, showDecimals)}
-                </>
-              ) : (
-                <span className="text-slate-500 font-normal">—</span>
-              )}
-            </span>
-          </div>
-
-          <div className="flex justify-between gap-3 py-2">
-            <div className="min-w-0">
-              <span className="text-slate-400 font-medium text-[11px]">Pre-tax income / EBT (statement formula)</span>
-              <p className="text-[10px] text-slate-600 mt-0.5">
-                Reported row from the model — may differ until schedules and direct forecasts fully feed the
-                statement.
-              </p>
-            </div>
-            <span className="text-right tabular-nums text-slate-400 shrink-0 text-[11px]">
-              {firstProj ? (
-                <>
-                  <span className="text-slate-600 mr-1">{firstProj}</span>
-                  {formatMaybe(ebtVal, unit, showDecimals)}
-                </>
-              ) : (
-                <span className="text-slate-600">—</span>
-              )}
-            </span>
-          </div>
-        </div>
-
-        <div className="border-b border-slate-800/60 my-1" />
-
         {previewGuidance.primaryStrip ? (
           <div
             className={`rounded-md border px-3 py-2 text-[11px] leading-relaxed ${stripClass(
@@ -1263,6 +1258,220 @@ export default function NonOperatingPhase2Preview() {
           available) for % of revenue; growth % anchors to each line&apos;s last historical value. Unapplied drafts
           do not affect this preview.
         </p>
+
+        <div className="border-b border-slate-800/60 my-1" />
+
+        <div className="rounded-lg border border-slate-700/80 bg-slate-900/40 p-3 space-y-2">
+          {/* Header */}
+          <div className="pb-2 border-b border-slate-800/80">
+            <div className="flex items-center justify-between">
+              <p className="text-[11px] font-semibold text-slate-300">Pre-tax income bridge</p>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${bridgeCompletenessBadge.color}`}>
+                {bridgeCompletenessBadge.label}
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-0.5">
+              EBIT → EBT → Net income, showing interest and non-operating items
+            </p>
+          </div>
+
+          {/* Status hints for each key line */}
+          <div className="text-[10px] space-y-0.5 pb-1 border-b border-slate-800/50">
+            {!debtScheduleApplied ? (
+              <p className="text-amber-400/80">
+                <span className="font-medium">Interest expense:</span> Apply the debt schedule on the left.
+              </p>
+            ) : !debtInterestComplete ? (
+              <p className="text-amber-400/80">
+                <span className="font-medium">Interest expense:</span> Schedule applied but incomplete — finalize all tranches.
+              </p>
+            ) : (
+              <p className="text-emerald-400/70">
+                <span className="font-medium">Interest expense:</span> {bridgeModel.interestExpense.setupHint}
+              </p>
+            )}
+            {!intIncomeScheduleConfirmed ? (
+              <p className="text-slate-500">
+                <span className="font-medium">Interest income:</span> Configure the Interest Income Schedule on the left.
+              </p>
+            ) : (
+              <p className="text-emerald-400/70">
+                <span className="font-medium">Interest income:</span> {bridgeModel.interestIncome.setupHint}
+              </p>
+            )}
+            {!taxScheduleConfirmed ? (
+              <p className="text-slate-500">
+                <span className="font-medium">Tax expense:</span> Configure the Tax Schedule on the left.
+              </p>
+            ) : (
+              <p className="text-emerald-400/70">
+                <span className="font-medium">Tax schedule:</span> {taxEffectiveRatePct.toFixed(1)}% ETR applied to projected EBT.
+              </p>
+            )}
+            {directPreview.hasAnyAppliedProjection && (
+              <p className="text-slate-500">
+                <span className="font-medium">Direct other:</span> {bridgeModel.directOther.setupHint}
+              </p>
+            )}
+          </div>
+
+          {/* Multi-year table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] border-collapse">
+              <thead>
+                <tr className="border-b border-slate-700/50">
+                  <th className="text-left py-1.5 pr-3 font-normal text-slate-500 w-28">Item</th>
+                  {projectionYears.map((y) => (
+                    <th key={y} className="text-right py-1.5 px-1.5 font-semibold text-slate-400 tabular-nums">{y}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {/* EBIT */}
+                <tr className="border-b border-slate-800/40">
+                  <td className="py-1.5 pr-3 text-slate-300">EBIT</td>
+                  {projectionYears.map((y) => {
+                    const v = ebitByYear[y];
+                    return (
+                      <td key={y} className="text-right px-1.5 py-1.5 text-slate-200 tabular-nums font-mono">
+                        {v != null ? formatBridgeAmount(v, unit, showDecimals) : "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Interest expense */}
+                <tr className="border-b border-slate-800/40">
+                  <td className="py-1.5 pr-3 text-slate-400">
+                    <span className="text-slate-600 mr-1">−</span>Int. expense
+                  </td>
+                  {projectionYears.map((y) => {
+                    const mag =
+                      debtInterestComplete && debtEngineResult?.interestExpenseTotalByYear[y] != null
+                        ? debtEngineResult.interestExpenseTotalByYear[y]!
+                        : null;
+                    return (
+                      <td key={y} className="text-right px-1.5 py-1.5 text-slate-200 tabular-nums font-mono">
+                        {mag != null ? formatBridgeAmount(-mag, unit, showDecimals) : <span className="text-slate-600">—</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Interest income */}
+                <tr className="border-b border-slate-800/40">
+                  <td className="py-1.5 pr-3 text-slate-400">
+                    <span className="text-slate-600 mr-1">+</span>Int. income
+                  </td>
+                  {projectionYears.map((y) => {
+                    const v =
+                      intIncomeScheduleConfirmed && intIncomeByYear != null
+                        ? (intIncomeByYear.interestIncomeByYear[y] ?? null)
+                        : null;
+                    return (
+                      <td key={y} className="text-right px-1.5 py-1.5 text-emerald-300 tabular-nums font-mono">
+                        {v != null && v !== 0 ? formatBridgeAmount(v, unit, showDecimals) : <span className="text-slate-600">—</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Direct other (only if any applied) */}
+                {directPreview.hasAnyAppliedProjection && (
+                  <tr className="border-b border-slate-800/40">
+                    <td className="py-1.5 pr-3 text-slate-400">
+                      <span className="text-slate-600 mr-1">±</span>Direct other
+                    </td>
+                    {projectionYears.map((y) => {
+                      const v = directPreview.totalByYear[y] ?? null;
+                      return (
+                        <td key={y} className="text-right px-1.5 py-1.5 text-slate-200 tabular-nums font-mono">
+                          {v != null ? formatBridgeAmount(v, unit, showDecimals) : "—"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                )}
+                {/* EBT subtotal */}
+                <tr className="border-b border-slate-700/60 bg-slate-800/20">
+                  <td className="py-1.5 pr-3 text-emerald-200/90 font-semibold">
+                    = EBT{bridgeCompletenessBadge.label !== "Complete" ? " (partial)" : ""}
+                  </td>
+                  {projectionYears.map((y) => {
+                    const ebit = ebitByYear[y];
+                    if (ebit == null) return <td key={y} className="text-right px-1.5 py-1.5 text-slate-500">—</td>;
+                    const intExp = debtInterestComplete ? (debtEngineResult?.interestExpenseTotalByYear[y] ?? 0) : 0;
+                    const intInc =
+                      intIncomeScheduleConfirmed && intIncomeByYear != null
+                        ? (intIncomeByYear.interestIncomeByYear[y] ?? 0)
+                        : 0;
+                    const direct = directPreview.hasAnyAppliedProjection ? (directPreview.totalByYear[y] ?? 0) : 0;
+                    const ebt = ebit - intExp + intInc + direct;
+                    return (
+                      <td key={y} className="text-right px-1.5 py-1.5 text-emerald-200 tabular-nums font-mono font-semibold">
+                        {formatBridgeAmount(ebt, unit, showDecimals)}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Tax expense */}
+                <tr className="border-b border-slate-800/40">
+                  <td className="py-1.5 pr-3 text-slate-400">
+                    <span className="text-slate-600 mr-1">−</span>Tax expense
+                  </td>
+                  {projectionYears.map((y) => {
+                    const tax =
+                      taxScheduleConfirmed && taxByYear != null
+                        ? (taxByYear.taxExpenseByYear[y] ?? null)
+                        : null;
+                    return (
+                      <td key={y} className="text-right px-1.5 py-1.5 text-red-300 tabular-nums font-mono">
+                        {tax != null && tax !== 0 ? formatBridgeAmount(-tax, unit, showDecimals) : <span className="text-slate-600">—</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+                {/* Net income */}
+                <tr className="bg-slate-800/10">
+                  <td className="py-1.5 pr-3 text-slate-200 font-semibold">= Net income</td>
+                  {projectionYears.map((y) => {
+                    const ebit = ebitByYear[y];
+                    if (ebit == null || !taxScheduleConfirmed || taxByYear == null) {
+                      return <td key={y} className="text-right px-1.5 py-1.5 text-slate-600 font-mono">—</td>;
+                    }
+                    const intExp = debtInterestComplete ? (debtEngineResult?.interestExpenseTotalByYear[y] ?? 0) : 0;
+                    const intInc =
+                      intIncomeScheduleConfirmed && intIncomeByYear != null
+                        ? (intIncomeByYear.interestIncomeByYear[y] ?? 0)
+                        : 0;
+                    const direct = directPreview.hasAnyAppliedProjection ? (directPreview.totalByYear[y] ?? 0) : 0;
+                    const ebt = ebit - intExp + intInc + direct;
+                    const tax = taxByYear.taxExpenseByYear[y] ?? 0;
+                    const ni = ebt - tax;
+                    const color = ni >= 0 ? "text-emerald-300" : "text-red-400";
+                    return (
+                      <td key={y} className={`text-right px-1.5 py-1.5 tabular-nums font-mono font-semibold ${color}`}>
+                        {formatBridgeAmount(ni, unit, showDecimals)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {/* EBT statement formula footnote */}
+          <div className="border-t border-slate-800/50 pt-2">
+            <p className="text-[10px] text-slate-500 font-medium mb-1">EBT (statement formula row)</p>
+            <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+              {projectionYears.map((y) => (
+                <span key={y} className="text-[10px] text-slate-600 tabular-nums">
+                  {y}: {formatMaybe(ebtStatementByYear[y] ?? null, unit, showDecimals)}
+                </span>
+              ))}
+            </div>
+            <p className="text-[9px] text-slate-700 mt-1">
+              Reported EBT row from your IS formulas — may differ from bridge EBT until schedules fully feed the statement.
+            </p>
+          </div>
+        </div>
       </div>
     </section>
   );

@@ -1262,6 +1262,11 @@ export const FORECAST_GUIDE_CONTENT: Record<
     headline: "Working Capital Drivers",
     body: "Working capital forecasting guidance will be added here in a future update.",
   },
+  other_bs_items: {
+    kind: "placeholder",
+    headline: "Other Balance Sheet Items",
+    body: "Guidance for forecasting goodwill, deferred taxes, investments, lease assets/obligations, and equity line items will be added here in a future update.",
+  },
   financing_taxes: {
     kind: "placeholder",
     headline: "Financing / Taxes",

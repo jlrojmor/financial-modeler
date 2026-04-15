@@ -105,6 +105,15 @@ const BS_DERIVED_ROW_IDS = new Set([
   "total_liab_and_equity",
 ]);
 
+/** BS liability types that must never route to WC schedule (even if cashFlowBehavior is WC). */
+const BS_LIABILITY_TYPES_NEVER_WC = new Set([
+  "liab_lease_obligations",
+  "liab_other_non_current",
+  "liab_long_term_debt",
+  "liab_deferred_tax",
+  "liab_pension",
+]);
+
 /** Deterministic template/anchor rows are trusted by definition; no need for explicit trust flags. */
 function isDeterministicRow(row: Row, statementKey: StatementKey): boolean {
   if (statementKey === "incomeStatement") {
@@ -312,7 +321,14 @@ function routeBalanceSheet(row: Row, trustState: RoutingTrustState): ForecastRou
   const behavior = row.cashFlowBehavior;
   const scheduleOwner = row.scheduleOwner;
 
-  if (behavior === "working_capital") {
+  // Imports often set cashFlowBehavior=WC on non-current lines grouped under CFS ΔWC — do not treat as WC schedule.
+  const wcBehaviorOverriddenByTaxonomy =
+    taxonomy.category === "non_current_liability" ||
+    taxonomy.category === "fixed_asset" ||
+    taxonomy.category === "equity" ||
+    BS_LIABILITY_TYPES_NEVER_WC.has(taxonomy.type);
+
+  if (behavior === "working_capital" && !wcBehaviorOverriddenByTaxonomy) {
     return {
       owner: "working_capital_schedule",
       methodFamily: "schedule_driven",

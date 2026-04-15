@@ -539,16 +539,16 @@ function computeFormula(
   }
 
   if (rowId === "ebt") {
-    // EBT = EBIT + all non-operating items (sectionOwner drives which rows are included)
-    // Non-operating = sectionOwner non_operating or template interest_expense, interest_income, other_income
-    // Sign: interest expense subtracts, interest income and other add; custom non_operating we add (treat as income-like)
+    // EBT = EBIT − interest_expense + interest_income + other non-op
+    // Interest expense may be stored as positive or negative depending on import/projection.
+    // We always subtract Math.abs to be sign-agnostic.
     const ebit = findRowValue(statementRows, "ebit", year);
     let total = ebit;
     for (const r of statementRows) {
       if (!isNonOperatingRow(r)) continue;
       const value = findRowValue(statementRows, r.id, year);
       if (r.id === "interest_expense") {
-        total -= value;
+        total -= Math.abs(value);
       } else {
         total += value;
       }
@@ -557,13 +557,13 @@ function computeFormula(
   }
 
   // Income Statement net_income (only if NOT in CFS - CFS net_income is handled above)
-  // Tax = all rows with sectionOwner tax (or id tax); classification drives which rows reduce Net Income
+  // NI = EBT − tax_expense. Tax may be stored positive or negative; always subtract Math.abs.
   if (rowId === "net_income" && !isInCFS) {
     const ebt = findRowValue(statementRows, "ebt", year);
     let taxTotal = 0;
     for (const r of statementRows) {
       if (isTaxRow(r)) {
-        taxTotal += findRowValue(statementRows, r.id, year);
+        taxTotal += Math.abs(findRowValue(statementRows, r.id, year));
       }
     }
     return ebt - taxTotal;

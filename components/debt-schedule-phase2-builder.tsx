@@ -1005,10 +1005,27 @@ export function DebtSchedulePhase2Builder(props: {
         onClick={() => setSummaryOpen((o) => !o)}
         className="w-full text-left px-3 py-2.5 flex items-start justify-between gap-2 hover:bg-slate-800/20"
       >
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-sky-100">Debt schedule</div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-sky-100">Debt schedule</span>
+            {hasApplied ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+                ✓ Active
+              </span>
+            ) : appliedBody == null ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-amber-950/40 text-amber-300 border border-amber-700/40">
+                Not saved
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-amber-950/40 text-amber-300 border border-amber-700/40">
+                Unsaved changes
+              </span>
+            )}
+          </div>
           <div className="text-[10px] text-sky-200/80 mt-0.5 leading-snug">
-            Map your debt facilities, then Apply to drive interest in the model.
+            {hasApplied
+              ? `${draft.tranches.filter((t) => t.isEnabled).length} tranche(s) active — interest expense flowing into model.`
+              : "Map your debt facilities, then confirm to drive interest in the model."}
           </div>
         </div>
         <span className="text-slate-500 text-xs shrink-0">{summaryOpen ? "▼" : "▶"}</span>
@@ -1041,17 +1058,6 @@ export function DebtSchedulePhase2Builder(props: {
           <div className="rounded-md border border-slate-700/80 bg-slate-900/50 px-2.5 py-2">
             <p className="text-[11px] text-slate-200 leading-snug font-mono">{detectionBannerText}</p>
           </div>
-          {draft.tranches.length > 0 ? (
-            <div className="flex justify-end -mt-1 mb-0.5">
-              <button
-                type="button"
-                onClick={reconfigureStdClassification}
-                className="text-[10px] text-slate-500 hover:text-slate-300 underline"
-              >
-                ↺ Reconfigure debt structure from scratch
-              </button>
-            </div>
-          ) : null}
 
           <div className="rounded-md border border-slate-700/80 bg-slate-900/40 px-2.5 py-2 space-y-1">
             <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Interest calculation</label>
@@ -1068,42 +1074,53 @@ export function DebtSchedulePhase2Builder(props: {
           </div>
 
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 w-full">
-            <button
-              type="button"
-              onClick={onApply}
-              disabled={!unsaved}
-              className="rounded-md bg-emerald-700/80 px-3 py-1.5 text-xs font-medium text-emerald-50 hover:bg-emerald-600 disabled:opacity-40"
-            >
-              Apply
-            </button>
-            <button
-              type="button"
-              onClick={onReset}
-              disabled={!unsaved}
-              className="rounded-md border border-slate-600 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-            >
-              Reset
-            </button>
-            <span className="text-[10px] text-slate-500 self-center">
-              {appliedBody == null ? "Not applied" : hasApplied ? "Applied" : "Unsaved changes"}
-            </span>
-            {draft.tranches.length > 0 ? (
+            {hasApplied ? (
               <>
-                <span className="text-[10px] text-slate-600 self-center" aria-hidden>
-                  ·
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold rounded px-2 py-0.5 bg-emerald-950/60 text-emerald-300 border border-emerald-800/50">
+                  ✓ Debt schedule active — interest expense flowing into model
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSummaryOpen(true)}
+                  className="rounded border border-slate-600 bg-slate-800/60 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={reconfigureStdClassification}
+                  className="rounded border border-slate-700 bg-slate-900/60 px-2.5 py-1 text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-300"
+                >
+                  Reset
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => { onApply(); setSummaryOpen(false); }}
+                  disabled={draft.tranches.filter((t) => t.isEnabled).length === 0}
+                  className="flex-1 rounded px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  {draft.tranches.filter((t) => t.isEnabled).length === 0
+                    ? "Add at least one tranche above first"
+                    : "✓ Confirm & Activate Debt Schedule"}
+                </button>
+                <span className="text-[10px] text-slate-500 self-center">
+                  {appliedBody == null ? "Not saved yet" : "Unsaved changes — confirm to save"}
                 </span>
                 <button
                   type="button"
                   onClick={reconfigureStdClassification}
-                  className="text-[10px] text-slate-500 hover:text-slate-300 underline self-center ml-auto sm:ml-0"
+                  className="rounded border border-slate-700 bg-slate-900/60 px-2.5 py-1 text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-300 ml-auto"
                 >
-                  ↺ Reconfigure debt structure from scratch
+                  Reset
                 </button>
               </>
-            ) : null}
+            )}
           </div>
 
-          {!startHereDismissed ? (
+          {!startHereDismissed && stdSetupCommitted === null && draft.tranches.length === 0 ? (
             <div className="rounded-md border border-emerald-900/40 bg-emerald-950/20 px-2.5 py-2.5 space-y-2">
               <p className="text-[11px] font-semibold text-emerald-100/95">Start here</p>
               {bsOpening.found && (hasStdDebt || hasLtdDebt) ? (
@@ -1372,13 +1389,9 @@ export function DebtSchedulePhase2Builder(props: {
                   {fmtBooksAmount(bsOpening.longTerm, currencyUnit)}).
                 </p>
               )}
-              <button
-                type="button"
-                onClick={reconfigureStdClassification}
-                className="text-[10px] text-sky-400 underline hover:text-sky-300"
-              >
-                Changed your mind? Click here to reconfigure
-              </button>
+              <p className="text-[10px] text-slate-500">
+                To change the debt structure, click <span className="text-slate-400 font-medium">Reset</span> above.
+              </p>
             </div>
           ) : null}
 
@@ -1709,8 +1722,7 @@ export function DebtSchedulePhase2Builder(props: {
                             </div>
                           </div>
                           <p className="text-[10px] text-slate-500">
-                            This combines both your short-term and long-term debt into one facility. To change this, click
-                            &apos;Reconfigure debt structure from scratch&apos;.
+                            This combines both your short-term and long-term debt into one facility. To change this, click <span className="font-medium text-slate-400">Reset</span> above.
                           </p>
                         </div>
                       ) : isHistoricalOpening ? (
@@ -2432,6 +2444,15 @@ export function DebtSchedulePhase2Builder(props: {
                         </div>
                       ) : null}
                       {renderRollForwardPreview(t.trancheId)}
+                      <div className="pt-2 border-t border-slate-800/60 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setOpenTrancheId(null)}
+                          className="rounded border border-slate-600 bg-slate-800/60 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700"
+                        >
+                          ✓ Done — collapse this facility
+                        </button>
+                      </div>
                     </div>
                   ) : null}
                 </div>

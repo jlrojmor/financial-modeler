@@ -138,7 +138,7 @@ function getCFOSign(
         return "+";
       }
       // Default for WC component
-      return "-";
+        return "-";
     }
 
     // Custom operating items by label
@@ -244,8 +244,8 @@ function getISDisplaySection(row: Row, parentId: string | undefined, rows: Row[]
 }
 
 function flattenRows(
-  rows: Row[],
-  depth = 0,
+  rows: Row[], 
+  depth = 0, 
   expandedRows: Set<string> | null = null,
   options?: FlattenOptions,
   parentId?: string
@@ -467,7 +467,7 @@ function StatementTable({
     if (financingEndIndex >= 0 && rowIndex >= financingStart && rowIndex <= financingEndIndex) return "financing";
     return "meta";
   };
-
+  
   // For Balance Sheet, detect section changes (Assets, Liabilities, Equity)
   const getBSSection = (rowId: string, rows: Row[]): "assets" | "liabilities" | "equity" | null => {
     const totalAssetsIndex = rows.findIndex(r => r.id === "total_assets");
@@ -571,7 +571,7 @@ function StatementTable({
                 ? getCFSSection(prevRow.row.id, rows, prevRow.parentId)
                 : isIncomeStatement
                   ? getISDisplaySection(prevRow.row, prevRow.parentId, rows)
-                  : null;
+          : null;
         const prevCategory = isBalanceSheet && prevRow ? getBSCategory(prevRow.row.id, rows) : null;
         let currentSubgroup = isCashFlow && currentSection === "operating" ? getFinalOperatingSubgroup(row, parentId) : null;
         const prevSubgroup = isCashFlow && prevRow && currentSection === "operating" ? getFinalOperatingSubgroup(prevRow.row, prevRow.parentId) : null;
@@ -679,12 +679,12 @@ function StatementTable({
                       </span>
                     )}
                     <span>
-                      {currentSection === "assets" && "Assets"}
-                      {currentSection === "liabilities" && "Liabilities"}
-                      {currentSection === "equity" && "Shareholders' Equity"}
-                      {currentSection === "operating" && "Operating Activities"}
-                      {currentSection === "investing" && "Investing Activities"}
-                      {currentSection === "financing" && "Financing Activities"}
+                    {currentSection === "assets" && "Assets"}
+                    {currentSection === "liabilities" && "Liabilities"}
+                    {currentSection === "equity" && "Shareholders' Equity"}
+                    {currentSection === "operating" && "Operating Activities"}
+                    {currentSection === "investing" && "Investing Activities"}
+                    {currentSection === "financing" && "Financing Activities"}
                       {currentSection === "cash_bridge" && "Cash Bridge Items"}
                       {currentSection === "operating_expenses" && "Operating Expenses"}
                     </span>
@@ -729,7 +729,7 @@ function StatementTable({
             {/* Main row */}
             {!shouldHideRow && (
             <tr
-              key={`${row.id}-${flatIndex}`}
+            key={`${row.id}-${flatIndex}`} 
               className={`border-b border-slate-900 hover:bg-slate-900/40 ${
                 isISNetIncome ? "border-t border-slate-400 bg-slate-900/50" : isISAnchorRow ? "border-t border-slate-500 bg-slate-900/35" : hasTopBorder ? "border-t-2 border-slate-300" : ""
               } ${shouldBeBold && isBalanceSheet ? "bg-slate-800/30" : ""}`}
@@ -896,7 +896,7 @@ function StatementTable({
                           storedValue = 0;
                         }
                       } else {
-                        storedValue = row.values?.[y] ?? 0;
+                      storedValue = row.values?.[y] ?? 0;
                       }
                     } else if (isProjection) {
                       // Projection year - calculate from BS changes
@@ -924,20 +924,20 @@ function StatementTable({
                           embeddedDisclosures: embeddedDisclosures ?? [],
                           sbcDisclosureEnabled,
                         });
-                      } else {
-                        // Use stored value first (should be there after recomputeCalculations)
-                        // But also compute if value is 0 or undefined to ensure we show calculated values
-                        if (row.values?.[y] !== undefined && row.values[y] !== 0) {
-                          storedValue = row.values[y];
-                        } else {
-                          // Only compute if no stored value exists, but be very careful to avoid recursion
+                  } else {
+                    // Use stored value first (should be there after recomputeCalculations)
+                    // But also compute if value is 0 or undefined to ensure we show calculated values
+                    if (row.values?.[y] !== undefined && row.values[y] !== 0) {
+                      storedValue = row.values[y];
+                    } else {
+                      // Only compute if no stored value exists, but be very careful to avoid recursion
                           // For net_income, danda - these pull from IS/D&A breakdowns
-                          if (row.id === "net_income") {
-                            const isRow = allStatements.incomeStatement.find(r => r.id === row.id);
-                            if (isRow && isRow.values?.[y] !== undefined) {
-                              storedValue = isRow.values[y];
-                            }
-                          } else if (row.id === "danda") {
+                      if (row.id === "net_income") {
+                        const isRow = allStatements.incomeStatement.find(r => r.id === row.id);
+                        if (isRow && isRow.values?.[y] !== undefined) {
+                          storedValue = isRow.values[y];
+                        }
+                      } else if (row.id === "danda") {
                             if (allStatements && embeddedDisclosures !== undefined) {
                               storedValue = resolveHistoricalCfoValueOnly("danda", y, {
                                 cashFlowRows: rows,
@@ -946,19 +946,19 @@ function StatementTable({
                                 embeddedDisclosures: embeddedDisclosures ?? [],
                                 danaBreakdowns: danaBreakdowns ?? {},
                               });
-                            } else {
+                      } else {
                               storedValue = row.values?.[y] ?? 0;
                             }
                           } else {
-                            try {
+                        try {
                               storedValue = computeRowValue(row, y, rows, rows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
-                            } catch (e) {
-                              storedValue = 0;
+                        } catch (e) {
+                          storedValue = 0;
                             }
-                          }
                         }
                       }
                     }
+                  }
                 } else if (row.kind === "input") {
                   // For input items, use stored value
                   storedValue = row.values?.[y] ?? 0;
@@ -1118,8 +1118,9 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
   const years = useMemo(() => {
     const hist = meta?.years?.historical ?? [];
     const proj = meta?.years?.projection ?? [];
+    if (currentStepId === "historicals") return [...hist];
     return [...hist, ...proj];
-  }, [meta]);
+  }, [meta, currentStepId]);
 
   const toggleRow = (rowId: string) => {
     setExpandedRows((prev) => {
@@ -1798,6 +1799,11 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                 <> · <span className="text-slate-300">({getUnitLabel(meta.currencyUnit) || meta.currencyUnit})</span></>
               )}
             </p>
+            {currentStepId === "historicals" && (
+              <p className="text-[11px] text-slate-500 mt-1">
+                Showing historical periods only. Projection columns appear in Forecast Drivers and later steps.
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-4">
@@ -1854,7 +1860,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
           <tbody>
             {/* Income Statement — only when showing full model */}
             {focusStatement === "all" && (
-              <StatementTable
+            <StatementTable
                 rows={incomeStatementOrdered.filter(r => 
                   r.id !== "ebitda" && 
                   r.id !== "ebitda_margin" && 
@@ -1863,15 +1869,15 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                   !r.label.toLowerCase().includes("stock based compensation") &&
                   !r.label.toLowerCase().includes("sbc")
                 )}
-                label="Income Statement"
-                years={years}
-                meta={meta}
-                showDecimals={showDecimals}
-                expandedRows={expandedRows}
-                toggleRow={toggleRow}
-                allStatements={{ incomeStatement, balanceSheet, cashFlow }}
-                sbcBreakdowns={sbcBreakdowns}
-                danaBreakdowns={danaBreakdowns}
+              label="Income Statement"
+              years={years}
+              meta={meta}
+              showDecimals={showDecimals}
+              expandedRows={expandedRows}
+              toggleRow={toggleRow}
+              allStatements={{ incomeStatement, balanceSheet, cashFlow }}
+              sbcBreakdowns={sbcBreakdowns}
+              danaBreakdowns={danaBreakdowns}
                 embeddedDisclosures={embeddedDisclosures}
                 projectedRevenue={projectedRevenue}
                 projectedCogs={projectedCogs}
@@ -1891,7 +1897,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
               const rowsToShow = allSbcRows.filter((d) =>
                 histYears.some((y) => (d.values[y] ?? 0) !== 0)
               );
-
+              
               return (
                 <>
                   {/* SBC Header */}
@@ -1907,21 +1913,21 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                   {rowsToShow.map((d) => {
                     const row = findRowInTree(incomeStatement ?? [], d.rowId);
                     const label = d.label ?? row?.label ?? d.rowId;
-                    return (
+                      return (
                       <tr key={d.rowId} className="border-b border-amber-900/30 bg-amber-950/10">
                         <td className="px-3 py-1.5 text-amber-300/90" style={{ paddingLeft: "24px" }}>
                           {label}
-                        </td>
-                        {years.map((y) => {
+                          </td>
+                          {years.map((y) => {
                           const value = d.values[y] ?? 0;
-                          return (
-                            <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
+                            return (
+                              <td key={y} className="px-3 py-1.5 text-right text-amber-200/90">
                               {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
                   })}
                   {/* Total row — use computed totals only (not first row) */}
                   <tr className="border-t-2 border-amber-700/50 bg-amber-950/30">
@@ -1952,8 +1958,8 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
               const rowsToShow = allAmortRows.filter((d) =>
                 histYears.some((y) => (d.values[y] ?? 0) !== 0)
               );
-
-              return (
+                    
+                    return (
                 <>
                   {/* Amortization Header */}
                   <tr className="border-t-4 border-teal-700/50">
@@ -1999,8 +2005,8 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                     })}
                   </tr>
                 </>
-              );
-            })()}
+                    );
+                  })()}
 
             {/* Depreciation Embedded in Expenses Disclosure — single source: embeddedDisclosures (same as depreciation builder). */}
             {focusStatement === "all" && (() => {
@@ -2013,8 +2019,8 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
               const rowsToShow = allDeprRows.filter((d) =>
                 histYears.some((y) => (d.values[y] ?? 0) !== 0)
               );
-
-              return (
+                      
+                      return (
                 <>
                   <tr className="border-t-4 border-violet-700/50">
                     <td colSpan={1 + years.length} className="px-3 py-3 bg-violet-950/30">
@@ -2031,17 +2037,17 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                       <tr key={d.rowId} className="border-b border-violet-900/30 bg-violet-950/10">
                         <td className="px-3 py-1.5 text-violet-300/90" style={{ paddingLeft: "24px" }}>
                           {label}
-                        </td>
-                        {years.map((y) => {
+                          </td>
+                          {years.map((y) => {
                           const value = d.values[y] ?? 0;
-                          return (
+                            return (
                             <td key={y} className="px-3 py-1.5 text-right text-violet-200/90">
                               {formatAccountingNumber(value, meta.currencyUnit, showDecimals)}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
                   })}
                   <tr className="border-t-2 border-violet-700/50 bg-violet-950/30">
                     <td className="px-3 py-2 font-semibold text-violet-200">
@@ -2071,8 +2077,8 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
               const rowsToShow = allRestructRows.filter((d) =>
                 histYears.some((y) => (d.values[y] ?? 0) !== 0)
               );
-
-              return (
+                    
+                    return (
                 <>
                   <tr className="border-t-4 border-rose-700/50">
                     <td colSpan={1 + years.length} className="px-3 py-3 bg-rose-950/30">
@@ -2115,8 +2121,8 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                     })}
                   </tr>
                 </>
-              );
-            })()}
+                    );
+                  })()}
 
             {/* Working Capital Schedule — only when BS Build focus (IB: NOWC = Total OA - Total OL, ΔNOWC = change) */}
             {focusStatement === "balance" && wcScheduleItems.length > 0 && (
@@ -2417,7 +2423,7 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                     return (
                       <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
                         {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
-                      </td>
+                        </td>
                     );
                   })}
                 </tr>
@@ -2426,13 +2432,13 @@ export default function ExcelPreview({ focusStatement = "all" }: ExcelPreviewPro
                   {years.map((y) => {
                     const isProj = projectionYears.includes(y);
                     const val = isProj ? intangiblesScheduleOutput.additionsByYear[y] : null;
-                    return (
+                          return (
                       <td key={y} className={yearColClass("px-3 py-2 text-right text-xs text-slate-200")(y)}>
                         {val != null ? formatAccountingNumber(val, meta?.currencyUnit ?? "millions", showDecimals) : "—"}
-                      </td>
-                    );
-                  })}
-                </tr>
+                            </td>
+                          );
+                        })}
+                      </tr>
                 <tr className="border-b border-slate-700/50 bg-slate-800/40">
                   <td className="px-3 py-2 pl-6 text-xs text-slate-300">Amortization</td>
                   {years.map((y) => {

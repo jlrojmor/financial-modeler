@@ -13,6 +13,7 @@ const SUB_TAB_LABELS: Record<ForecastDriversSubTab, string> = {
   operating_costs: "COGS & Operating Expenses",
   non_operating_schedules: "Non-operating & Schedules",
   wc_drivers: "Working Capital Drivers",
+  other_bs_items: "Other BS Items",
   financing_taxes: "Financing / Taxes",
 };
 

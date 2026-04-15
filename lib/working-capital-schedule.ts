@@ -21,9 +21,21 @@ export type WcScheduleItem = {
  * Get WC item ids from Balance Sheet using forecast routing (metadata-first).
  * Returns row ids that route to working_capital_schedule.
  */
+function flattenBsRows(rows: Row[]): Row[] {
+  const out: Row[] = [];
+  const walk = (rs: Row[]) => {
+    for (const r of rs) {
+      out.push(r);
+      if (r.children?.length) walk(r.children);
+    }
+  };
+  walk(rows);
+  return out;
+}
+
 export function getWcScheduleItemIdsFromRouting(balanceSheet: Row[]): Set<string> {
   const wcIds = new Set<string>();
-  for (const row of balanceSheet) {
+  for (const row of flattenBsRows(balanceSheet)) {
     if (row.id.startsWith("total_") || row.id === "cash") continue;
     const routing = getForecastRoutingState(row, "balanceSheet");
     if (routing.owner === "working_capital_schedule") {

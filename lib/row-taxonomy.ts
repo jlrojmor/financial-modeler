@@ -177,7 +177,7 @@ function getFallbackIsTaxonomy(label: string, row: Row): ISTaxonomy {
   if (/product|hardware|device/.test(lower)) {
     return { category: "revenue", type: "revenue_product", label };
   }
-  if (/service|consulting|professional/.test(lower)) {
+  if (/service|consulting/.test(lower) && !/fee|expense|cost/.test(lower)) {
     return { category: "revenue", type: "revenue_service", label };
   }
   if (/licen[cs]|royalt/.test(lower)) {
@@ -528,6 +528,15 @@ function getFallbackBsTaxonomy(label: string, row: Row): BSTaxonomy {
     }
     return { category: "current_liability", type: "liab_short_term_debt", label };
   }
+  // Non-current tax & lease BEFORE generic "payable" (otherwise "Noncurrent income tax payable" → AP)
+  if (/non[-\s]*current|noncurrent/i.test(lower)) {
+    if (/(?:income\s*)?tax|taxes/.test(lower) && /payable|receivable/.test(lower)) {
+      return { category: "non_current_liability", type: "liab_other_non_current", label };
+    }
+    if (/lease/.test(lower) && /liabilit|obligation/.test(lower)) {
+      return { category: "non_current_liability", type: "liab_lease_obligations", label };
+    }
+  }
   if (/payable|ap\b/.test(lower)) {
     return { category: "current_liability", type: "liab_payables", label };
   }
@@ -537,7 +546,15 @@ function getFallbackBsTaxonomy(label: string, row: Row): BSTaxonomy {
   if (/deferred\s*rev/.test(lower)) {
     return { category: "current_liability", type: "liab_deferred_revenue", label };
   }
-  if (/current\s*lease|lease.*current/.test(lower)) {
+  // Non-current lease (duplicate patterns OK — catches labels without "non-current" prefix)
+  if (/non[-\s]*current.*lease|lease.*non[-\s]*current|lease\s*obligation|operating\s*lease/.test(lower)) {
+    return { category: "non_current_liability", type: "liab_lease_obligations", label };
+  }
+  // Do not match "current" inside "non-current" (e.g. "non-current lease liabilities")
+  if (
+    (/current\s*lease|lease.*current/.test(lower)) &&
+    !/non[-\s]*current.*lease|lease.*non[-\s]*current|noncurrent.*lease/i.test(lower)
+  ) {
     return { category: "current_liability", type: "liab_current_lease", label };
   }
 
@@ -559,9 +576,6 @@ function getFallbackBsTaxonomy(label: string, row: Row): BSTaxonomy {
   }
   if (/pension|retire/.test(lower)) {
     return { category: "non_current_liability", type: "liab_pension", label };
-  }
-  if (/lease\s*obligation|operating\s*lease/.test(lower)) {
-    return { category: "non_current_liability", type: "liab_lease_obligations", label };
   }
 
   // Ambiguous funded-debt labels: route to debt taxonomy (metadata marks ambiguous)
@@ -622,11 +636,49 @@ function getFallbackBsTaxonomy(label: string, row: Row): BSTaxonomy {
   return { category: "current_asset", type: "asset_other_current", label };
 }
 
-/** Get BS taxonomy for a row (deterministic for template, fallback for custom). */
+/** Category for a stored BS taxonomy type (Row.taxonomyType). */
+function bsCategoryFromStoredType(t: BSTaxonomyType): BSTaxonomyCategory {
+  if (t === "calc_total") return "calculated";
+  if (t.startsWith("equity_")) return "equity";
+  const fixed: BSTaxonomyType[] = [
+    "asset_ppe", "asset_intangibles", "asset_goodwill", "asset_rou_assets", "asset_investments", "asset_deferred_tax", "asset_other_fixed",
+  ];
+  if (fixed.includes(t)) return "fixed_asset";
+  if (t.startsWith("asset_")) return "current_asset";
+  const ncl: BSTaxonomyType[] = [
+    "liab_long_term_debt", "liab_deferred_tax", "liab_pension", "liab_lease_obligations", "liab_other_non_current",
+  ];
+  if (ncl.includes(t)) return "non_current_liability";
+  if (t.startsWith("liab_")) return "current_liability";
+  return "current_asset";
+}
+
+function isStoredBsTaxonomyType(t: string): t is BSTaxonomyType {
+  return (BS_TAXONOMY_VOCABULARY as readonly string[]).includes(t);
+}
+
+/**
+ * BS taxonomy: template id → label inference → optional stored taxonomyType.
+ * When stored type contradicts label on non-current tax/lease lines, prefer label inference (stale WC/AP classifications).
+ */
 export function getBsTaxonomy(row: Row): BSTaxonomy {
   const byId = BS_TAXONOMY_BY_ID[row.id];
   if (byId) return byId;
-  return getFallbackBsTaxonomy(row.label, row);
+  const fromLabel = getFallbackBsTaxonomy(row.label ?? "", row);
+  const stored = row.taxonomyType;
+  if (!stored || !isStoredBsTaxonomyType(stored)) return fromLabel;
+  const st = stored as BSTaxonomyType;
+  if (
+    (st === "liab_payables" || st === "liab_current_lease" || st === "liab_other_current") &&
+    (fromLabel.type === "liab_other_non_current" || fromLabel.type === "liab_lease_obligations")
+  ) {
+    return fromLabel;
+  }
+  return {
+    category: bsCategoryFromStoredType(st),
+    type: st,
+    label: row.label ?? "",
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

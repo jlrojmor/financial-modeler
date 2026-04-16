@@ -37,10 +37,47 @@ export interface CfoSourceContext {
 }
 
 function getStoredCfsValue(cashFlowRows: Row[], rowId: string, year: string): number | undefined {
-  const row = cashFlowRows.find((r) => r.id === rowId);
+  const row = findRowInTree(cashFlowRows, rowId);
   if (!row) return undefined;
   const v = row.values?.[year];
   return v !== undefined ? v : undefined;
+}
+
+/** Flatten IS for taxonomy / id lookups (nested opex, D&A, SBC). */
+function flattenIncomeStatement(rows: Row[], out: Row[] = []): Row[] {
+  for (const r of rows) {
+    out.push(r);
+    if (r.children?.length) flattenIncomeStatement(r.children, out);
+  }
+  return out;
+}
+
+/** Exported for projected-cfs-engine alignment with CFS recompute logic. */
+export function getDandaFromIncomeStatement(incomeStatement: Row[], year: string): number | null {
+  const flat = flattenIncomeStatement(incomeStatement);
+  const combined =
+    flat.find((r) => r.taxonomyType === "opex_danda") ??
+    flat.find((r) => r.id === "da" || r.id === "danda");
+  const dep = flat.find((r) => r.taxonomyType === "opex_depreciation");
+  const amort = flat.find((r) => r.taxonomyType === "opex_amortization");
+  if (dep && amort && combined?.id !== dep.id && combined?.id !== amort.id) {
+    const v = Math.abs(dep.values?.[year] ?? 0) + Math.abs(amort.values?.[year] ?? 0);
+    return v > 0 || dep.values?.[year] !== undefined || amort.values?.[year] !== undefined ? v : null;
+  }
+  if (combined) {
+    const v = Math.abs(combined.values?.[year] ?? 0);
+    return combined.values?.[year] !== undefined ? v : null;
+  }
+  return null;
+}
+
+/** Exported for projected-cfs-engine alignment with CFS recompute logic. */
+export function getSbcFromIncomeStatement(incomeStatement: Row[], year: string): number | null {
+  const flat = flattenIncomeStatement(incomeStatement);
+  const row =
+    flat.find((r) => r.taxonomyType === "opex_sbc") ?? flat.find((r) => r.id === "sbc");
+  if (!row || row.values?.[year] === undefined) return null;
+  return Math.abs(row.values[year] ?? 0);
 }
 
 /**
@@ -66,7 +103,9 @@ export function resolveHistoricalCfoValue(
 
   // --- Net Income: always from Income Statement (derived/linked) ---
   if (rowId === "net_income") {
-    const isRow = incomeStatement.find((r) => r.id === "net_income");
+    const isRow =
+      findRowInTree(incomeStatement, "net_income") ??
+      incomeStatement.find((r) => r.taxonomyType === "calc_net_income");
     const value = isRow?.values?.[year] ?? 0;
     return {
       value,
@@ -93,6 +132,10 @@ export function resolveHistoricalCfoValue(
         };
       }
     }
+    const fromIs = getSbcFromIncomeStatement(incomeStatement, year);
+    if (fromIs != null) {
+      return { value: fromIs, sourceType: "income_statement", sourceDetail: "Income Statement (SBC / opex_sbc)" };
+    }
     return { value: 0, sourceType: "manual", sourceDetail: useSbcDisclosure ? "No SBC (zero)" : "SBC disclosure off; enter value in CFS or turn disclosure on" };
   }
 
@@ -103,10 +146,16 @@ export function resolveHistoricalCfoValue(
     if (dandaRow && reported !== undefined && hasMeaningfulHistoricalValue(dandaRow, year)) {
       return { value: reported, sourceType: "reported", sourceDetail: "Reported CFS D&A" };
     }
-    const isDanda = findRowInTree(incomeStatement, "danda");
-    const fromIs = isDanda?.values?.[year];
-    if (fromIs !== undefined && fromIs !== 0) {
-      return { value: fromIs, sourceType: "income_statement", sourceDetail: "Income Statement (D&A)" };
+    const isDanda =
+      findRowInTree(incomeStatement, "danda") ??
+      findRowInTree(incomeStatement, "da");
+    const fromIsSingle = isDanda?.values?.[year];
+    if (fromIsSingle !== undefined && fromIsSingle !== 0) {
+      return { value: fromIsSingle, sourceType: "income_statement", sourceDetail: "Income Statement (D&A)" };
+    }
+    const fromIsCombined = getDandaFromIncomeStatement(incomeStatement, year);
+    if (fromIsCombined != null && fromIsCombined !== 0) {
+      return { value: fromIsCombined, sourceType: "income_statement", sourceDetail: "Income Statement (depreciation + amortization)" };
     }
     const fromDana = danaBreakdowns[year];
     if (fromDana !== undefined && fromDana !== 0) {

@@ -9,11 +9,12 @@ import {
   getDaysBaseForItemId,
   computeHistoricDays,
   computeHistoricPct,
-  computeWcProjectedBalance,
+  buildWcProjectedBalancesMatrix,
   type WcDriverState,
 } from "@/lib/working-capital-schedule";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 import { computeProjectedRevCogs } from "@/lib/projected-ebit";
+import { findRowInTree } from "@/lib/row-utils";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -92,8 +93,8 @@ export default function WcDriversPreview() {
   const { revByYear, cogsByYear } = useMemo(() => {
     const histRevByYear: Record<string, number> = {};
     const histCogsByYear: Record<string, number> = {};
-    const revRow = incomeStatement?.find((r) => r.id === "rev");
-    const cogsRow = incomeStatement?.find((r) => r.id === "cogs");
+    const revRow = findRowInTree(incomeStatement ?? [], "rev");
+    const cogsRow = findRowInTree(incomeStatement ?? [], "cogs");
     for (const y of historicYears) {
       try {
         if (revRow) histRevByYear[y] = computeRowValue(revRow, y, incomeStatement ?? [], incomeStatement ?? [], allStatements);
@@ -159,30 +160,21 @@ export default function WcDriversPreview() {
     ]
   );
 
-  // Compute projected balances for all items
-  const projectedBalances = useMemo(() => {
-    const out: Record<string, Record<string, number>> = {};
-    for (const item of wcItems) {
-      out[item.id] = {};
-      const bsRow = balanceSheet?.find((r) => r.id === item.id);
-      for (const y of allYears) {
-        if (historicYears.includes(y)) {
-          out[item.id][y] = bsRow?.values?.[y] ?? 0;
-        } else {
-          const manual = bsRow?.values?.[y];
-          out[item.id][y] = computeWcProjectedBalance(
-            item.id,
-            y,
-            driverState,
-            revByYear,
-            cogsByYear,
-            manual
-          );
-        }
-      }
-    }
-    return out;
-  }, [wcItems, balanceSheet, allYears, historicYears, driverState, revByYear, cogsByYear]);
+  const { projectedBalances } = useMemo(
+    () =>
+      buildWcProjectedBalancesMatrix({
+        wcItems,
+        balanceSheet: balanceSheet ?? [],
+        years: allYears,
+        historicalYears: historicYears,
+        projectionYears,
+        driverState,
+        revByYear,
+        cogsByYear,
+        unionBsValueKeys: true,
+      }),
+    [wcItems, balanceSheet, allYears, historicYears, projectionYears, driverState, revByYear, cogsByYear]
+  );
 
   // NWC = sum(asset balances) - sum(liability balances)
   const nwcByYear = useMemo(() => {

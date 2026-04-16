@@ -82,15 +82,24 @@ import {
 } from "@/lib/capex-da-engine";
 import { computeIntangiblesAmortSchedule } from "@/lib/intangibles-amort-engine";
 import { displayToStored } from "@/lib/currency-utils";
-import { computeDebtScheduleEngine } from "@/lib/debt-schedule-engine";
+import { computeDebtScheduleEngine, type DebtScheduleEngineResultV1 } from "@/lib/debt-schedule-engine";
 import { computeInterestIncomeSchedule } from "@/lib/interest-income-engine";
 import { computeTaxSchedule } from "@/lib/tax-schedule-engine";
 import { collectNonOperatingIncomeLeaves, findIsRowById, defaultPhase2Bucket } from "@/lib/non-operating-phase2-lines";
 import { projectAppliedNonOperatingDirectBody } from "@/lib/non-operating-phase2-direct-preview";
 import { collectOperatingExpenseLeafLines } from "@/lib/opex-line-ingest";
 import { getOpExLineLastHistoricalValue, projectOpExLineForecastByYear } from "@/lib/opex-forecast-projection-v1";
-import { computeEquityRollforward, defaultEquityRollforwardConfig } from "@/lib/equity-rollforward-engine";
-import type { EquityRollforwardConfig } from "@/lib/equity-rollforward-engine";
+import {
+  computeEquityRollforward,
+  defaultEquityRollforwardConfig,
+  type EquityRollforwardConfig,
+  type EquityRollforwardResult,
+} from "@/lib/equity-rollforward-engine";
+import {
+  applyEndingCashToBalanceSheet,
+  applyProjectedCfsToCashFlowRows,
+  computeProjectedCashFlow,
+} from "@/lib/projected-cfs-engine";
 import { getOtherBsItems, computeOtherBsProjectedBalances } from "@/lib/other-bs-items";
 import { computeProjectedEbitByYear, computeProjectedRevCogs } from "@/lib/projected-ebit";
 import { applyAnchorForecastDriver, applyAnchorHistoricalNature } from "@/lib/cfs-forecast-drivers";
@@ -493,7 +502,8 @@ const CFS_ANCHOR_ORDER: { id: string; afterId: string }[] = [
   { id: "investing_cf", afterId: "other_investing" },
   { id: "debt_issued", afterId: "investing_cf" },
   { id: "debt_repaid", afterId: "debt_issued" },
-  { id: "equity_issued", afterId: "debt_repaid" },
+  { id: "cash_interest_paid", afterId: "debt_repaid" },
+  { id: "equity_issued", afterId: "cash_interest_paid" },
   { id: "share_repurchases", afterId: "equity_issued" },
   { id: "dividends", afterId: "share_repurchases" },
   { id: "other_financing", afterId: "dividends" },
@@ -4043,8 +4053,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
     const debtStdByYear: Record<string, number> = {};
     const debtLtdByYear: Record<string, number> = {};
     const debtAppliedBody = state.debtSchedulePhase2Persist?.applied ?? null;
+    let debtScheduleEngineResult: DebtScheduleEngineResultV1 | null = null;
     if (debtAppliedBody) {
-      const debtResult = computeDebtScheduleEngine({
+      debtScheduleEngineResult = computeDebtScheduleEngine({
         config: debtAppliedBody,
         projectionYears,
         lastHistoricYear: lastHistYear,
@@ -4058,22 +4069,23 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
       for (const y of projectionYears) {
         if (isCurrentPortionPath) {
-          const tot = debtResult.totalsByYear[y]?.totalEndingDebt ?? 0;
-          const mand = debtResult.totalsByYear[y]?.totalMandatoryRepayment ?? 0;
+          const tot = debtScheduleEngineResult.totalsByYear[y]?.totalEndingDebt ?? 0;
+          const mand = debtScheduleEngineResult.totalsByYear[y]?.totalMandatoryRepayment ?? 0;
           debtStdByYear[y] = Math.min(mand, tot);
           debtLtdByYear[y] = Math.max(0, tot - debtStdByYear[y]);
         } else if (isRevolverPath) {
-          debtStdByYear[y] = debtResult.perTrancheByYear[locTranche!.trancheId]?.[y]?.endingDebt ?? 0;
-          debtLtdByYear[y] = debtResult.perTrancheByYear[termTranche!.trancheId]?.[y]?.endingDebt ?? 0;
+          debtStdByYear[y] = debtScheduleEngineResult.perTrancheByYear[locTranche!.trancheId]?.[y]?.endingDebt ?? 0;
+          debtLtdByYear[y] = debtScheduleEngineResult.perTrancheByYear[termTranche!.trancheId]?.[y]?.endingDebt ?? 0;
         } else {
           debtStdByYear[y] = 0;
-          debtLtdByYear[y] = debtResult.totalsByYear[y]?.totalEndingDebt ?? 0;
+          debtLtdByYear[y] = debtScheduleEngineResult.totalsByYear[y]?.totalEndingDebt ?? 0;
         }
       }
     }
 
     // ── Equity roll-forward writeback (CS, APIC, Treasury, RE) ─────────────────
     const equityByAccount: Record<string, Record<string, number>> = {};
+    let equityRollforwardResult: EquityRollforwardResult | null = null;
     if (state.equityRollforwardConfirmed) {
       const findBsVal = (tt: string) => {
         const row = flatBs.find((r) => r.taxonomyType === tt);
@@ -4185,6 +4197,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         lastHistTreasuryStock:    findBsVal("equity_treasury_stock"),
         lastHistRetainedEarnings: findBsVal("equity_retained_earnings"),
       });
+      equityRollforwardResult = equityResult;
 
       equityByAccount["equity_common_stock"]      = equityResult.commonStockByYear;
       equityByAccount["equity_apic"]              = equityResult.apicByYear;
@@ -4246,19 +4259,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // ── Interest expense from debt schedule ──
     // Sign: NEGATIVE — displayed with parentheses in IB format.
     // calculations.ts EBT formula uses Math.abs to always subtract correctly.
-    if (debtAppliedBody) {
-      const debtResult = computeDebtScheduleEngine({
-        config: debtAppliedBody,
-        projectionYears,
-        lastHistoricYear: lastHistYear,
-        balanceSheet,
-      });
+    if (debtAppliedBody && debtScheduleEngineResult) {
       const intExpRowId = isRowIdByTaxonomy["non_op_interest_expense"]
         ?? flatIs.find((r) => r.id === "interest_expense")?.id;
       if (intExpRowId) {
         const byYear: Record<string, number> = {};
         for (const y of projectionYears) {
-          const v = debtResult.interestExpenseTotalByYear[y];
+          const v = debtScheduleEngineResult.interestExpenseTotalByYear[y];
           byYear[y] = v != null ? -Math.abs(v) : 0;
         }
         isProjectedByRowId[intExpRowId] = byYear;
@@ -4606,10 +4613,27 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const st = { incomeStatement: newIS, balanceSheet: newBS, cashFlow };
       newIS = recomputeCalculations(newIS, year, newIS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
-    // Recompute cashFlow for each projection year (wc_change and operating_cf use new BS + IS)
-    let newCF = cashFlow;
+
+    // ── Projected CFS (pre-sweep): schedule-driven CFI/CFF + other operating + cash plug ──
+    let newCF = [...cashFlow];
+    ensureCFSAnchorRowsInPlace(newCF);
+    const cfsEngineResult = computeProjectedCashFlow({
+      projectionYears,
+      lastHistoricalYear: lastHistYear,
+      balanceSheet: newBS,
+      incomeStatement: newIS,
+      totalCapexByYear,
+      debtScheduleResult: debtScheduleEngineResult,
+      equityRollforwardResult,
+      fxEffectByYear: {},
+    });
+    newCF = applyProjectedCfsToCashFlowRows(newCF, cfsEngineResult.cfsValuesByRowId);
+    newBS = applyEndingCashToBalanceSheet(newBS, cfsEngineResult.endingCashByYear, projectionYears);
+
     for (const year of projectionYears) {
       const st = { incomeStatement: newIS, balanceSheet: newBS, cashFlow: newCF };
+      newBS = recomputeCalculations(newBS, year, newBS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
+      newIS = recomputeCalculations(newIS, year, newIS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
 

@@ -9,6 +9,28 @@ import type { Row, EmbeddedDisclosureItem } from "@/types/finance";
 import { getBSCategoryForRow, getRowsForCategory } from "./bs-category-mapper";
 import { isOperatingExpenseRow, isNonOperatingRow, isTaxRow } from "./is-classification";
 import { findRowInTree } from "./row-utils";
+import {
+  buildModelYearTimeline,
+  collectYearKeysFromRowTree,
+  resolvePriorYear,
+} from "./year-timeline";
+
+/** All CFS rows in tree order (for WC cfo_* lines nested under wc_change). */
+function flattenCashFlowRows(rows: Row[]): Row[] {
+  const out: Row[] = [];
+  const walk = (rs: Row[]) => {
+    for (const r of rs) {
+      out.push(r);
+      if (r.children?.length) walk(r.children);
+    }
+  };
+  walk(rows);
+  return out;
+}
+
+function findBsRowForCfo(balanceSheet: Row[], bsRowId: string): Row | null {
+  return findRowInTree(balanceSheet, bsRowId);
+}
 import { resolveHistoricalCfoValueOnly, hasMeaningfulHistoricalValue } from "./cfo-source-resolution";
 
 /** WC exclusions for BS-based WC: cash and st_debt (and totals). */
@@ -155,6 +177,29 @@ export function computeRowValue(
     }
     return row.values?.[year] ?? 0;
   }
+
+  // WC component lines (cfo_*), including nested under wc_change: always BS bridge, not raw input
+  const isCashFlowStatement =
+    !!allStatements &&
+    statementRows.some(
+      (r) =>
+        r.id === "operating_cf" ||
+        r.id === "investing_cf" ||
+        r.id === "financing_cf" ||
+        r.id === "net_change_cash"
+    );
+  if (row.id.startsWith("cfo_") && isCashFlowStatement && allStatements) {
+    return computeFormula(
+      row,
+      year,
+      statementRows,
+      allStatements,
+      sbcBreakdowns,
+      danaBreakdowns,
+      embeddedDisclosures,
+      sbcDisclosureEnabled
+    );
+  }
   
   // If it's an input, return the stored value
   if (row.kind === "input") {
@@ -224,16 +269,13 @@ function computeFormula(
   // CFO Intelligence items - calculate from BS changes
   if (rowId.startsWith("cfo_") && isInCFS && allStatements) {
     const bsRowId = rowId.replace("cfo_", "");
-    const bsRow = allStatements.balanceSheet.find(r => r.id === bsRowId);
+    const bsRow = findBsRowForCfo(allStatements.balanceSheet, bsRowId);
     
     if (bsRow && row.cfsLink) {
-      // Calculate change from previous year
+      // Calculate change from previous year (timeline = union of all BS value keys, not balanceSheet[0])
       const currentValue = bsRow.values?.[year] ?? 0;
-      // Find previous year from the years array
-      const years = allStatements.balanceSheet[0]?.values ? 
-        Object.keys(allStatements.balanceSheet[0].values).sort() : [];
-      const yearIndex = years.indexOf(year);
-      const previousYear = yearIndex > 0 ? years[yearIndex - 1] : null;
+      const timeline = collectYearKeysFromRowTree(allStatements.balanceSheet);
+      const previousYear = resolvePriorYear(year, timeline);
       const previousValue = previousYear ? (bsRow.values?.[previousYear] ?? 0) : 0;
       const change = currentValue - previousValue;
       
@@ -298,17 +340,8 @@ function computeFormula(
       return findRowValue(statementRows, "wc_change", year);
     }
     
-    // Get all years to find previous year - try multiple sources
-    let allYears: string[] = [];
-    if (allStatements.balanceSheet[0]?.values) {
-      allYears = Object.keys(allStatements.balanceSheet[0].values).sort();
-    } else if (allStatements.incomeStatement[0]?.values) {
-      allYears = Object.keys(allStatements.incomeStatement[0].values).sort();
-    } else if (statementRows[0]?.values) {
-      allYears = Object.keys(statementRows[0].values).sort();
-    }
-    const yearIndex = allYears.indexOf(year);
-    const previousYear = yearIndex > 0 ? allYears[yearIndex - 1] : null;
+    const timeline = buildModelYearTimeline(allStatements);
+    const previousYear = resolvePriorYear(year, timeline);
     if (!previousYear) return 0;
 
     // Forecast: ΔWC only from projected BS WC balances (WC-tagged rows only)
@@ -364,16 +397,13 @@ function computeFormula(
     const otherOperating = findRowValue(statementRows, "other_operating", year);
     let cfoIntelligenceItems = 0;
     if (isInCFS && allStatements) {
-      for (const r of statementRows) {
+      for (const r of flattenCashFlowRows(statementRows)) {
         if (!r.id.startsWith("cfo_") || !r.cfsLink) continue;
         const bsRowId = r.id.replace("cfo_", "");
-        const bsRow = allStatements.balanceSheet.find((x) => x.id === bsRowId);
+        const bsRow = findBsRowForCfo(allStatements.balanceSheet, bsRowId);
         if (!bsRow) continue;
-        const allYears = allStatements.balanceSheet[0]?.values
-          ? Object.keys(allStatements.balanceSheet[0].values).sort()
-          : [];
-        const yearIdx = allYears.indexOf(year);
-        const prevYear = yearIdx > 0 ? allYears[yearIdx - 1] : null;
+        const timeline = collectYearKeysFromRowTree(allStatements.balanceSheet);
+        const prevYear = resolvePriorYear(year, timeline);
         const curr = bsRow.values?.[year] ?? 0;
         const prev = prevYear ? (bsRow.values?.[prevYear] ?? 0) : 0;
         const change = curr - prev;
@@ -1001,38 +1031,74 @@ export function recomputeCalculations(
     };
   });
 
-  // Second pass: compute all calc rows using the updated rows
-  // We need to compute in multiple passes to handle dependencies (e.g., Revenue before Gross Profit)
-  let currentRows = updatedRows;
+  // Second pass: compute all calc rows (and nested CFS cfo_* WC lines) using the updated rows
+  // Recursive so wc_change children get BS bridge values; multiple passes for IS-style dependencies.
+  let currentRows: Row[] = updatedRows;
   let changed = true;
   let iterations = 0;
-  const maxIterations = 10; // Safety limit
-  
-  while (changed && iterations < maxIterations) {
-    changed = false;
-    iterations++;
-    
-    currentRows = currentRows.map((row) => {
-      if (row.kind === "calc" || row.kind === "subtotal" || row.kind === "total") {
-        // For CFS rows, we need to pass allStatements and sbcBreakdowns to computeFormula
-        // Use computeRowValue to get the computed value (it handles all the logic)
-        const computed = computeRowValue(row, year, currentRows, currentRows, allStatements, sbcBreakdowns, danaBreakdowns, embeddedDisclosures, sbcDisclosureEnabled);
-        const currentValue = row.values?.[year] ?? 0;
-        
-        // Only update if value changed (to detect when we've stabilized)
-        if (Math.abs(computed - currentValue) > 0.01) {
-          changed = true;
-        }
-        
-        const newValues = { ...(row.values ?? {}), [year]: computed };
+  const maxIterations = 10;
+
+  const applySecondPassRecursive = (level: Row[]): { rows: Row[]; changed: boolean } => {
+    let anyChanged = false;
+    const rows = level.map((row) => {
+      const newChildren = row.children
+        ? applySecondPassRecursive(row.children)
+        : { rows: undefined as Row[] | undefined, changed: false };
+      if (newChildren.changed) anyChanged = true;
+      const kids = newChildren.rows ?? row.children;
+      const base: Row = kids !== row.children ? { ...row, children: kids } : { ...row };
+
+      if (base.kind === "calc" || base.kind === "subtotal" || base.kind === "total") {
+        const computed = computeRowValue(
+          base,
+          year,
+          currentRows,
+          currentRows,
+          allStatements,
+          sbcBreakdowns,
+          danaBreakdowns,
+          embeddedDisclosures,
+          sbcDisclosureEnabled
+        );
+        const currentValue = base.values?.[year] ?? 0;
+        if (Math.abs(computed - currentValue) > 0.01) anyChanged = true;
         return {
-          ...row,
-          values: newValues,
+          ...base,
+          values: { ...(base.values ?? {}), [year]: computed },
         };
       }
-      return row;
+
+      if (base.kind === "input" && base.id.startsWith("cfo_")) {
+        const computed = computeRowValue(
+          base,
+          year,
+          currentRows,
+          currentRows,
+          allStatements,
+          sbcBreakdowns,
+          danaBreakdowns,
+          embeddedDisclosures,
+          sbcDisclosureEnabled
+        );
+        const currentValue = base.values?.[year] ?? 0;
+        if (Math.abs(computed - currentValue) > 0.01) anyChanged = true;
+        return {
+          ...base,
+          values: { ...(base.values ?? {}), [year]: computed },
+        };
+      }
+
+      return kids !== row.children ? { ...row, children: kids } : row;
     });
+    return { rows: rows as Row[], changed: anyChanged };
+  };
+
+  while (changed && iterations < maxIterations) {
+    const { rows: nextRows, changed: passChanged } = applySecondPassRecursive(currentRows);
+    changed = passChanged;
+    currentRows = nextRows;
+    iterations++;
   }
-  
+
   return currentRows;
 }

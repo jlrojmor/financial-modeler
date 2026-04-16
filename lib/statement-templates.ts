@@ -598,6 +598,16 @@ export function createCashFlowTemplate(): Row[] {
       cfsLink: { section: "financing", cfsItemId: "debt_repaid", impact: "negative", description: "Debt Repaid" },
     },
     {
+      id: "cash_interest_paid",
+      label: "Cash Interest Paid",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "debt_schedule",
+      cfsLink: { section: "financing", cfsItemId: "cash_interest_paid", impact: "negative", description: "Cash interest paid" },
+    },
+    {
       id: "equity_issued",
       label: "Equity Issued",
       kind: "input",

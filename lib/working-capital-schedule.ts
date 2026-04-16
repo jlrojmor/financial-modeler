@@ -10,6 +10,48 @@
 import type { Row } from "@/types/finance";
 import { getRowsForCategory } from "./bs-category-mapper";
 import { getForecastRoutingState } from "./forecast-routing";
+import { findRowInTree } from "./row-utils";
+import {
+  collectYearKeysFromRowTree,
+  pickNumericByYearKey,
+  pickNumericRecordForYear,
+  pickRowValueByYear,
+  sortYearsChronologically,
+  yearIsHistoricalForWc,
+} from "./year-timeline";
+
+/** CFS WC lines use `cfo_${balanceSheetRowId}`; schedule / BS use the bare row id. */
+export function cfsWcChildIdToBalanceSheetId(cfsRowId: string): string {
+  return cfsRowId.startsWith("cfo_") ? cfsRowId.slice(4) : cfsRowId;
+}
+
+/**
+ * Whether `map` has an explicit bridge entry for this CFS row (even `{}`), and the line object.
+ * Used so the preview still patches when deltas computed to no keys yet vs missing map key.
+ */
+export function getWcCfsBridgeLineFromMap(
+  map: Record<string, Record<string, number>>,
+  rowId: string
+): { line: Record<string, number>; hasExplicitBridgeKey: boolean } {
+  const strip = cfsWcChildIdToBalanceSheetId(rowId);
+  const cfoKey = rowId.startsWith("cfo_") ? rowId : `cfo_${strip}`;
+  for (const k of [rowId, cfoKey, strip] as const) {
+    if (Object.prototype.hasOwnProperty.call(map, k)) {
+      return { line: map[k] ?? {}, hasExplicitBridgeKey: true };
+    }
+  }
+  return { line: {}, hasExplicitBridgeKey: false };
+}
+
+/** Resolve bridge map key: CFS row may be `cfo_ar`, bare `ar`, or custom `cfo_*` matching BS id. */
+export function pickWcCfsBridgeLineByRowId(
+  map: Record<string, Record<string, number>>,
+  rowId: string
+): Record<string, number> | undefined {
+  const { line, hasExplicitBridgeKey } = getWcCfsBridgeLineFromMap(map, rowId);
+  if (!hasExplicitBridgeKey) return undefined;
+  return Object.keys(line).length > 0 ? line : undefined;
+}
 
 export type WcScheduleItem = {
   id: string;
@@ -46,9 +88,9 @@ export function getWcScheduleItemIdsFromRouting(balanceSheet: Row[]): Set<string
 }
 
 /**
- * Get the ordered list of Working Capital items.
- * Prefers metadata-based routing (cashFlowBehavior === "working_capital"); falls back to wc_change.children + category.
- * Order: current assets first (BS order), then current liabilities (BS order).
+ * Get the ordered list of Working Capital items (Forecast Drivers, Excel, etc.).
+ * Routing-first when BS rows declare `working_capital_schedule`; otherwise match `wc_change` children
+ * to top-level current asset/liability rows. CFS lines may use `cfo_${bsId}` — normalized when matching.
  */
 export function getWcScheduleItems(
   cashFlow: Row[],
@@ -82,14 +124,14 @@ export function getWcScheduleItems(
   const wcRow = cashFlow.find((r) => r.id === "wc_change");
   const children = wcRow?.children ?? [];
   if (children.length === 0) return [];
-  const childIds = new Set(children.map((c) => c.id));
+  const childBsIds = new Set(children.map((c) => cfsWcChildIdToBalanceSheetId(c.id)));
   for (const r of currentAssets) {
-    if (childIds.has(r.id)) {
+    if (childBsIds.has(r.id)) {
       out.push({ id: r.id, label: r.label, side: "asset" });
     }
   }
   for (const r of currentLiabilities) {
-    if (childIds.has(r.id)) {
+    if (childBsIds.has(r.id)) {
       out.push({ id: r.id, label: r.label, side: "liability" });
     }
   }
@@ -210,6 +252,23 @@ export type WcDriverState = {
 };
 
 /**
+ * Store keys may be bare BS id (`ar`) or CFS-style (`cfo_ar`); schedule math uses canonical BS id.
+ */
+export function resolveWcDriverStoreKey(driverState: WcDriverState, itemId: string): string {
+  if (Object.prototype.hasOwnProperty.call(driverState.wcDriverTypeByItemId, itemId)) {
+    return itemId;
+  }
+  const cfoPrefixed = `cfo_${itemId}`;
+  if (Object.prototype.hasOwnProperty.call(driverState.wcDriverTypeByItemId, cfoPrefixed)) {
+    return cfoPrefixed;
+  }
+  for (const k of Object.keys(driverState.wcDriverTypeByItemId)) {
+    if (cfsWcChildIdToBalanceSheetId(k) === itemId) return k;
+  }
+  return itemId;
+}
+
+/**
  * Compute projected balance for one WC item in one year from driver state and revenue/COGS.
  * Returns stored value (e.g. from BS) for manual or when no driver; otherwise computed.
  */
@@ -221,27 +280,38 @@ export function computeWcProjectedBalance(
   cogsByYear: Record<string, number>,
   manualBalance?: number
 ): number {
-  const driver = driverState.wcDriverTypeByItemId[itemId] ?? "manual";
+  const key = resolveWcDriverStoreKey(driverState, itemId);
+  const driver = driverState.wcDriverTypeByItemId[key] ?? driverState.wcDriverTypeByItemId[itemId] ?? "manual";
   if (driver === "manual" && manualBalance !== undefined) return manualBalance;
   if (driver === "manual") return 0;
 
-  const rev = revenueByYear[year] ?? 0;
-  const cogs = cogsByYear[year] ?? 0;
+  const rev = pickNumericByYearKey(revenueByYear, year);
+  const cogs = pickNumericByYearKey(cogsByYear, year);
 
   if (driver === "days") {
+    const byYear = driverState.wcDaysByItemIdByYear[key] ?? driverState.wcDaysByItemIdByYear[itemId];
+    const daysFromYear =
+      byYear != null ? pickNumericRecordForYear(byYear, year) : undefined;
     const days =
-      driverState.wcDaysByItemIdByYear[itemId]?.[year] ??
+      daysFromYear ??
+      driverState.wcDaysByItemId[key] ??
       driverState.wcDaysByItemId[itemId] ??
       0;
-    const base = driverState.wcDaysBaseByItemId?.[itemId] ?? getDaysBaseForItemId(itemId);
+    const base =
+      driverState.wcDaysBaseByItemId?.[key] ??
+      driverState.wcDaysBaseByItemId?.[itemId] ??
+      getDaysBaseForItemId(itemId);
     const denom = base === "revenue" ? rev : cogs;
     if (denom <= 0) return 0;
     return (days / 365) * denom;
   }
 
   if (driver === "pct_revenue" || driver === "pct_cogs") {
+    const pctByY = driverState.wcPctByItemIdByYear[key] ?? driverState.wcPctByItemIdByYear[itemId];
+    const pctFromYear = pctByY != null ? pickNumericRecordForYear(pctByY, year) : undefined;
     const pct =
-      driverState.wcPctByItemIdByYear[itemId]?.[year] ??
+      pctFromYear ??
+      driverState.wcPctByItemId[key] ??
       driverState.wcPctByItemId[itemId] ??
       0;
     const base = driver === "pct_revenue" ? "revenue" : "cogs";
@@ -250,6 +320,74 @@ export function computeWcProjectedBalance(
   }
 
   return manualBalance ?? 0;
+}
+
+/**
+ * Single source of truth for WC balance-by-year (Forecast Drivers WC preview and Projected Statements CFS bridge).
+ * Timeline = sorted unique union of `years` plus each WC item’s BS row value keys when `unionBsValueKeys` is true.
+ */
+export function buildWcProjectedBalancesMatrix(params: {
+  wcItems: WcScheduleItem[];
+  balanceSheet: Row[];
+  years: string[];
+  historicalYears: string[];
+  projectionYears: string[];
+  driverState: WcDriverState;
+  revByYear: Record<string, number>;
+  cogsByYear: Record<string, number>;
+  /** Default true: include BS keys so YoY deltas have prior-year anchors. */
+  unionBsValueKeys?: boolean;
+}): { projectedBalances: Record<string, Record<string, number>>; chron: string[] } {
+  const {
+    wcItems,
+    balanceSheet,
+    years,
+    historicalYears,
+    projectionYears,
+    driverState,
+    revByYear,
+    cogsByYear,
+    unionBsValueKeys = true,
+  } = params;
+
+  const yearSet = new Set<string>(years);
+  if (unionBsValueKeys) {
+    for (const item of wcItems) {
+      const bsRow = findRowInTree(balanceSheet, item.id);
+      for (const k of collectYearKeysFromRowTree(bsRow ? [bsRow] : [])) yearSet.add(k);
+    }
+  }
+  const chron = sortYearsChronologically([...yearSet]);
+
+  const revW: Record<string, number> = { ...revByYear };
+  const cogsW: Record<string, number> = { ...cogsByYear };
+  for (const y of chron) {
+    revW[y] = pickNumericByYearKey(revByYear, y);
+    cogsW[y] = pickNumericByYearKey(cogsByYear, y);
+  }
+
+  const projectedBalances: Record<string, Record<string, number>> = {};
+  for (const item of wcItems) {
+    projectedBalances[item.id] = {};
+    const bsRow = findRowInTree(balanceSheet, item.id);
+    for (const y of chron) {
+      if (yearIsHistoricalForWc(y, historicalYears, projectionYears)) {
+        projectedBalances[item.id]![y] = pickRowValueByYear(bsRow?.values, y);
+      } else {
+        const manual = pickRowValueByYear(bsRow?.values, y);
+        projectedBalances[item.id]![y] = computeWcProjectedBalance(
+          item.id,
+          y,
+          driverState,
+          revW,
+          cogsW,
+          manual !== 0 ? manual : undefined
+        );
+      }
+    }
+  }
+
+  return { projectedBalances, chron };
 }
 
 /**

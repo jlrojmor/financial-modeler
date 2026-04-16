@@ -14,6 +14,7 @@ import {
 } from "@/lib/working-capital-schedule";
 import { storedToDisplay, getUnitLabel } from "@/lib/currency-utils";
 import { computeProjectedRevCogs } from "@/lib/projected-ebit";
+import { findRowInTree } from "@/lib/row-utils";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -179,7 +180,7 @@ export default function WcDriversPanel() {
   };
 
   const renderItem = (item: { id: string; label: string; side: "asset" | "liability" }) => {
-    const bsRow = balanceSheet?.find((r) => r.id === item.id);
+    const bsRow = findRowInTree(balanceSheet ?? [], item.id);
     const driver = wcDriverTypeByItemId[item.id];
     const effectiveDriver = driver && driver !== "manual" ? driver : "days";
     const inferredDaysBase = getDaysBaseForItemId(item.id, item.label);

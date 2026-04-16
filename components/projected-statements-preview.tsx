@@ -1,10 +1,24 @@
 "use client";
 
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, type ReactNode } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { storedToDisplay, getUnitLabel, type CurrencyUnit } from "@/lib/currency-utils";
 import { computeProjectedRevCogs, computeProjectedEbitByYear } from "@/lib/projected-ebit";
+import { getProjectedRevenueTotalByYear } from "@/lib/non-operating-phase2-direct-preview";
+import { computeScheduleTotalDandaByYear } from "@/lib/schedule-total-danda";
+import { computeRowValue } from "@/lib/calculations";
+import { getWcScheduleVsCfsParity } from "@/lib/wc-schedule-cfs-parity";
+import { getWcScheduleItems, getWcCfsBridgeLineFromMap, type WcDriverState } from "@/lib/working-capital-schedule";
+import { computeWcCfsPreviewCashEffects } from "@/lib/projected-wc-cfs-bridge";
+import { findRowInTree } from "@/lib/row-utils";
+import {
+  collectYearKeysFromRowTree,
+  formatStatementYearHeader,
+  pickNumericRecordForYear,
+  resolvePriorYear,
+  sortYearsChronologically,
+} from "@/lib/year-timeline";
 import { ChevronDown, ChevronRight, CheckCircle2, AlertCircle } from "lucide-react";
 
 function flattenRows(rows: Row[]): Row[] {
@@ -25,10 +39,13 @@ interface PreviewRow {
   indent: number;
   values: Record<string, number>;
   isProjected?: boolean;
+  /** When set, currency formatter shows explicit 0 instead of "—" (WC bridge rows). */
+  wcShowZero?: boolean;
 }
 
-function fmt(value: number | undefined | null, unit: CurrencyUnit, showDecimals: boolean): string {
-  if (value == null || value === 0) return "—";
+function fmt(value: number | undefined | null, unit: CurrencyUnit, showDecimals: boolean, showZero = false): string {
+  if (value == null) return "—";
+  if (value === 0 && !showZero) return "—";
   const dv = storedToDisplay(value, unit);
   const ul = getUnitLabel(unit);
   const dec = showDecimals ? 1 : 0;
@@ -40,6 +57,44 @@ function fmt(value: number | undefined | null, unit: CurrencyUnit, showDecimals:
 function fmtPct(value: number | undefined | null): string {
   if (value == null || !Number.isFinite(value)) return "—";
   return `${(value * 100).toFixed(1)}%`;
+}
+
+/** Optional AI: plain-English WC sign logic from server (numbers are client-computed only). */
+function WcCfsExplainBanner() {
+  const [explanation, setExplanation] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const onClick = async () => {
+    setLoading(true);
+    setExplanation(null);
+    try {
+      const res = await fetch("/api/ai/wc-cfs-explain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = (await res.json()) as { explanation?: string | null; error?: string };
+      setExplanation(data.explanation ?? data.error ?? "No explanation returned.");
+    } catch {
+      setExplanation("Could not reach explanation service.");
+    } finally {
+      setLoading(false);
+    }
+  };
+  return (
+    <div className="px-3 py-1.5 border-b border-violet-500/15 bg-violet-950/20 flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={loading}
+        className="text-[9px] px-2 py-0.5 rounded border border-violet-500/40 text-violet-200 hover:bg-violet-500/10 disabled:opacity-50"
+      >
+        {loading ? "Loading…" : "AI: Explain WC cash-flow signs"}
+      </button>
+      {explanation ? (
+        <span className="text-[9px] text-slate-400 max-w-[min(520px,90vw)]">{explanation}</span>
+      ) : null}
+    </div>
+  );
 }
 
 function findRowByTaxonomy(flat: Row[], tt: string): Row | undefined {
@@ -67,6 +122,32 @@ export default function ProjectedStatementsPreview() {
   const cogsForecastConfigV1 = useModelStore((s) => s.cogsForecastConfigV1);
   const opexForecastConfigV1 = useModelStore((s) => s.opexForecastConfigV1);
   const applyProjections = useModelStore((s) => s.applyBsBuildProjectionsToModel);
+
+  const capexForecastMethod = useModelStore((s) => s.capexForecastMethod);
+  const capexPctRevenue = useModelStore((s) => s.capexPctRevenue);
+  const capexManualByYear = useModelStore((s) => s.capexManualByYear);
+  const capexGrowthPct = useModelStore((s) => s.capexGrowthPct);
+  const capexTimingConvention = useModelStore((s) => s.capexTimingConvention);
+  const ppeUsefulLifeSingle = useModelStore((s) => s.ppeUsefulLifeSingle);
+  const capexSplitByBucket = useModelStore((s) => s.capexSplitByBucket);
+  const capexCustomBucketIds = useModelStore((s) => s.capexCustomBucketIds);
+  const capexBucketAllocationPct = useModelStore((s) => s.capexBucketAllocationPct);
+  const ppeUsefulLifeByBucket = useModelStore((s) => s.ppeUsefulLifeByBucket);
+  const capexHelperPpeByBucketByYear = useModelStore((s) => s.capexHelperPpeByBucketByYear);
+  const capexModelIntangibles = useModelStore((s) => s.capexModelIntangibles);
+  const intangiblesAmortizationLifeYears = useModelStore((s) => s.intangiblesAmortizationLifeYears);
+  const intangiblesForecastMethod = useModelStore((s) => s.intangiblesForecastMethod);
+  const intangiblesPctRevenue = useModelStore((s) => s.intangiblesPctRevenue);
+  const intangiblesManualByYear = useModelStore((s) => s.intangiblesManualByYear);
+  const intangiblesPctOfCapex = useModelStore((s) => s.intangiblesPctOfCapex);
+
+  const wcDriverTypeByItemId = useModelStore((s) => s.wcDriverTypeByItemId ?? {});
+  const wcDaysByItemId = useModelStore((s) => s.wcDaysByItemId ?? {});
+  const wcDaysByItemIdByYear = useModelStore((s) => s.wcDaysByItemIdByYear ?? {});
+  const wcDaysBaseByItemId = useModelStore((s) => s.wcDaysBaseByItemId ?? {});
+  const wcPctBaseByItemId = useModelStore((s) => s.wcPctBaseByItemId ?? {});
+  const wcPctByItemId = useModelStore((s) => s.wcPctByItemId ?? {});
+  const wcPctByItemIdByYear = useModelStore((s) => s.wcPctByItemIdByYear ?? {});
 
   const [showDecimals, setShowDecimals] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
@@ -109,6 +190,217 @@ export default function ProjectedStatementsPreview() {
       currencyUnit: unit,
     });
   }, [incomeStatement, projectionYears, lastHistYear, revenueForecastConfigV1, revenueForecastTreeV1, revenueProjectionConfig, cogsForecastConfigV1, allStatements, sbcBreakdowns, danaBreakdowns, unit]);
+
+  /** Same revenue totals as Forecast Drivers → Non-operating & Schedules (Capex / D&A). */
+  const revenueByYearForSchedule = useMemo(() => {
+    if (!lastHistYear || projectionYears.length === 0) return {} as Record<string, number>;
+    return getProjectedRevenueTotalByYear({
+      incomeStatement: incomeStatement ?? [],
+      revenueForecastConfigV1,
+      revenueForecastTreeV1,
+      revenueProjectionConfig,
+      projectionYears,
+      lastHistoricYear: lastHistYear,
+      allStatements,
+      sbcBreakdowns,
+      danaBreakdowns,
+      currencyUnit: unit,
+    });
+  }, [
+    incomeStatement,
+    projectionYears,
+    lastHistYear,
+    revenueForecastConfigV1,
+    revenueForecastTreeV1,
+    revenueProjectionConfig,
+    allStatements,
+    sbcBreakdowns,
+    danaBreakdowns,
+    unit,
+  ]);
+
+  const scheduleTotalDandaByYear = useMemo(
+    () =>
+      computeScheduleTotalDandaByYear({
+        projectionYears,
+        lastHistoricYear: lastHistYear,
+        revenueByYear: revenueByYearForSchedule,
+        balanceSheet: balanceSheet ?? [],
+        cashFlow: cashFlow ?? [],
+        currencyUnit: unit,
+        capexForecastMethod,
+        capexPctRevenue,
+        capexManualByYear,
+        capexGrowthPct,
+        capexTimingConvention,
+        ppeUsefulLifeSingle,
+        capexSplitByBucket,
+        capexCustomBucketIds,
+        capexBucketAllocationPct,
+        ppeUsefulLifeByBucket,
+        capexHelperPpeByBucketByYear,
+        capexModelIntangibles,
+        intangiblesAmortizationLifeYears,
+        intangiblesForecastMethod,
+        intangiblesPctRevenue,
+        intangiblesManualByYear,
+        intangiblesPctOfCapex,
+      }),
+    [
+      projectionYears,
+      lastHistYear,
+      revenueByYearForSchedule,
+      balanceSheet,
+      cashFlow,
+      unit,
+      capexForecastMethod,
+      capexPctRevenue,
+      capexManualByYear,
+      capexGrowthPct,
+      capexTimingConvention,
+      ppeUsefulLifeSingle,
+      capexSplitByBucket,
+      capexCustomBucketIds,
+      capexBucketAllocationPct,
+      ppeUsefulLifeByBucket,
+      capexHelperPpeByBucketByYear,
+      capexModelIntangibles,
+      intangiblesAmortizationLifeYears,
+      intangiblesForecastMethod,
+      intangiblesPctRevenue,
+      intangiblesManualByYear,
+      intangiblesPctOfCapex,
+    ]
+  );
+
+  // Revenue + COGS full timeline — same basis as Forecast Drivers → WC schedule preview
+  const { revByYearForWc, cogsByYearForWc } = useMemo(() => {
+    const histRev: Record<string, number> = {};
+    const histCogs: Record<string, number> = {};
+    const revRow = findRowInTree(incomeStatement ?? [], "rev");
+    const cogsRow = findRowInTree(incomeStatement ?? [], "cogs");
+    for (const y of historicalYears) {
+      try {
+        if (revRow) histRev[y] = computeRowValue(revRow, y, incomeStatement ?? [], incomeStatement ?? [], allStatements);
+        if (cogsRow) histCogs[y] = Math.abs(computeRowValue(cogsRow, y, incomeStatement ?? [], incomeStatement ?? [], allStatements));
+      } catch {
+        /* noop */
+      }
+    }
+    if (projectionYears.length === 0 || !lastHistYear) {
+      return { revByYearForWc: histRev, cogsByYearForWc: histCogs };
+    }
+    const { revByYear: projRev, cogsByYear: projCogs } = computeProjectedRevCogs({
+      incomeStatement: incomeStatement ?? [],
+      projectionYears,
+      lastHistoricYear: lastHistYear,
+      revenueForecastConfigV1,
+      revenueForecastTreeV1,
+      revenueProjectionConfig,
+      cogsForecastConfigV1,
+      allStatements,
+      sbcBreakdowns,
+      danaBreakdowns,
+      currencyUnit: unit,
+    });
+    return {
+      revByYearForWc: { ...histRev, ...projRev },
+      cogsByYearForWc: { ...histCogs, ...projCogs },
+    };
+  }, [
+    incomeStatement,
+    historicalYears,
+    projectionYears,
+    lastHistYear,
+    revenueForecastConfigV1,
+    revenueForecastTreeV1,
+    revenueProjectionConfig,
+    cogsForecastConfigV1,
+    allStatements,
+    sbcBreakdowns,
+    danaBreakdowns,
+    unit,
+  ]);
+
+  const wcDriverState: WcDriverState = useMemo(
+    () => ({
+      wcDriverTypeByItemId,
+      wcDaysByItemId,
+      wcDaysByItemIdByYear,
+      wcDaysBaseByItemId,
+      wcPctBaseByItemId,
+      wcPctByItemId,
+      wcPctByItemIdByYear,
+    }),
+    [
+      wcDriverTypeByItemId,
+      wcDaysByItemId,
+      wcDaysByItemIdByYear,
+      wcDaysBaseByItemId,
+      wcPctBaseByItemId,
+      wcPctByItemId,
+      wcPctByItemIdByYear,
+    ]
+  );
+
+  /** CFS-preview only: WC cash effects keyed by CFS row id (`cfo_*` or BS id). */
+  const wcCfsCashByItemId = useMemo(
+    () =>
+      computeWcCfsPreviewCashEffects({
+        cashFlow: cashFlow ?? [],
+        balanceSheet: balanceSheet ?? [],
+        projectionYears,
+        allChronologicalYears: allYears,
+        historicalYears,
+        wcDriverState,
+        revByYear: revByYearForWc,
+        cogsByYear: cogsByYearForWc,
+      }),
+    [
+      cashFlow,
+      balanceSheet,
+      projectionYears,
+      allYears,
+      historicalYears,
+      wcDriverState,
+      revByYearForWc,
+      cogsByYearForWc,
+    ]
+  );
+
+  /** Chron aligned with WC bridge (meta years + BS value keys per schedule row) for prior-year checks. */
+  const chronForWcPatch = useMemo(() => {
+    const items = getWcScheduleItems(cashFlow ?? [], balanceSheet ?? []);
+    const ys = new Set<string>(allYears);
+    for (const it of items) {
+      const bsRow = findRowInTree(balanceSheet ?? [], it.id);
+      for (const k of collectYearKeysFromRowTree(bsRow ? [bsRow] : [])) ys.add(k);
+    }
+    return sortYearsChronologically([...ys]);
+  }, [cashFlow, balanceSheet, allYears]);
+
+  /** Years to overwrite in CFS preview: last actual YoY effect + all projections. */
+  const wcPatchYearKeys = useMemo(() => {
+    const ys = [...projectionYears];
+    if (lastHistYear && !ys.includes(lastHistYear)) {
+      if (historicalYears.length >= 2) {
+        ys.unshift(lastHistYear);
+      } else if (resolvePriorYear(lastHistYear, chronForWcPatch) != null) {
+        ys.unshift(lastHistYear);
+      }
+    }
+    return ys;
+  }, [projectionYears, historicalYears, lastHistYear, chronForWcPatch]);
+
+  const wcScheduleItems = useMemo(
+    () => getWcScheduleItems(cashFlow ?? [], balanceSheet ?? []),
+    [cashFlow, balanceSheet]
+  );
+
+  const wcScheduleCfsParity = useMemo(
+    () => getWcScheduleVsCfsParity(cashFlow ?? [], balanceSheet ?? []),
+    [cashFlow, balanceSheet]
+  );
 
   // EBIT projected
   const ebitByYear = useMemo(() => {
@@ -361,8 +653,30 @@ export default function ProjectedStatementsPreview() {
       return v;
     };
 
+    const emptyYearValues = (): Record<string, number> => {
+      const v: Record<string, number> = {};
+      for (const y of showYears) v[y] = 0;
+      return v;
+    };
+
     const walkCfs = (cfsRows: Row[], depth: number) => {
       for (const row of cfsRows) {
+        if (row.id === "wc_change" && wcScheduleItems.length > 0) {
+          rows.push({ id: `hdr_${row.id}`, label: row.label ?? row.id, style: "header", indent: depth, values: {} });
+          const d = depth + 1;
+          for (const item of wcScheduleItems) {
+            rows.push({
+              id: `cfo_${item.id}`,
+              label: item.label,
+              style: "subtotal",
+              indent: d,
+              values: emptyYearValues(),
+              isProjected: false,
+            });
+          }
+          continue;
+        }
+
         const isTotal = row.kind === "total" || row.id.startsWith("total_");
         const isSubtotal = row.kind === "subtotal";
         const isCalc = row.kind === "calc";
@@ -395,15 +709,68 @@ export default function ProjectedStatementsPreview() {
     };
 
     walkCfs(cashFlow ?? [], 0);
-    return rows;
-  }, [cashFlow, showYears, projectionYears]);
+
+    const hasScheduleDanda = Object.keys(scheduleTotalDandaByYear).length > 0;
+    const hasWcScheduleLines = Object.keys(wcCfsCashByItemId).length > 0;
+    if (!hasScheduleDanda && !hasWcScheduleLines) return rows;
+
+    return rows.map((r) => {
+      if (r.style === "header" || r.style === "spacer") return r;
+
+      const { line: wcLineRaw, hasExplicitBridgeKey } = getWcCfsBridgeLineFromMap(wcCfsCashByItemId, r.id);
+
+      const patchDanda = hasScheduleDanda && r.id === "danda";
+      /** WC children are often `kind: "calc"` (CFO bridge) → rendered as subtotal, not line */
+      const patchWc =
+        hasWcScheduleLines && hasExplicitBridgeKey && (r.style === "line" || r.style === "subtotal");
+      if (!patchDanda && !patchWc) return r;
+
+      const v = { ...r.values };
+      if (patchDanda) {
+        for (const y of projectionYears) {
+          const t = scheduleTotalDandaByYear[y];
+          if (t != null && Number.isFinite(t)) v[y] = t;
+        }
+      }
+      let wroteFromBridge = false;
+      if (patchWc) {
+        for (const y of wcPatchYearKeys) {
+          const t = pickNumericRecordForYear(wcLineRaw, y);
+          if (t != null && Number.isFinite(t)) {
+            v[y] = t;
+            wroteFromBridge = true;
+          }
+        }
+      }
+      return {
+        ...r,
+        values: v,
+        isProjected: wcPatchYearKeys.some((y) => (v[y] ?? 0) !== 0),
+        wcShowZero: patchWc && wroteFromBridge ? true : r.wcShowZero,
+      };
+    });
+  }, [
+    cashFlow,
+    showYears,
+    projectionYears,
+    scheduleTotalDandaByYear,
+    wcCfsCashByItemId,
+    wcPatchYearKeys,
+    wcScheduleItems,
+  ]);
 
   const toggle = (sectionId: string) => {
     setCollapsedSections((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }));
   };
 
   // ── Section renderer ───────────────────────────────────────────────────────
-  const renderSection = (title: string, sectionId: string, sectionRows: PreviewRow[], accent: string) => {
+  const renderSection = (
+    title: string,
+    sectionId: string,
+    sectionRows: PreviewRow[],
+    accent: string,
+    banner?: ReactNode
+  ) => {
     const collapsed = collapsedSections[sectionId] ?? false;
     return (
       <div className="rounded-lg border border-slate-700/60 bg-slate-900/50 overflow-hidden">
@@ -419,7 +786,9 @@ export default function ProjectedStatementsPreview() {
           <span className="text-[9px] text-slate-500">{sectionRows.filter((r) => r.style !== "spacer").length} items</span>
         </button>
         {!collapsed && (
-          <div className="overflow-x-auto">
+          <>
+            {banner}
+            <div className="overflow-x-auto">
             <table className="w-full text-[10px] border-collapse">
               <thead>
                 <tr className="border-b border-slate-700/50">
@@ -431,7 +800,7 @@ export default function ProjectedStatementsPreview() {
                         projectionYears.includes(y) ? "text-blue-400" : "text-slate-400"
                       }`}
                     >
-                      {y}{projectionYears.includes(y) ? "E" : "A"}
+                      {formatStatementYearHeader(y, projectionYears.includes(y))}
                     </th>
                   ))}
                 </tr>
@@ -486,7 +855,7 @@ export default function ProjectedStatementsPreview() {
                               isProj ? "text-blue-300" : "text-slate-300"
                             } ${isTotal ? "border-t border-slate-600/50" : ""}`}
                           >
-                            {isMargin ? fmtPct(v) : fmt(v, unit, showDecimals)}
+                            {isMargin ? fmtPct(v) : fmt(v, unit, showDecimals, row.wcShowZero)}
                           </td>
                         );
                       })}
@@ -495,7 +864,8 @@ export default function ProjectedStatementsPreview() {
                 })}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         )}
       </div>
     );
@@ -559,7 +929,25 @@ export default function ProjectedStatementsPreview() {
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
         {renderSection("Income Statement", "is", isRows, "text-emerald-400")}
         {renderSection("Balance Sheet", "bs", bsRows, "text-blue-400")}
-        {renderSection("Cash Flow Statement", "cfs", cfsRows, "text-violet-400")}
+        {renderSection(
+          "Cash Flow Statement",
+          "cfs",
+          cfsRows,
+          "text-violet-400",
+          <>
+            {wcScheduleCfsParity.missingInCfs.length > 0 ? (
+              <div className="px-3 py-2 text-[10px] text-amber-100 bg-amber-950/30 border-b border-amber-500/30 flex items-start gap-2">
+                <AlertCircle size={14} className="text-amber-400 shrink-0 mt-0.5" />
+                <span className="font-medium">
+                  Cash Flow is missing WC lines for: {wcScheduleCfsParity.missingInCfsLabels.join(", ")}. Add matching
+                  lines under Change in Working Capital in the Statement Structure / Cash Flow builder so detail stays
+                  in sync with Forecast Drivers.
+                </span>
+              </div>
+            ) : null}
+            <WcCfsExplainBanner />
+          </>
+        )}
       </div>
     </div>
   );

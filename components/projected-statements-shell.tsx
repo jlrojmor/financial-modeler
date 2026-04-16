@@ -6,6 +6,7 @@ import type { ForecastDriversSubTab } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { CheckCircle2, AlertCircle, Clock, Calculator, ArrowRight } from "lucide-react";
 import { getBsLineCoverage } from "@/lib/bs-forecast-coverage";
+import { getWcScheduleItems, cfsWcChildIdToBalanceSheetId } from "@/lib/working-capital-schedule";
 
 type ForecastStatus = "forecasted" | "schedule" | "derived" | "not_configured" | "cash_plug" | "excluded";
 type StatementSection = "is" | "bs" | "cfs";
@@ -77,6 +78,11 @@ export default function ProjectedStatementsShell() {
 
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
   const debtApplied = debtPersist?.applied != null;
+
+  const wcScheduleRowIds = useMemo(() => {
+    const items = getWcScheduleItems(cashFlow ?? [], balanceSheet ?? []);
+    return new Set(items.map((i) => i.id));
+  }, [cashFlow, balanceSheet]);
 
   const hasRevenueConfig = useMemo(() => {
     const rows = revenueForecastConfigV1?.rows ?? {};
@@ -267,9 +273,20 @@ export default function ProjectedStatementsShell() {
 
       if (tt === "cfo_net_income" || row.id === "net_income") {
         source = "From Income Statement";
+      } else if (row.id === "danda" || tt === "cfo_danda") {
+        source = dandaScheduleConfirmed
+          ? "PP&E, Capex & D&A Schedule"
+          : "Non-operating & Schedules";
+        jumpTo = { step: "forecast_drivers", subTab: "non_operating_schedules" };
       } else if (tt === "cfo_da" || tt === "cfo_sbc" || row.id === "sbc" || row.id === "da") {
         source = dandaScheduleConfirmed ? "From schedules" : "From IS/BS changes";
         jumpTo = { step: "forecast_drivers", subTab: "non_operating_schedules" };
+      } else if (
+        wcScheduleRowIds.has(row.id) ||
+        (row.id.startsWith("cfo_") && wcScheduleRowIds.has(cfsWcChildIdToBalanceSheetId(row.id)))
+      ) {
+        source = wcDriversConfirmed ? "WC Schedule (Forecast Drivers)" : "WC drivers";
+        jumpTo = { step: "forecast_drivers", subTab: "wc_drivers" };
       } else if (tt?.startsWith("cfo_wc_") || row.id === "wc_change") {
         source = wcDriversConfirmed ? "From WC Drivers" : "From BS changes";
         jumpTo = { step: "forecast_drivers", subTab: "wc_drivers" };
@@ -295,7 +312,7 @@ export default function ProjectedStatementsShell() {
     }
 
     return items;
-  }, [cashFlow, dandaScheduleConfirmed, wcDriversConfirmed, equityRollforwardConfirmed, debtApplied]);
+  }, [cashFlow, balanceSheet, dandaScheduleConfirmed, wcDriversConfirmed, equityRollforwardConfirmed, debtApplied, wcScheduleRowIds]);
 
   // ── Aggregates ─────────────────────────────────────────────────────────────
   const allItems = useMemo(() => [...isItems, ...bsItems, ...cfsItems], [isItems, bsItems, cfsItems]);

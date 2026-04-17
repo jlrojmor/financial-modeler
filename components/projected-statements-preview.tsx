@@ -11,6 +11,10 @@ import { computeRowValue } from "@/lib/calculations";
 import { getWcScheduleVsCfsParity } from "@/lib/wc-schedule-cfs-parity";
 import { getWcScheduleItems, getWcCfsBridgeLineFromMap, type WcDriverState } from "@/lib/working-capital-schedule";
 import { computeWcCfsPreviewCashEffects } from "@/lib/projected-wc-cfs-bridge";
+import { computeProjectedSbcCfoByYear } from "@/lib/projected-sbc-cfo";
+import { buildCfsProjectedStatementPlanLines } from "@/lib/cfs-projected-statements-plan";
+import { classifyCfsLineForProjection } from "@/lib/cfs-line-classification";
+import { applyCfsDisclosureProjectionForYear } from "@/lib/cfs-disclosure-projection";
 import { findRowInTree } from "@/lib/row-utils";
 import {
   collectYearKeysFromRowTree,
@@ -105,6 +109,22 @@ function findRowById(flat: Row[], id: string): Row | undefined {
   return flat.find((r) => r.id === id);
 }
 
+/** CFS section totals / patched anchors: keep store values; leaves use computeRowValue in preview. */
+const CFS_PREVIEW_SKIP_RESOLVER_IDS = new Set([
+  "net_income",
+  "sbc",
+  "danda",
+  "wc_change",
+  "operating_cf",
+  "investing_cf",
+  "financing_cf",
+  "net_change_cash",
+  "net_cash_change",
+  "total_operating_cf",
+  "total_investing_cf",
+  "total_financing_cf",
+]);
+
 function getVal(row: Row | undefined, year: string): number {
   return row?.values?.[year] ?? 0;
 }
@@ -116,12 +136,16 @@ export default function ProjectedStatementsPreview() {
   const cashFlow = useModelStore((s) => s.cashFlow);
   const sbcBreakdowns = useModelStore((s) => s.sbcBreakdowns ?? {});
   const danaBreakdowns = useModelStore((s) => s.danaBreakdowns ?? {});
+  const embeddedDisclosures = useModelStore((s) => s.embeddedDisclosures ?? []);
+  const sbcDisclosureEnabled = useModelStore((s) => s.sbcDisclosureEnabled ?? true);
   const revenueForecastConfigV1 = useModelStore((s) => s.revenueForecastConfigV1);
   const revenueForecastTreeV1 = useModelStore((s) => s.revenueForecastTreeV1 ?? []);
   const revenueProjectionConfig = useModelStore((s) => s.revenueProjectionConfig);
   const cogsForecastConfigV1 = useModelStore((s) => s.cogsForecastConfigV1);
   const opexForecastConfigV1 = useModelStore((s) => s.opexForecastConfigV1);
   const applyProjections = useModelStore((s) => s.applyBsBuildProjectionsToModel);
+  const cfsDisclosureProjectionByRowId = useModelStore((s) => s.cfsDisclosureProjectionByRowId ?? {});
+  const cfsRollupDisclosureExcludedInPreview = useModelStore((s) => s.cfsRollupDisclosureExcludedInPreview ?? false);
 
   const capexForecastMethod = useModelStore((s) => s.capexForecastMethod);
   const capexPctRevenue = useModelStore((s) => s.capexPctRevenue);
@@ -148,6 +172,11 @@ export default function ProjectedStatementsPreview() {
   const wcPctBaseByItemId = useModelStore((s) => s.wcPctBaseByItemId ?? {});
   const wcPctByItemId = useModelStore((s) => s.wcPctByItemId ?? {});
   const wcPctByItemIdByYear = useModelStore((s) => s.wcPctByItemIdByYear ?? {});
+
+  const equityRollforwardConfirmed = useModelStore((s) => s.equityRollforwardConfirmed);
+  const equitySbcMethod = useModelStore((s) => s.equitySbcMethod);
+  const equitySbcPctRevenue = useModelStore((s) => s.equitySbcPctRevenue);
+  const equityManualSbcByYear = useModelStore((s) => s.equityManualSbcByYear ?? {});
 
   const [showDecimals, setShowDecimals] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
@@ -190,6 +219,33 @@ export default function ProjectedStatementsPreview() {
       currencyUnit: unit,
     });
   }, [incomeStatement, projectionYears, lastHistYear, revenueForecastConfigV1, revenueForecastTreeV1, revenueProjectionConfig, cogsForecastConfigV1, allStatements, sbcBreakdowns, danaBreakdowns, unit]);
+
+  /** SBC CFO add-back for projection years — aligned with Equity / Other BS drivers when roll-forward is on. */
+  const sbcCfoByProjectionYear = useMemo(
+    () =>
+      computeProjectedSbcCfoByYear({
+        equityRollforwardConfirmed,
+        projectionYears,
+        equitySbcMethod,
+        equitySbcPctRevenue,
+        equityManualSbcByYear,
+        revByYear,
+        sbcBreakdowns,
+        incomeStatement: incomeStatement ?? [],
+        cashFlow: cashFlow ?? [],
+      }),
+    [
+      equityRollforwardConfirmed,
+      projectionYears,
+      equitySbcMethod,
+      equitySbcPctRevenue,
+      equityManualSbcByYear,
+      revByYear,
+      sbcBreakdowns,
+      incomeStatement,
+      cashFlow,
+    ]
+  );
 
   /** Same revenue totals as Forecast Drivers → Non-operating & Schedules (Capex / D&A). */
   const revenueByYearForSchedule = useMemo(() => {
@@ -397,9 +453,14 @@ export default function ProjectedStatementsPreview() {
     [cashFlow, balanceSheet]
   );
 
+  const cfsPlanLines = useMemo(
+    () => buildCfsProjectedStatementPlanLines(cashFlow ?? [], wcScheduleItems),
+    [cashFlow, wcScheduleItems]
+  );
+
   const wcScheduleCfsParity = useMemo(
-    () => getWcScheduleVsCfsParity(cashFlow ?? [], balanceSheet ?? []),
-    [cashFlow, balanceSheet]
+    () => getWcScheduleVsCfsParity(cashFlow ?? [], balanceSheet ?? [], wcCfsCashByItemId),
+    [cashFlow, balanceSheet, wcCfsCashByItemId]
   );
 
   // EBIT projected
@@ -643,7 +704,20 @@ export default function ProjectedStatementsPreview() {
     return results;
   }, [flatBs, showYears]);
 
-  // ── Build CFS preview rows ────────────────────────────────────────────────
+  const bsMismatchHint = useMemo(() => {
+    if (bsCheck.every((c) => Math.abs(c.diff) < 1)) return null;
+    const first = bsCheck.find((c) => Math.abs(c.diff) >= 1);
+    if (!first) return null;
+    const cashRow = findRowById(flatBs, "cash");
+    const ta = findRowById(flatBs, "total_assets");
+    const tle = findRowById(flatBs, "total_liab_and_equity") ?? findRowById(flatBs, "total_liabilities_equity");
+    const y = first.year;
+    return `First mismatch ${y}: cash ${getVal(cashRow, y)} · TA ${getVal(ta, y)} · L+E ${getVal(tle, y)} · rounded diff ${first.diff}`;
+  }, [bsCheck, flatBs]);
+
+  const cfsFlat = useMemo(() => flattenRows(cashFlow ?? []), [cashFlow]);
+
+  // ── Build CFS preview rows (same line plan as Projected Statements builder) ─
   const cfsRows = useMemo((): PreviewRow[] => {
     const rows: PreviewRow[] = [];
 
@@ -659,63 +733,125 @@ export default function ProjectedStatementsPreview() {
       return v;
     };
 
-    const walkCfs = (cfsRows: Row[], depth: number) => {
-      for (const row of cfsRows) {
-        if (row.id === "wc_change" && wcScheduleItems.length > 0) {
-          rows.push({ id: `hdr_${row.id}`, label: row.label ?? row.id, style: "header", indent: depth, values: {} });
-          const d = depth + 1;
-          for (const item of wcScheduleItems) {
-            rows.push({
-              id: `cfo_${item.id}`,
-              label: item.label,
-              style: "subtotal",
-              indent: d,
-              values: emptyYearValues(),
-              isProjected: false,
-            });
+    const hasWcBridge = Object.keys(wcCfsCashByItemId).length > 0;
+
+    for (const line of cfsPlanLines) {
+      if (line.role === "section_header") {
+        rows.push({
+          id: line.id,
+          label: line.label,
+          style: "header",
+          indent: line.depth,
+          values: {},
+        });
+        continue;
+      }
+      if (line.role === "spacer") {
+        rows.push({ id: line.id, label: "", style: "spacer", indent: 0, values: {} });
+        continue;
+      }
+
+      const style = line.previewStyle as RowStyle;
+      const sourceRow = line.sourceRowId ? findRowInTree(cashFlow ?? [], line.sourceRowId) : undefined;
+
+      if (line.id === "wc_change" && wcScheduleItems.length > 0) {
+        const wcChangeTotal: Record<string, number> = {};
+        for (const y of showYears) wcChangeTotal[y] = 0;
+        for (const item of wcScheduleItems) {
+          const { line: bridgeLine } = getWcCfsBridgeLineFromMap(wcCfsCashByItemId, `cfo_${item.id}`);
+          for (const y of showYears) {
+            const t = pickNumericRecordForYear(bridgeLine, y);
+            if (t != null && Number.isFinite(t)) wcChangeTotal[y] += t;
           }
-          continue;
         }
+        rows.push({
+          id: "wc_change",
+          label: line.label ?? "Change in Working Capital",
+          style: "subtotal",
+          indent: line.depth,
+          values: wcChangeTotal,
+          isProjected: wcPatchYearKeys.some((y) => (wcChangeTotal[y] ?? 0) !== 0),
+        });
+        continue;
+      }
 
-        const isTotal = row.kind === "total" || row.id.startsWith("total_");
-        const isSubtotal = row.kind === "subtotal";
-        const isCalc = row.kind === "calc";
-        const isSection = (row.children?.length ?? 0) > 0 && !isTotal && !isSubtotal;
+      if (!sourceRow) {
+        rows.push({
+          id: line.id,
+          label: line.label,
+          style,
+          indent: line.depth,
+          values: emptyYearValues(),
+          isProjected: false,
+        });
+        continue;
+      }
 
-        if (isSection) {
-          rows.push({ id: `hdr_${row.id}`, label: row.label ?? row.id, style: "header", indent: depth, values: {} });
-          walkCfs(row.children!, depth + 1);
-        } else if (isTotal || isSubtotal) {
-          const isMainTotal = row.id === "total_operating_cf" || row.id === "total_investing_cf" ||
-                              row.id === "total_financing_cf" || row.id === "net_cash_change" ||
-                              row.id === "total_cash_change";
-          rows.push({ id: row.id, label: row.label ?? row.id, style: isMainTotal ? "total" : "subtotal", indent: depth, values: makeV(row) });
-          if (isMainTotal) {
-            rows.push({ id: `spacer_${row.id}`, label: "", style: "spacer", indent: 0, values: {} });
-          }
-        } else if (isCalc) {
-          rows.push({ id: row.id, label: row.label ?? row.id, style: "subtotal", indent: depth, values: makeV(row) });
+      const v: Record<string, number> = {};
+      for (const y of showYears) {
+        if (projectionYears.includes(y)) {
+          const skipResolver =
+            CFS_PREVIEW_SKIP_RESOLVER_IDS.has(line.id) ||
+            (line.id.startsWith("cfo_") && hasWcBridge);
+          v[y] = skipResolver
+            ? getVal(sourceRow, y)
+            : computeRowValue(
+                sourceRow,
+                y,
+                cfsFlat,
+                cashFlow ?? [],
+                allStatements,
+                sbcBreakdowns,
+                danaBreakdowns,
+                embeddedDisclosures,
+                sbcDisclosureEnabled
+              );
         } else {
-          rows.push({
-            id: row.id,
-            label: row.label ?? row.id,
-            style: "line",
-            indent: depth,
-            values: makeV(row),
-            isProjected: projectionYears.some((y) => getVal(row, y) !== 0),
-          });
+          v[y] = getVal(sourceRow, y);
         }
       }
-    };
 
-    walkCfs(cashFlow ?? [], 0);
+      rows.push({
+        id: line.id,
+        label: line.label,
+        style,
+        indent: line.depth,
+        values: v,
+        isProjected: projectionYears.some((y) => (v[y] ?? 0) !== 0),
+      });
+    }
 
     const hasScheduleDanda = Object.keys(scheduleTotalDandaByYear).length > 0;
     const hasWcScheduleLines = Object.keys(wcCfsCashByItemId).length > 0;
-    if (!hasScheduleDanda && !hasWcScheduleLines) return rows;
+    const niFromIs = isRows.find((x) => x.id === "net_income");
+    /** Holistic CFS preview: NI, D&A, WC, SBC patched from forecast engines; other lines use row.values / future patches. */
+    const hasSbcPreview = Object.keys(sbcCfoByProjectionYear).length > 0;
 
     return rows.map((r) => {
       if (r.style === "header" || r.style === "spacer") return r;
+
+      const v = { ...r.values };
+      let patchedNi = false;
+      if (r.id === "net_income" && niFromIs) {
+        for (const y of projectionYears) {
+          const t = niFromIs.values[y];
+          if (t !== undefined) {
+            v[y] = t;
+            patchedNi = true;
+          }
+        }
+      }
+
+      let patchedSbc = false;
+      if (r.id === "sbc" && hasSbcPreview) {
+        for (const y of projectionYears) {
+          const t = sbcCfoByProjectionYear[y];
+          if (t !== undefined) {
+            v[y] = t;
+            patchedSbc = true;
+          }
+        }
+      }
 
       const { line: wcLineRaw, hasExplicitBridgeKey } = getWcCfsBridgeLineFromMap(wcCfsCashByItemId, r.id);
 
@@ -723,9 +859,34 @@ export default function ProjectedStatementsPreview() {
       /** WC children are often `kind: "calc"` (CFO bridge) → rendered as subtotal, not line */
       const patchWc =
         hasWcScheduleLines && hasExplicitBridgeKey && (r.style === "line" || r.style === "subtotal");
-      if (!patchDanda && !patchWc) return r;
 
-      const v = { ...r.values };
+      const srcRowForDisclosure = findRowInTree(cashFlow ?? [], r.id);
+      let patchedDisclosure = false;
+      if (
+        srcRowForDisclosure &&
+        classifyCfsLineForProjection(srcRowForDisclosure, balanceSheet ?? []) === "cf_disclosure_only"
+      ) {
+        const policy = cfsDisclosureProjectionByRowId[r.id];
+        if (policy) {
+          patchedDisclosure = true;
+          for (const y of projectionYears) {
+            if (policy.mode === "excluded") {
+              v[y] = 0;
+            } else {
+              v[y] = applyCfsDisclosureProjectionForYear(
+                policy,
+                y,
+                lastHistYear,
+                revByYear[y],
+                srcRowForDisclosure.values?.[lastHistYear]
+              );
+            }
+          }
+        }
+      }
+
+      if (!patchedNi && !patchedSbc && !patchDanda && !patchWc && !patchedDisclosure) return r;
+
       if (patchDanda) {
         for (const y of projectionYears) {
           const t = scheduleTotalDandaByYear[y];
@@ -745,18 +906,45 @@ export default function ProjectedStatementsPreview() {
       return {
         ...r,
         values: v,
-        isProjected: wcPatchYearKeys.some((y) => (v[y] ?? 0) !== 0),
+        isProjected:
+          wcPatchYearKeys.some((y) => (v[y] ?? 0) !== 0) ||
+          (patchedNi && projectionYears.some((y) => (v[y] ?? 0) !== 0)) ||
+          (patchedSbc && projectionYears.some((y) => (v[y] ?? 0) !== 0)) ||
+          (patchedDisclosure && projectionYears.some((y) => (v[y] ?? 0) !== 0)),
         wcShowZero: patchWc && wroteFromBridge ? true : r.wcShowZero,
       };
-    });
+    })
+      .filter((r) => {
+        if (r.style === "header" || r.style === "spacer") return true;
+        if (!cfsRollupDisclosureExcludedInPreview) return true;
+        const sr = findRowInTree(cashFlow ?? [], r.id);
+        if (!sr) return true;
+        if (classifyCfsLineForProjection(sr, balanceSheet ?? []) !== "cf_disclosure_only") return true;
+        const pol = cfsDisclosureProjectionByRowId[r.id];
+        return pol?.mode !== "excluded";
+      });
   }, [
+    cfsPlanLines,
+    cfsFlat,
     cashFlow,
+    allStatements,
     showYears,
     projectionYears,
     scheduleTotalDandaByYear,
     wcCfsCashByItemId,
     wcPatchYearKeys,
     wcScheduleItems,
+    isRows,
+    sbcCfoByProjectionYear,
+    sbcBreakdowns,
+    danaBreakdowns,
+    embeddedDisclosures,
+    sbcDisclosureEnabled,
+    balanceSheet,
+    cfsDisclosureProjectionByRowId,
+    cfsRollupDisclosureExcludedInPreview,
+    lastHistYear,
+    revByYear,
   ]);
 
   const toggle = (sectionId: string) => {
@@ -918,11 +1106,18 @@ export default function ProjectedStatementsPreview() {
         ) : (
           <AlertCircle size={14} className="text-red-400 shrink-0" />
         )}
-        <span className={`text-[10px] font-medium ${allBalanced ? "text-emerald-300" : "text-red-300"}`}>
-          {allBalanced
-            ? "BS Check: A = L + E across all years ✓"
-            : `BS Check: A ≠ L + E — imbalance in ${bsCheck.filter((c) => Math.abs(c.diff) >= 1).map((c) => c.year).join(", ")}`}
-        </span>
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <span className={`text-[10px] font-medium ${allBalanced ? "text-emerald-300" : "text-red-300"}`}>
+            {allBalanced
+              ? "BS Check: A = L + E across all years ✓"
+              : `BS Check: A ≠ L + E — imbalance in ${bsCheck.filter((c) => Math.abs(c.diff) >= 1).map((c) => c.year).join(", ")}`}
+          </span>
+          {!allBalanced && bsMismatchHint ? (
+            <span className="text-[9px] text-slate-500 font-mono truncate" title={bsMismatchHint}>
+              {bsMismatchHint}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       {/* Scrollable content */}

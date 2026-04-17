@@ -14,6 +14,7 @@ const SUB_TAB_LABELS: Record<ForecastDriversSubTab, string> = {
   non_operating_schedules: "Non-operating & Schedules",
   wc_drivers: "Working Capital Drivers",
   other_bs_items: "Other BS Items",
+  cfs_disclosure: "Cash flow disclosure",
   financing_taxes: "Financing / Taxes",
 };
 

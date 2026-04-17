@@ -75,6 +75,7 @@ import {
 import NonOperatingPhase2Preview from "@/components/non-operating-phase2-preview";
 import WcDriversPreview from "@/components/wc-drivers-preview";
 import OtherBsItemsPreview from "@/components/other-bs-items-preview";
+import CfsDisclosurePreview from "@/components/cfs-disclosure-preview";
 
 /** Driver preview: unit counts only — no statement K/M scaling. */
 function formatVolumeDriverCount(n: number): string {
@@ -1929,6 +1930,10 @@ export default function ISBuildPreview() {
 
   if (forecastDriversSubTab === "other_bs_items") {
     return <OtherBsItemsPreview />;
+  }
+
+  if (forecastDriversSubTab === "cfs_disclosure") {
+    return <CfsDisclosurePreview />;
   }
 
   if (forecastDriversSubTab === "operating_costs") {

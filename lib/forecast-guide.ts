@@ -1267,6 +1267,11 @@ export const FORECAST_GUIDE_CONTENT: Record<
     headline: "Other Balance Sheet Items",
     body: "Guidance for forecasting goodwill, deferred taxes, investments, lease assets/obligations, and equity line items will be added here in a future update.",
   },
+  cfs_disclosure: {
+    kind: "placeholder",
+    headline: "Cash flow disclosure",
+    body: "Issuer-specific cash flow lines without a clean BS/IS bridge: run AI diagnosis for mapping hints, choose a projection policy (flat, % of revenue, manual, zero, or exclude), and review in Projected Statements CFS.",
+  },
   financing_taxes: {
     kind: "placeholder",
     headline: "Financing / Taxes",

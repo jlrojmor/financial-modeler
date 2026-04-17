@@ -200,7 +200,40 @@ export function computeRowValue(
       sbcDisclosureEnabled
     );
   }
-  
+
+  // CFS projection: BS-linked other operating lines (ids other than cfo_*) use balance sheet deltas in computeFormula.
+  if (
+    row.kind === "input" &&
+    isCashFlowStatement &&
+    allStatements &&
+    year.endsWith("E") &&
+    !row.id.startsWith("cfo_") &&
+    row.cfsLink?.section === "operating"
+  ) {
+    if (row.cfsUserSetYears?.includes(year)) {
+      return row.values?.[year] ?? 0;
+    }
+    const bsKey =
+      row.cfsLink.cfsItemId &&
+      findBsRowForCfo(allStatements.balanceSheet, row.cfsLink.cfsItemId) != null
+        ? row.cfsLink.cfsItemId
+        : findBsRowForCfo(allStatements.balanceSheet, row.id) != null
+          ? row.id
+          : null;
+    if (bsKey && row.cfsLink.impact !== "calculated") {
+      return computeFormula(
+        row,
+        year,
+        statementRows,
+        allStatements,
+        sbcBreakdowns,
+        danaBreakdowns,
+        embeddedDisclosures,
+        sbcDisclosureEnabled
+      );
+    }
+  }
+
   // If it's an input, return the stored value
   if (row.kind === "input") {
     return row.values?.[year] ?? 0;
@@ -754,6 +787,41 @@ function computeFormula(
     return totalLiab + totalEquity;
   }
 
+  // CFS: other operating / intelligence lines where the row maps to a balance sheet account (non-cfo_* mirror lines).
+  if (isInCFS && allStatements && row.cfsLink?.section === "operating" && !rowId.startsWith("cfo_")) {
+    const cfsAnchorIds = new Set([
+      "net_income",
+      "danda",
+      "sbc",
+      "wc_change",
+      "other_operating",
+      "operating_cf",
+      "investing_cf",
+      "financing_cf",
+      "net_change_cash",
+      "net_cash_change",
+    ]);
+    if (!cfsAnchorIds.has(rowId) && row.cfsLink.impact !== "calculated") {
+      const bsKey =
+        row.cfsLink.cfsItemId &&
+        findBsRowForCfo(allStatements.balanceSheet, row.cfsLink.cfsItemId) != null
+          ? row.cfsLink.cfsItemId
+          : findBsRowForCfo(allStatements.balanceSheet, rowId) != null
+            ? rowId
+            : null;
+      if (bsKey) {
+        const bsRow = findBsRowForCfo(allStatements.balanceSheet, bsKey)!;
+        const currentValue = bsRow.values?.[year] ?? 0;
+        const timeline = collectYearKeysFromRowTree(allStatements.balanceSheet);
+        const previousYear = resolvePriorYear(year, timeline);
+        const previousValue = previousYear ? (bsRow.values?.[previousYear] ?? 0) : 0;
+        const change = currentValue - previousValue;
+        if (row.cfsLink.impact === "positive") return change;
+        if (row.cfsLink.impact === "negative") return -change;
+        return change;
+      }
+    }
+  }
 
   return 0;
 }

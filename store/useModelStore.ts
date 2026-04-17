@@ -67,6 +67,12 @@ import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
 import { TEMPLATE_IS_ROW_IDS } from "@/lib/is-classification";
 import { isCoreBsRow, getCoreLockedBehavior } from "@/lib/bs-core-rows";
 import { CFS_ANCHOR_HISTORICAL_NATURE } from "@/lib/cfs-forecast-drivers";
+import type { CfsDisclosureProjectionSpec } from "@/lib/cfs-disclosure-projection";
+import { applyCfsDisclosurePoliciesToCashFlowTree } from "@/lib/apply-cfs-disclosure-policies-to-cash-flow";
+import type {
+  CfsLineAiDiagnosisPayload,
+  CfsLineForecastDiagnosisV1,
+} from "@/types/cfs-forecast-diagnosis-v1";
 import { CAPEX_IB_DEFAULT_USEFUL_LIVES, isLegacyWrongUsefulLives, CAPEX_DEFAULT_BUCKET_IDS } from "@/lib/capex-defaults";
 import type { Phase2LineBucket, Phase2ScheduleShellStatus } from "@/lib/non-operating-phase2-lines";
 import type { NonOperatingPhase2DirectLinePersist } from "@/lib/non-operating-phase2-ui-persist";
@@ -329,7 +335,7 @@ function addExistingChildToParent(
     const idx = atIndex ?? children.length;
     children.splice(idx, 0, childRow);
     return { ...r, children };
-  });
+    });
 }
 
 function updateRowKindDeep(
@@ -544,6 +550,7 @@ export type ForecastDriversSubTab =
   | "non_operating_schedules"
   | "wc_drivers"
   | "other_bs_items"
+  | "cfs_disclosure"
   | "financing_taxes";
 
 /** Forecast method for a single "Other BS Item" (non-WC, non-schedule-managed BS row). */
@@ -732,6 +739,16 @@ export type ProjectSnapshot = {
   taxAllowBenefit: boolean;
   taxScheduleConfirmed: boolean;
 
+  /**
+   * CF-disclosure-only CFS rows (10-K style lines without BS/IS bridge): per-row projection policy.
+   * Absent keys mean no policy chosen yet (Projected Statements shows Not set).
+   */
+  cfsDisclosureProjectionByRowId: Record<string, CfsDisclosureProjectionSpec>;
+  /** When true, hide CFS lines whose policy is `excluded` in Projected Statements preview (rollup UX). */
+  cfsRollupDisclosureExcludedInPreview: boolean;
+  /** AI CFS vs Forecast Drivers diagnosis + user review (per CFS row id). */
+  cfsForecastDiagnosisByRowId: Record<string, CfsLineForecastDiagnosisV1>;
+
   /** Company Context (step before Historicals): user inputs, AI context, overrides. */
   companyContext: CompanyContext;
 };
@@ -771,7 +788,7 @@ export type ModelState = {
   embeddedDisclosures: EmbeddedDisclosureItem[];
   /** SBC disclosure section enabled: when true, disclosure is fallback for CFS SBC and shown in preview; when false, CFS SBC is reported/manual only. */
   sbcDisclosureEnabled: boolean;
-
+  
   // D&A location tracking (where D&A is embedded: "cogs", "sga", or "both")
   danaLocation: "cogs" | "sga" | "both" | null;
   // D&A values by year (only if we have exact allocation)
@@ -921,6 +938,10 @@ export type ModelState = {
   taxAllowBenefit: boolean;
   taxScheduleConfirmed: boolean;
 
+  cfsDisclosureProjectionByRowId: Record<string, CfsDisclosureProjectionSpec>;
+  cfsRollupDisclosureExcludedInPreview: boolean;
+  cfsForecastDiagnosisByRowId: Record<string, CfsLineForecastDiagnosisV1>;
+
   /** Company Context step: user inputs, AI context, overrides. */
   companyContext: CompanyContext;
 };
@@ -1017,14 +1038,14 @@ export type ModelActions = {
   reorderIncomeStatementChildren: (parentId: string, fromIndex: number, toIndex: number) => void;
   /** Income Statement builder: reorder top-level rows (e.g., Interest & Other items). */
   reorderIncomeStatementRows: (fromIndex: number, toIndex: number) => void;
-
+  
   // SBC annotation
   updateSbcValue: (categoryId: string, year: string, value: number) => void;
   /** Set one year value for an embedded disclosure (e.g. SBC). One entry per (type, rowId). Optional label stored for preview when row is not in statement tree. */
   setEmbeddedDisclosureValue: (type: EmbeddedDisclosureItem["type"], rowId: string, year: string, value: number, label?: string) => void;
   /** Turn SBC disclosure section on/off. When off, CFS SBC does not use disclosure fallback and disclosure block is hidden in preview. */
   setSbcDisclosureEnabled: (enabled: boolean) => void;
-
+  
   // Section lock and expand management
   lockSection: (sectionId: string) => void;
   unlockSection: (sectionId: string) => void;
@@ -1050,7 +1071,7 @@ export type ModelActions = {
   resetIncomeStatementInputs: () => void;
   resetBalanceSheetInputs: () => void;
   resetCashFlowInputs: () => void;
-
+  
   // Legacy/backward compatibility
   addRevenueStream: (label: string) => string | undefined;
   /** Add a child breakdown under a revenue stream (v1 hierarchy). */
@@ -1200,6 +1221,12 @@ export type ModelActions = {
   setTaxAllowBenefit: (allow: boolean) => void;
   setTaxScheduleConfirmed: (confirmed: boolean) => void;
 
+  /** CF-disclosure-only CFS lines: set projection policy, or null to clear. */
+  setCfsDisclosureProjection: (rowId: string, spec: CfsDisclosureProjectionSpec | null) => void;
+  setCfsRollupDisclosureExcludedInPreview: (value: boolean) => void;
+  mergeCfsForecastDiagnosisFromApi: (suggestions: Record<string, CfsLineAiDiagnosisPayload>) => void;
+  setCfsLineForecastDiagnosis: (rowId: string, patch: Partial<CfsLineForecastDiagnosisV1>) => void;
+
   mergeNonOperatingPhase2AiSuggestions: (suggestions: NonOperatingPhase2AiLineSuggestion[]) => void;
   setNonOperatingPhase2ClassificationLocked: (lineId: string, locked: boolean) => void;
   addRevenueBreakdown: (parentId: string, label: string) => string;
@@ -1299,7 +1326,7 @@ const defaultState: ModelState = {
   sbcBreakdowns: {},
   embeddedDisclosures: [],
   sbcDisclosureEnabled: true,
-
+  
   danaLocation: null,
   danaBreakdowns: {},
 
@@ -1418,6 +1445,10 @@ const defaultState: ModelState = {
   taxFlatExpense: 0,
   taxAllowBenefit: false,
   taxScheduleConfirmed: false,
+
+  cfsDisclosureProjectionByRowId: {},
+  cfsRollupDisclosureExcludedInPreview: false,
+  cfsForecastDiagnosisByRowId: {},
 
   companyContext: getDefaultCompanyContext(),
 };
@@ -1542,6 +1573,10 @@ function getProjectSnapshot(state: ModelState): ProjectSnapshot {
     taxFlatExpense: state.taxFlatExpense ?? 0,
     taxAllowBenefit: state.taxAllowBenefit ?? false,
     taxScheduleConfirmed: state.taxScheduleConfirmed ?? false,
+
+    cfsDisclosureProjectionByRowId: state.cfsDisclosureProjectionByRowId ?? {},
+    cfsRollupDisclosureExcludedInPreview: state.cfsRollupDisclosureExcludedInPreview ?? false,
+    cfsForecastDiagnosisByRowId: state.cfsForecastDiagnosisByRowId ?? {},
 
     companyContext: state.companyContext ?? getDefaultCompanyContext(),
   };
@@ -1708,6 +1743,10 @@ function applyProjectSnapshot(
     taxFlatExpense: snapshot.taxFlatExpense ?? 0,
     taxAllowBenefit: snapshot.taxAllowBenefit ?? false,
     taxScheduleConfirmed: snapshot.taxScheduleConfirmed ?? false,
+
+    cfsDisclosureProjectionByRowId: snapshot.cfsDisclosureProjectionByRowId ?? {},
+    cfsRollupDisclosureExcludedInPreview: snapshot.cfsRollupDisclosureExcludedInPreview ?? false,
+    cfsForecastDiagnosisByRowId: snapshot.cfsForecastDiagnosisByRowId ?? {},
 
     companyContext: (() => {
       const def = getDefaultCompanyContext();
@@ -3404,13 +3443,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
         rowsToUse = normalizeIncomeStatementOperatingExpenses(JSON.parse(JSON.stringify(rowsToUse)));
         parentExists = findRowDeep(rowsToUse, parentId) !== null;
       }
-
+      
       if (!parentExists) {
         console.error("addChildRow: Parent row not found!", parentId, "in statement:", statement);
         console.error("addChildRow: Available rows:", currentRows.map(r => ({ id: r.id, label: r.label })));
         return state; // Don't update if parent not found
       }
-
+      
       // Deep clone to avoid mutation issues
       const updated = addChildRow(JSON.parse(JSON.stringify(rowsToUse)), parentId, childWithTaxonomy);
       
@@ -3540,7 +3579,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         ...(state.meta.years.historical || []),
         ...(state.meta.years.projection || []),
       ];
-
+      
       let recalculatedRows = rowsToUse;
       allYears.forEach((year) => {
         const allStatements = {
@@ -3552,7 +3591,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         const danaBreakdowns = state.danaBreakdowns;
         recalculatedRows = recomputeCalculations(recalculatedRows, year, recalculatedRows, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
-
+      
       return { [statement]: recalculatedRows };
     });
   },
@@ -4628,6 +4667,14 @@ export const useModelStore = create<ModelState & ModelActions>()(
       fxEffectByYear: {},
     });
     newCF = applyProjectedCfsToCashFlowRows(newCF, cfsEngineResult.cfsValuesByRowId);
+    newCF = applyCfsDisclosurePoliciesToCashFlowTree(
+      newCF,
+      newBS,
+      projectionYears,
+      lastHistYear,
+      revenueByYear,
+      freshState.cfsDisclosureProjectionByRowId ?? {}
+    );
     newBS = applyEndingCashToBalanceSheet(newBS, cfsEngineResult.endingCashByYear, projectionYears);
 
     for (const year of projectionYears) {
@@ -5558,7 +5605,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         balanceSheet = recomputeCalculations(balanceSheet, year, balanceSheet, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
         cashFlow = recomputeCalculations(cashFlow, year, cashFlow, allStatements, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       });
-
+      
       return {
         meta: {
           ...state.meta,
@@ -6216,6 +6263,42 @@ export const useModelStore = create<ModelState & ModelActions>()(
         if (confirmed) get().applyBsBuildProjectionsToModel();
       },
 
+      setCfsDisclosureProjection: (rowId, spec) =>
+        set((s) => {
+          const next = { ...s.cfsDisclosureProjectionByRowId };
+          if (spec == null) delete next[rowId];
+          else next[rowId] = spec;
+          return { cfsDisclosureProjectionByRowId: next };
+        }),
+      setCfsRollupDisclosureExcludedInPreview: (value) => set(() => ({ cfsRollupDisclosureExcludedInPreview: value })),
+
+      mergeCfsForecastDiagnosisFromApi: (suggestions) =>
+        set((s) => {
+          const next = { ...s.cfsForecastDiagnosisByRowId };
+          const t = Date.now();
+          for (const [rowId, ai] of Object.entries(suggestions)) {
+            next[rowId] = {
+              cfsRowId: rowId,
+              lastAiRunAt: t,
+              ai,
+              userStatus: "pending",
+            };
+          }
+          return { cfsForecastDiagnosisByRowId: next };
+        }),
+
+      setCfsLineForecastDiagnosis: (rowId, patch) =>
+        set((s) => {
+          const prev = s.cfsForecastDiagnosisByRowId[rowId];
+          const base: CfsLineForecastDiagnosisV1 = prev ?? { cfsRowId: rowId, userStatus: "pending" };
+          return {
+            cfsForecastDiagnosisByRowId: {
+              ...s.cfsForecastDiagnosisByRowId,
+              [rowId]: { ...base, ...patch, cfsRowId: rowId },
+            },
+          };
+        }),
+
       mergeNonOperatingPhase2AiSuggestions: (suggestions) =>
         set((s) => {
           const next = { ...s.nonOperatingPhase2AiByLine };
@@ -6698,7 +6781,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
           };
           
           const boundaries = findSectionBoundariesRehydrate();
-          
+
           // Migration: Ensure D&A exists in CFS (should be in template, but check anyway)
           const hasDandaInCFS = cashFlow.some((r) => r.id === "danda");
           if (!hasDandaInCFS) {

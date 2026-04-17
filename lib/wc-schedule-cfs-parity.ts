@@ -4,7 +4,7 @@
 
 import type { Row } from "@/types/finance";
 import { findRowInTree } from "@/lib/row-utils";
-import { getWcScheduleItems } from "@/lib/working-capital-schedule";
+import { getWcScheduleItems, getWcCfsBridgeLineFromMap } from "@/lib/working-capital-schedule";
 import { resolveWcCanonicalForChild } from "@/lib/projected-wc-cfs-bridge";
 
 export type WcScheduleCfsParity = {
@@ -19,7 +19,11 @@ export type WcScheduleCfsParity = {
   extraInCfs: string[];
 };
 
-export function getWcScheduleVsCfsParity(cashFlow: Row[], balanceSheet: Row[]): WcScheduleCfsParity {
+export function getWcScheduleVsCfsParity(
+  cashFlow: Row[],
+  balanceSheet: Row[],
+  wcCfsCashByItemId?: Record<string, Record<string, number>>
+): WcScheduleCfsParity {
   const scheduleItems = getWcScheduleItems(cashFlow, balanceSheet);
   const scheduleIds = new Set(scheduleItems.map((s) => s.id));
   const wc = findRowInTree(cashFlow, "wc_change");
@@ -33,7 +37,11 @@ export function getWcScheduleVsCfsParity(cashFlow: Row[], balanceSheet: Row[]): 
   const missingInCfs: string[] = [];
   const missingInCfsLabels: string[] = [];
   for (const s of scheduleItems) {
-    if (!mapped.has(s.id)) {
+    const hasChild = mapped.has(s.id);
+    const hasBridge =
+      wcCfsCashByItemId != null &&
+      getWcCfsBridgeLineFromMap(wcCfsCashByItemId, `cfo_${s.id}`).hasExplicitBridgeKey;
+    if (!hasChild && !hasBridge) {
       missingInCfs.push(s.id);
       missingInCfsLabels.push(s.label);
     }

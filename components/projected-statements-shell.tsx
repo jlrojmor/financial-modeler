@@ -1,12 +1,24 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useModelStore } from "@/store/useModelStore";
 import type { ForecastDriversSubTab } from "@/store/useModelStore";
 import type { Row } from "@/types/finance";
 import { CheckCircle2, AlertCircle, Clock, Calculator, ArrowRight } from "lucide-react";
 import { getBsLineCoverage } from "@/lib/bs-forecast-coverage";
-import { getWcScheduleItems, cfsWcChildIdToBalanceSheetId } from "@/lib/working-capital-schedule";
+import { findRowInTree } from "@/lib/row-utils";
+import { getWcScheduleItems } from "@/lib/working-capital-schedule";
+import {
+  buildCfsProjectedStatementPlanLines,
+  filterCfsPlanLinesForBuilderCoverage,
+} from "@/lib/cfs-projected-statements-plan";
+import {
+  CFS_BUILDER_ANCHOR_ROW_IDS,
+  getCfsProjectedStatementLineRouting,
+  type CfsRoutingContext,
+} from "@/lib/cfs-projected-statements-shell-routing";
+import { inventoryCfsLinesForDiagnostics } from "@/lib/cfs-line-classification";
+import type { CfsDisclosureProjectionSpec } from "@/lib/cfs-disclosure-projection";
 
 type ForecastStatus = "forecasted" | "schedule" | "derived" | "not_configured" | "cash_plug" | "excluded";
 type StatementSection = "is" | "bs" | "cfs";
@@ -75,14 +87,33 @@ export default function ProjectedStatementsShell() {
   const nonOpDirectByLine = useModelStore((s) => s.nonOperatingPhase2DirectByLine);
   const goToStep = useModelStore((s) => s.goToStep);
   const setForecastDriversSubTab = useModelStore((s) => s.setForecastDriversSubTab);
+  const cfsDisclosureProjectionByRowId = useModelStore((s) => s.cfsDisclosureProjectionByRowId ?? {});
+  const setCfsDisclosureProjection = useModelStore((s) => s.setCfsDisclosureProjection);
+  const setCfsRollupDisclosureExcludedInPreview = useModelStore((s) => s.setCfsRollupDisclosureExcludedInPreview);
+  const cfsRollupDisclosureExcludedInPreview = useModelStore((s) => s.cfsRollupDisclosureExcludedInPreview ?? false);
 
   const projectionYears = useMemo(() => meta?.years?.projection ?? [], [meta]);
+
+  const cfsDisclosureLines = useMemo(
+    () =>
+      inventoryCfsLinesForDiagnostics(cashFlow ?? [], balanceSheet ?? []).filter(
+        (e) => e.classification === "cf_disclosure_only"
+      ),
+    [cashFlow, balanceSheet]
+  );
   const debtApplied = debtPersist?.applied != null;
 
-  const wcScheduleRowIds = useMemo(() => {
-    const items = getWcScheduleItems(cashFlow ?? [], balanceSheet ?? []);
-    return new Set(items.map((i) => i.id));
-  }, [cashFlow, balanceSheet]);
+  const wcScheduleItems = useMemo(
+    () => getWcScheduleItems(cashFlow ?? [], balanceSheet ?? []),
+    [cashFlow, balanceSheet]
+  );
+  const wcScheduleRowIds = useMemo(() => new Set(wcScheduleItems.map((i) => i.id)), [wcScheduleItems]);
+
+  const wcChangeDescendantIds = useMemo(() => {
+    const wc = findRowInTree(cashFlow ?? [], "wc_change");
+    if (!wc?.children?.length) return new Set<string>();
+    return new Set(flattenRows(wc.children).map((r) => r.id));
+  }, [cashFlow]);
 
   const hasRevenueConfig = useMemo(() => {
     const rows = revenueForecastConfigV1?.rows ?? {};
@@ -257,62 +288,62 @@ export default function ProjectedStatementsShell() {
   }, [balanceSheet, wcDriversConfirmed, dandaScheduleConfirmed, debtApplied,
       equityRollforwardConfirmed, otherBsConfirmed]);
 
-  // ── CFS line items ─────────────────────────────────────────────────────────
+  // ── CFS line items (same plan order as Projected Statements CFS preview) ──
+  const cfsPlanLines = useMemo(
+    () => buildCfsProjectedStatementPlanLines(cashFlow ?? [], wcScheduleItems),
+    [cashFlow, wcScheduleItems]
+  );
+
   const cfsItems = useMemo((): LineItemStatus[] => {
     const items: LineItemStatus[] = [];
-    const flat = flattenRows(cashFlow ?? []);
+    const routingCtx: CfsRoutingContext = {
+      wcDriversConfirmed,
+      dandaScheduleConfirmed,
+      debtApplied,
+      equityRollforwardConfirmed,
+      wcScheduleRowIds,
+      balanceSheet: balanceSheet ?? [],
+      disclosureProjectionByRowId: cfsDisclosureProjectionByRowId,
+    };
 
-    for (const row of flat) {
-      if (row.kind === "total" || row.kind === "subtotal" || row.kind === "calc") continue;
-      if (row.id.startsWith("total_")) continue;
-
-      const tt = row.taxonomyType as string | undefined;
-      let status: ForecastStatus = "derived";
-      let source = "Auto-derived from IS/BS";
-      let jumpTo: LineItemStatus["jumpTo"] = null;
-
-      if (tt === "cfo_net_income" || row.id === "net_income") {
-        source = "From Income Statement";
-      } else if (row.id === "danda" || tt === "cfo_danda") {
-        source = dandaScheduleConfirmed
-          ? "PP&E, Capex & D&A Schedule"
-          : "Non-operating & Schedules";
-        jumpTo = { step: "forecast_drivers", subTab: "non_operating_schedules" };
-      } else if (tt === "cfo_da" || tt === "cfo_sbc" || row.id === "sbc" || row.id === "da") {
-        source = dandaScheduleConfirmed ? "From schedules" : "From IS/BS changes";
-        jumpTo = { step: "forecast_drivers", subTab: "non_operating_schedules" };
-      } else if (
-        wcScheduleRowIds.has(row.id) ||
-        (row.id.startsWith("cfo_") && wcScheduleRowIds.has(cfsWcChildIdToBalanceSheetId(row.id)))
-      ) {
-        source = wcDriversConfirmed ? "WC Schedule (Forecast Drivers)" : "WC drivers";
-        jumpTo = { step: "forecast_drivers", subTab: "wc_drivers" };
-      } else if (tt?.startsWith("cfo_wc_") || row.id === "wc_change") {
-        source = wcDriversConfirmed ? "From WC Drivers" : "From BS changes";
-        jumpTo = { step: "forecast_drivers", subTab: "wc_drivers" };
-      } else if (tt === "cfi_capex" || row.id === "capex") {
-        source = dandaScheduleConfirmed ? "From Capex Schedule" : "From BS changes";
-        jumpTo = { step: "forecast_drivers", subTab: "non_operating_schedules" };
-      } else if (tt?.startsWith("cff_")) {
-        if (tt === "cff_dividends" || tt === "cff_share_repurchases") {
-          source = equityRollforwardConfirmed ? "From Equity Roll-Forward" : "Not linked yet";
-          status = equityRollforwardConfirmed ? "derived" : "not_configured";
-          jumpTo = { step: "forecast_drivers", subTab: "other_bs_items" };
-        } else if (tt === "cff_debt_issued" || tt === "cff_debt_repaid") {
-          source = debtApplied ? "From Debt Schedule" : "Not linked yet";
-          status = debtApplied ? "derived" : "not_configured";
-          jumpTo = { step: "forecast_drivers", subTab: "non_operating_schedules" };
-        } else {
-          source = "Financing flow";
-          jumpTo = { step: "forecast_drivers", subTab: "non_operating_schedules" };
-        }
+    for (const line of filterCfsPlanLinesForBuilderCoverage(cfsPlanLines)) {
+      if (line.sourceRowId && wcChangeDescendantIds.has(line.sourceRowId) && wcScheduleItems.length > 0) {
+        continue;
       }
 
-      items.push({ id: row.id, label: row.label, status, source, jumpTo, section: "cfs" });
+      const row = line.sourceRowId ? findRowInTree(cashFlow ?? [], line.sourceRowId) : null;
+      if (row) {
+        const anchor = CFS_BUILDER_ANCHOR_ROW_IDS.has(row.id);
+        if (row.kind === "calc" && !anchor) continue;
+        if (row.kind === "subtotal" && !anchor) continue;
+        if (row.kind === "total" && !anchor) continue;
+      }
+
+      const { status, source, jumpTo } = getCfsProjectedStatementLineRouting(row, line.id, routingCtx);
+
+      items.push({
+        id: line.id,
+        label: line.label,
+        status: status as ForecastStatus,
+        source,
+        jumpTo,
+        section: "cfs",
+      });
     }
 
     return items;
-  }, [cashFlow, balanceSheet, dandaScheduleConfirmed, wcDriversConfirmed, equityRollforwardConfirmed, debtApplied, wcScheduleRowIds]);
+  }, [
+    cfsPlanLines,
+    cashFlow,
+    dandaScheduleConfirmed,
+    wcDriversConfirmed,
+    equityRollforwardConfirmed,
+    debtApplied,
+    wcScheduleRowIds,
+    wcChangeDescendantIds,
+    wcScheduleItems,
+    cfsDisclosureProjectionByRowId,
+  ]);
 
   // ── Aggregates ─────────────────────────────────────────────────────────────
   const allItems = useMemo(() => [...isItems, ...bsItems, ...cfsItems], [isItems, bsItems, cfsItems]);
@@ -413,7 +444,8 @@ export default function ProjectedStatementsShell() {
       <div>
         <h2 className="text-sm font-semibold text-slate-100">Forecast Coverage</h2>
         <p className="text-[10px] text-slate-500 mt-0.5">
-          Track which line items are forecasted, schedule-driven, derived, or missing.
+          Track forecasted, schedule-driven, and derived lines. “Not set” on issuer-specific CF disclosure lines is
+          expected until you choose a policy (see CF disclosure block when applicable).
         </p>
       </div>
 
@@ -471,14 +503,168 @@ export default function ProjectedStatementsShell() {
       {renderSection("bs", bsItems)}
       {renderSection("cfs", cfsItems)}
 
+      {/* CF disclosure lines (10-K style): projection policies */}
+      {cfsDisclosureLines.length > 0 ? (
+        <CfsDisclosurePolicyBlock
+          lines={cfsDisclosureLines}
+          projectionYears={projectionYears}
+          policyByRowId={cfsDisclosureProjectionByRowId}
+          setPolicy={setCfsDisclosureProjection}
+          rollupExcluded={cfsRollupDisclosureExcludedInPreview}
+          setRollupExcluded={setCfsRollupDisclosureExcludedInPreview}
+        />
+      ) : null}
+
       {/* CFS note */}
       <div className="rounded-lg border border-slate-700/30 bg-slate-800/20 px-3 py-2">
         <div className="flex items-center gap-1.5">
           <Calculator size={12} className="text-violet-400 shrink-0" />
           <span className="text-[9px] text-slate-400">
-            Cash is derived from the Cash Flow Statement. It will auto-populate once the CFS engine is built (Phase 3).
+            Historic CFS can mirror the filing line-by-line; projections are driven by IS/BS/schedules plus explicit
+            policies for issuer-specific CF disclosure lines (see block above when present).
           </span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function policyLabel(mode: CfsDisclosureProjectionSpec["mode"]): string {
+  switch (mode) {
+    case "flat_last_historical":
+      return "Flat (last historical)";
+    case "pct_of_revenue":
+      return "% of revenue";
+    case "manual_by_year":
+      return "Manual by year";
+    case "zero":
+      return "Zero";
+    case "excluded":
+      return "Excluded (rollup)";
+    default:
+      return mode;
+  }
+}
+
+function CfsDisclosurePolicyBlock({
+  lines,
+  projectionYears,
+  policyByRowId,
+  setPolicy,
+  rollupExcluded,
+  setRollupExcluded,
+}: {
+  lines: { id: string; label: string }[];
+  projectionYears: string[];
+  policyByRowId: Record<string, CfsDisclosureProjectionSpec>;
+  setPolicy: (rowId: string, spec: CfsDisclosureProjectionSpec | null) => void;
+  rollupExcluded: boolean;
+  setRollupExcluded: (v: boolean) => void;
+}) {
+  const [pctDraft, setPctDraft] = useState<Record<string, string>>({});
+
+  return (
+    <div className="rounded-lg border border-violet-500/25 bg-violet-950/20 px-3 py-2 space-y-2">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-[10px] font-semibold text-violet-200">CF disclosure lines (10-K style)</p>
+          <p className="text-[9px] text-slate-500 mt-0.5">
+            These rows match the filing but are not auto-linked to BS/IS. “Not set” until you pick a policy or map the
+            line in Historicals.
+          </p>
+        </div>
+        <label className="flex items-center gap-1.5 text-[9px] text-slate-400 shrink-0 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={rollupExcluded}
+            onChange={(e) => setRollupExcluded(e.target.checked)}
+            className="rounded border-slate-600"
+          />
+          Hide excluded in preview
+        </label>
+      </div>
+      <div className="max-h-[200px] overflow-y-auto space-y-1.5 pr-1">
+        {lines.map((line) => {
+          const cur = policyByRowId[line.id];
+          const selectValue =
+            cur == null
+              ? ""
+              : cur.mode === "pct_of_revenue"
+                ? "pct_of_revenue"
+                : cur.mode;
+          return (
+            <div key={line.id} className="flex flex-wrap items-center gap-2 text-[9px]">
+              <span className="text-slate-400 truncate max-w-[140px]" title={line.label}>
+                {line.label}
+              </span>
+              <select
+                className="bg-slate-900 border border-slate-600 rounded px-1 py-0.5 text-slate-200 max-w-[160px]"
+                value={selectValue}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "") setPolicy(line.id, null);
+                  else if (v === "flat_last_historical") setPolicy(line.id, { mode: "flat_last_historical" });
+                  else if (v === "pct_of_revenue") {
+                    const p = parseFloat(pctDraft[line.id] ?? "0") || 0;
+                    setPolicy(line.id, { mode: "pct_of_revenue", pct: p });
+                  } else if (v === "manual_by_year") {
+                    const by: Record<string, number> = {};
+                    for (const y of projectionYears) by[y] = 0;
+                    setPolicy(line.id, { mode: "manual_by_year", byYear: by });
+                  } else if (v === "zero") setPolicy(line.id, { mode: "zero" });
+                  else if (v === "excluded") setPolicy(line.id, { mode: "excluded" });
+                }}
+              >
+                <option value="">Not set</option>
+                <option value="flat_last_historical">{policyLabel("flat_last_historical")}</option>
+                <option value="pct_of_revenue">{policyLabel("pct_of_revenue")}</option>
+                <option value="manual_by_year">{policyLabel("manual_by_year")}</option>
+                <option value="zero">{policyLabel("zero")}</option>
+                <option value="excluded">{policyLabel("excluded")}</option>
+              </select>
+              {cur?.mode === "pct_of_revenue" ? (
+                <span className="flex items-center gap-0.5">
+                  <input
+                    type="number"
+                    step="0.01"
+                    className="w-14 bg-slate-900 border border-slate-600 rounded px-1 py-0.5 text-slate-200"
+                    value={pctDraft[line.id] ?? String(cur.pct)}
+                    placeholder="%"
+                    onChange={(e) => {
+                      const t = e.target.value;
+                      setPctDraft((d) => ({ ...d, [line.id]: t }));
+                      const p = parseFloat(t);
+                      if (!Number.isFinite(p)) return;
+                      setPolicy(line.id, { mode: "pct_of_revenue", pct: p });
+                    }}
+                  />
+                  <span className="text-slate-500">% rev</span>
+                </span>
+              ) : null}
+              {cur?.mode === "manual_by_year" && projectionYears.length > 0 ? (
+                <span className="flex flex-wrap gap-1 items-center">
+                  {projectionYears.map((y) => (
+                    <label key={y} className="flex items-center gap-0.5 text-slate-500">
+                      <span>{y}</span>
+                      <input
+                        type="number"
+                        className="w-16 bg-slate-900 border border-slate-600 rounded px-1 py-0.5 text-slate-200"
+                        value={cur.byYear[y] ?? ""}
+                        onChange={(e) => {
+                          const n = parseFloat(e.target.value);
+                          setPolicy(line.id, {
+                            mode: "manual_by_year",
+                            byYear: { ...cur.byYear, [y]: Number.isFinite(n) ? n : 0 },
+                          });
+                        }}
+                      />
+                    </label>
+                  ))}
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

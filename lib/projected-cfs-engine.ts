@@ -1,21 +1,23 @@
 /**
- * Phase 3 — Projected Cash Flow Statement (indirect method, pre-sweep)
+ * Phase 3 — Projected Cash Flow Statement (indirect method)
  *
- * Pure functions: builds CFO / CFI / CFF and ending cash from projected IS/BS
- * and schedule outputs. Signs follow IB-style cash flow presentation:
+ * CFO / CFI / CFF and ending cash are assembled from projected IS, BS, and schedule
+ * outputs only — not from historical CFS disclosure line values. The existing CFS row
+ * tree is the merge target; disclosure-only historic lines are zeroed in projection years.
+ *
+ * Signs follow IB-style cash flow presentation:
  * - Outflows are negative (capex, debt repaid, cash interest, dividends, buybacks).
  * - Inflows are positive (debt issued, equity issued).
- *
- * Cash interest paid (v1) equals sum of tranche interest expense from the debt
- * engine (no accrual vs cash timing difference in this phase).
  */
 
 import type { Row } from "@/types/finance";
 import type { DebtScheduleEngineResultV1 } from "@/lib/debt-schedule-engine";
 import type { EquityRollforwardResult } from "@/lib/equity-rollforward-engine";
-import { getDeltaWcBs } from "@/lib/calculations";
+import { computeBalanceSheetTotalsWithOverrides, getDeltaWcBs } from "@/lib/calculations";
 import { getDandaFromIncomeStatement, getSbcFromIncomeStatement } from "@/lib/cfo-source-resolution";
+import { classifyCfsLineForProjection } from "@/lib/cfs-line-classification";
 import { findRowInTree } from "@/lib/row-utils";
+import { computeOtherBsBridgeLineForYear } from "@/lib/other-bs-cfs-bridge";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -30,6 +32,15 @@ export type ProjectedCfsEngineInput = {
   equityRollforwardResult?: EquityRollforwardResult | null;
   /** Optional FX / cash bridge; defaults to 0 per year. */
   fxEffectByYear?: Record<string, number>;
+  /**
+   * CFS row tree after anchors (same structure as merged output). Used only to classify
+   * row ids as forecasted vs disclosure-only and to emit zeros for non-forecasted ids.
+   */
+  cashFlowTree: Row[];
+  /** Intangible asset additions by year (positive = cash spend on intangibles). */
+  intangibleAdditionsByYear?: Record<string, number | undefined>;
+  /** BS row ids with Other BS bridge lines — excluded from residual sweep. */
+  otherBsBridgeBsIds?: ReadonlySet<string>;
 };
 
 export type ProjectedCfsYearBreakdown = {
@@ -64,6 +75,8 @@ export type ProjectedCfsEngineResult = {
   /** Merge into CFS row.values for projection years (row id → year → value). */
   cfsValuesByRowId: Record<string, Record<string, number>>;
   endingCashByYear: Record<string, number>;
+  /** Row ids that receive engine-backed values; all other CFS ids are zero in projections. */
+  forecastedCfsRowIds: ReadonlySet<string>;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -116,9 +129,77 @@ function getBeginningCashFromBs(balanceSheet: Row[], lastHistYear: string | null
   return cash?.values?.[lastHistYear] ?? 0;
 }
 
+/** WC bridge line `cfo_${bsId}` — same sign logic as `computeFormula` cfo_* branch in calculations. */
+function cfoComponentCashFromBs(
+  cfsRow: Row,
+  balanceSheet: Row[],
+  year: string,
+  prevYear: string | null
+): number | null {
+  if (!prevYear || !cfsRow.id.startsWith("cfo_") || !cfsRow.cfsLink) return null;
+  const bsRowId = cfsRow.id.replace(/^cfo_/, "");
+  const bsRow = findRowInTree(balanceSheet, bsRowId);
+  if (!bsRow) return null;
+  const curr = bsRow.values?.[year] ?? 0;
+  const prev = bsRow.values?.[prevYear] ?? 0;
+  const change = curr - prev;
+  const imp = cfsRow.cfsLink.impact;
+  if (imp === "positive") return change;
+  if (imp === "negative") return -change;
+  return change;
+}
+
+/**
+ * Per projection year: verify BS totals vs engine ending cash (diagnostic).
+ */
+export function verifyCashBalanceCheck(
+  balanceSheet: Row[],
+  projectionYears: string[],
+  endingCashByYear: Record<string, number>
+): void {
+  if (process.env.NODE_ENV === "production") return;
+  const flatBs = flattenStatement(balanceSheet);
+  const cashRow = flatBs.find((r) => r.id === "cash" || r.taxonomyType === "asset_cash");
+  for (const y of projectionYears) {
+    const totals = computeBalanceSheetTotalsWithOverrides(balanceSheet, y);
+    const totalAssets = totals.total_assets;
+    const totalLiabAndEquity = totals.total_liab_and_equity;
+    const diff = totalAssets - totalLiabAndEquity;
+    // eslint-disable-next-line no-console -- intentional diagnostic for BS build verification
+    console.log(
+      `BS Check [${y}]: Assets = ${totalAssets}, L+E = ${totalLiabAndEquity}, Diff = ${diff}`
+    );
+    // eslint-disable-next-line no-console -- intentional diagnostic for BS build verification
+    console.log(`Engine Cash = ${endingCashByYear[y]}, BS Cash Row = ${cashRow?.values?.[y]}`);
+  }
+}
+
 // ─── Core ────────────────────────────────────────────────────────────────────
 
 export function computeProjectedCashFlow(input: ProjectedCfsEngineInput): ProjectedCfsEngineResult {
+  /*
+   * Step 1 — Data available when applyBsBuildProjectionsToModel calls this (variable names at call site):
+   *
+   * - newIS (`incomeStatement` arg): projected IS rows after `isProjectedByRowId` write + `recomputeCalculations`
+   *   per projection year. Contains `net_income` / `calc_net_income`, D&A (`opex_danda` or split `opex_depreciation`
+   *   + `opex_amortization`), SBC (`opex_sbc`), interest, tax, and other forecast lines from revenue/COGS, capex D&A
+   *   schedule, intangibles amort, debt interest, interest income schedule, tax schedule, opex forecast, etc.
+   *
+   * - newBS (`balanceSheet` arg): projected BS after WC (`wcProjected`), PP&E (`ppeByYear` / capex schedule),
+   *   intangibles ending (`intangiblesEndByYear`), debt STD/LTD (`debtStdByYear` / `debtLtdByYear`), equity accounts
+   *   (`equityByAccount` from equity roll-forward), other BS items (`otherBsProjected`). Cash row is still pre-engine
+   *   (historical in projection cols until `applyEndingCashToBalanceSheet` runs after recompute).
+   *
+   * - totalCapexByYear: `Record<year, number>` from `computeProjectedCapexByYear(capexEngineInput)`.
+   * - debtScheduleResult: `DebtScheduleEngineResultV1 | null` from `computeDebtScheduleEngine` when phase-2 debt applied.
+   * - equityRollforwardResult: `EquityRollforwardResult | null` when `equityRollforwardConfirmed`; fields used here:
+   *   `cffIssuancesByYear`, `cffBuybacksByYear`, `cffDividendsByYear` (CFF signs: inflow positive, outflow negative).
+   * - intangibleAdditionsByYear (optional): `intangiblesOutput?.additionsByYear` from `computeIntangiblesAmortSchedule`.
+   * - cashFlowTree: copy of `cashFlow` after `ensureCFSAnchorRowsInPlace` — structure for classification / zeroing only.
+   *
+   * Not passed directly (already embedded in IS/BS): interest income on IS, tax expense, amortization split on IS.
+   */
+
   const {
     projectionYears,
     lastHistoricalYear,
@@ -128,9 +209,35 @@ export function computeProjectedCashFlow(input: ProjectedCfsEngineInput): Projec
     debtScheduleResult,
     equityRollforwardResult,
     fxEffectByYear = {},
+    cashFlowTree,
+    intangibleAdditionsByYear = {},
+    otherBsBridgeBsIds = new Set<string>(),
   } = input;
 
   const flatBs = flattenStatement(balanceSheet);
+  const flatCf = flattenStatement(cashFlowTree);
+
+  const forecastedCfsRowIds = new Set<string>();
+  for (const r of flatCf) {
+    if (classifyCfsLineForProjection(r, balanceSheet) !== "cf_disclosure_only") {
+      forecastedCfsRowIds.add(r.id);
+    }
+  }
+
+  /** Step 1 — rows already reflected elsewhere in CFO/CFI/CFF or non-cash; skip residual sweep. */
+  function residualSweepExcludeRow(r: Row): boolean {
+    const tt = r.taxonomyType;
+    if (tt === "asset_cash" || r.id === "cash") return true;
+    if (tt === "asset_deferred_tax") return true;
+    if (tt === "liab_deferred_tax") return true;
+    if (r.scheduleOwner != null && r.scheduleOwner !== "none") return true;
+    if (r.cashFlowBehavior === "working_capital") return true;
+    if (r.cashFlowBehavior === "non_cash") return true;
+    if (r.id.startsWith("total")) return true;
+    if (tt?.startsWith("calc_")) return true;
+    if (tt?.startsWith("equity_")) return true;
+    return false;
+  }
 
   const byYear: Record<string, ProjectedCfsYearBreakdown> = {};
   const cfsValuesByRowId: Record<string, Record<string, number>> = {};
@@ -145,8 +252,7 @@ export function computeProjectedCashFlow(input: ProjectedCfsEngineInput): Projec
 
   for (let i = 0; i < projectionYears.length; i++) {
     const year = projectionYears[i]!;
-    const prevYear =
-      i === 0 ? lastHistoricalYear : projectionYears[i - 1]!;
+    const prevYear = i === 0 ? lastHistoricalYear : projectionYears[i - 1]!;
 
     const beginningCash = prevEndingCash;
 
@@ -157,17 +263,20 @@ export function computeProjectedCashFlow(input: ProjectedCfsEngineInput): Projec
     const wcChange = prevYear ? -getDeltaWcBs(balanceSheet, year, prevYear) : 0;
     const otherOperating = otherOperatingDeferredTax(flatBs, year, prevYear);
 
-    const cfo = netIncome + danda + sbc + wcChange + otherOperating;
+    let cfo = netIncome + danda + sbc + wcChange + otherOperating;
 
     const capexRaw = totalCapexByYear[year] ?? 0;
     const capex = -Math.abs(capexRaw);
+
+    const intangibleAdd = intangibleAdditionsByYear[year] ?? 0;
+    const intangibleCfi = -Math.abs(intangibleAdd);
 
     const acquisitions = 0;
     const assetSales = 0;
     const investments = 0;
     const otherInvesting = 0;
 
-    const cfi = capex + acquisitions + assetSales + investments + otherInvesting;
+    let cfi = capex + intangibleCfi + acquisitions + assetSales + investments + otherInvesting;
 
     let debtIssued = 0;
     let debtRepaid = 0;
@@ -193,8 +302,85 @@ export function computeProjectedCashFlow(input: ProjectedCfsEngineInput): Projec
     }
 
     const otherFinancing = 0;
-    const cff =
+    let cff =
       debtIssued + debtRepaid + cashInterestPaid + equityIssued + shareRepurchases + dividends + otherFinancing;
+
+    let residualCfo = 0;
+    let residualCfi = 0;
+    let residualCff = 0;
+
+    if (prevYear) {
+      for (const r of flatBs) {
+        if (residualSweepExcludeRow(r)) continue;
+        if (otherBsBridgeBsIds.has(r.id)) continue;
+
+        const tt = r.taxonomyType as string | undefined;
+        const cfb = r.cashFlowBehavior;
+
+        let bucket: "cfo" | "cfi" | "cff" | null = null;
+        if (cfb === "investing") {
+          bucket = "cfi";
+        } else if (cfb === "financing") {
+          bucket = "cff";
+        } else if (cfb == null || cfb === "unclassified") {
+          if (tt?.startsWith("liab_")) bucket = "cfo";
+          else if (tt?.startsWith("asset_")) bucket = "cfo";
+          else {
+            console.warn(
+              "[computeProjectedCashFlow] Residual BS Sweep: cannot determine CFS section (need asset_/liab_ taxonomy or investing/financing behavior)",
+              r.id,
+              r.label,
+              tt ?? "(no taxonomyType)"
+            );
+            continue;
+          }
+        }
+
+        const rawY = r.values?.[year];
+        const rawP = r.values?.[prevYear];
+        const vY = typeof rawY === "number" && Number.isFinite(rawY) ? rawY : 0;
+        const vP = typeof rawP === "number" && Number.isFinite(rawP) ? rawP : 0;
+        const delta = vY - vP;
+
+        let cashImpact: number;
+        if (tt?.startsWith("asset_")) {
+          cashImpact = -delta;
+        } else if (tt?.startsWith("liab_")) {
+          cashImpact = delta;
+        } else if (cfb === "investing" || bucket === "cfi") {
+          cashImpact = -delta;
+        } else if (cfb === "financing" || bucket === "cff") {
+          cashImpact = delta;
+        } else {
+          console.warn(
+            "[computeProjectedCashFlow] Residual BS Sweep: ambiguous cash impact (no asset_/liab_ taxonomy and no investing/financing behavior)",
+            r.id,
+            r.label,
+            tt ?? "(no taxonomyType)"
+          );
+          continue;
+        }
+
+        if (bucket === "cfo") residualCfo += cashImpact;
+        else if (bucket === "cfi") residualCfi += cashImpact;
+        else residualCff += cashImpact;
+      }
+    }
+    cfo += residualCfo;
+    cfi += residualCfi;
+    cff += residualCff;
+
+    const otherBsBridgeLines: { id: string; value: number }[] = [];
+    if (otherBsBridgeBsIds.size > 0 && prevYear) {
+      for (const bsId of otherBsBridgeBsIds) {
+        const line = computeOtherBsBridgeLineForYear(balanceSheet, bsId, year, prevYear);
+        if (!line) continue;
+        otherBsBridgeLines.push(line);
+        if (line.id.startsWith("mbc_cfi_")) cfi += line.value;
+        else if (line.id.startsWith("mbc_cfo_")) cfo += line.value;
+        else if (line.id.startsWith("mbc_cff_")) cff += line.value;
+      }
+    }
 
     const fxEffect = fxEffectByYear[year] ?? 0;
     const netChangeInCash = cfo + cfi + cff + fxEffect;
@@ -230,29 +416,50 @@ export function computeProjectedCashFlow(input: ProjectedCfsEngineInput): Projec
     endingCashByYear[year] = endingCash;
     prevEndingCash = endingCash;
 
-    // CFS row merges (projection years only). Calc rows (e.g. net_income, sbc) are
-    // overwritten by recomputeCalculations but kept aligned for debugging / export.
     setCfs("net_income", year, netIncome);
     setCfs("danda", year, danda);
     setCfs("sbc", year, sbc);
     setCfs("wc_change", year, wcChange);
     setCfs("other_operating", year, otherOperating);
     setCfs("capex", year, capex);
+    setCfs("additions_to_intangibles", year, intangibleCfi);
     setCfs("acquisitions", year, acquisitions);
     setCfs("asset_sales", year, assetSales);
     setCfs("investments", year, investments);
     setCfs("other_investing", year, otherInvesting);
     setCfs("debt_issued", year, debtIssued);
     setCfs("debt_repaid", year, debtRepaid);
+    setCfs("debt_issuance", year, debtIssued);
+    setCfs("debt_repayment", year, debtRepaid);
     setCfs("cash_interest_paid", year, cashInterestPaid);
     setCfs("equity_issued", year, equityIssued);
+    setCfs("equity_issuance", year, equityIssued);
     setCfs("share_repurchases", year, shareRepurchases);
     setCfs("dividends", year, dividends);
     setCfs("other_financing", year, otherFinancing);
     setCfs("fx_effect_on_cash", year, fxEffect);
+
+    for (const ol of otherBsBridgeLines) {
+      setCfs(ol.id, year, ol.value);
+    }
+
+    for (const r of flatCf) {
+      if (r.id.startsWith("cfo_") && r.cfsLink && forecastedCfsRowIds.has(r.id)) {
+        const wcLine = cfoComponentCashFromBs(r, balanceSheet, year, prevYear);
+        if (wcLine !== null) {
+          setCfs(r.id, year, wcLine);
+        }
+      }
+    }
+
+    for (const r of flatCf) {
+      if (!forecastedCfsRowIds.has(r.id)) {
+        setCfs(r.id, year, 0);
+      }
+    }
   }
 
-  return { byYear, cfsValuesByRowId, endingCashByYear };
+  return { byYear, cfsValuesByRowId, endingCashByYear, forecastedCfsRowIds };
 }
 
 /** Deep-merge projected CFS values into existing rows (historical years untouched). */

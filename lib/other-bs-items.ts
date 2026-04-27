@@ -150,7 +150,8 @@ export function getOtherBsItems(
   return out;
 }
 
-function resolveGroup(tax: BSTaxonomy): OtherBsGroup | null {
+/** Exported for Other BS → projected CFS bridge (cash effect by section). */
+export function resolveGroup(tax: BSTaxonomy): OtherBsGroup | null {
   const tt = tax.type;
 
   if (["asset_goodwill", "asset_rou_assets", "asset_investments", "asset_deferred_tax", "asset_other_fixed"].includes(tt)) {

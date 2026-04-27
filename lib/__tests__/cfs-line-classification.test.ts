@@ -1,79 +1,91 @@
+/**
+ * CFS projection classification: forecasted vs disclosure-only.
+ */
+
 import { describe, it, expect } from "vitest";
-import { classifyCfsLineForProjection, inventoryCfsLinesForDiagnostics } from "@/lib/cfs-line-classification";
+import { classifyCfsLineForProjection } from "@/lib/cfs-line-classification";
 import type { Row } from "@/types/finance";
 
-describe("classifyCfsLineForProjection", () => {
-  it("classifies template net_income as schedule (anchor)", () => {
-    const row: Row = {
-      id: "net_income",
-      label: "NI",
-      kind: "calc",
-      valueType: "currency",
-      values: {},
-    };
-    expect(classifyCfsLineForProjection(row, [])).toBe("schedule");
-  });
+const emptyBs: Row[] = [];
 
-  it("classifies cfo_* as maps_to_bs", () => {
-    const row: Row = {
-      id: "cfo_ar",
-      label: "AR",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      cfsLink: { section: "operating", impact: "negative", description: "x" },
-    };
-    expect(classifyCfsLineForProjection(row, [])).toBe("maps_to_bs");
-  });
+function row(partial: Partial<Row> & Pick<Row, "id" | "label">): Row {
+  return {
+    kind: "input",
+    valueType: "currency",
+    values: {},
+    children: [],
+    ...partial,
+  };
+}
 
-  it("classifies custom issuer line under other_operating as cf_disclosure_only when no BS bridge", () => {
-    const row: Row = {
-      id: "gift_card_derecognition",
-      label: "Derecognition of gift cards",
-      kind: "input",
-      valueType: "currency",
-      values: {},
-      historicalCfsNature: "reported_operating_other",
-    };
-    expect(classifyCfsLineForProjection(row, [])).toBe("cf_disclosure_only");
-  });
-
-  it("classifies CFS section totals and net change in cash as schedule, not cf_disclosure_only", () => {
-    const bs: Row[] = [];
-    for (const id of ["operating_cf", "investing_cf", "financing_cf", "net_change_cash", "net_cash_change"] as const) {
-      const row: Row = {
-        id,
-        label: id,
-        kind: "total",
-        valueType: "currency",
-        values: {},
-      };
-      expect(classifyCfsLineForProjection(row, bs)).toBe("schedule");
-    }
+describe("classifyCfsLineForProjection — orphan / disclosure", () => {
+  it("classifies unlinked CFS row with no cfsLink as cf_disclosure_only (policy target)", () => {
+    const cfs = row({
+      id: "issuer_cf_disclosure_misc",
+      label: "Other operating — disclosure",
+      values: { "2024A": -125 },
+    });
+    expect(classifyCfsLineForProjection(cfs, [])).toBe("cf_disclosure_only");
   });
 });
 
-describe("inventoryCfsLinesForDiagnostics", () => {
-  it("returns entries with classification and missingMetadata", () => {
-    const cf: Row[] = [
+describe("classifyCfsLineForProjection — investing / financing", () => {
+  it("classifies bare investing cfsLink with no driver and no BS as disclosure-only", () => {
+    const cfs = row({
+      id: "settlement_derivatives",
+      label: "Settlement of derivatives",
+      cfsLink: { section: "investing", impact: "neutral", description: "x" },
+    });
+    expect(classifyCfsLineForProjection(cfs, emptyBs)).toBe("cf_disclosure_only");
+  });
+
+  it("classifies investing line with debt_schedule driver as schedule", () => {
+    const cfs = row({
+      id: "custom_inv",
+      label: "Custom",
+      cfsForecastDriver: "debt_schedule",
+      cfsLink: { section: "investing", impact: "neutral", description: "x" },
+    });
+    expect(classifyCfsLineForProjection(cfs, emptyBs)).toBe("schedule");
+  });
+
+  it("classifies investing line with resolvable cfsItemId on BS as maps_to_bs", () => {
+    const bs: Row[] = [
       {
-        id: "net_income",
-        label: "NI",
-        kind: "calc",
-        valueType: "currency",
-        values: {},
-      },
-      {
-        id: "custom_cf",
-        label: "Custom",
+        id: "right_of_use_assets",
+        label: "ROU",
         kind: "input",
         valueType: "currency",
         values: {},
+        children: [],
       },
     ];
-    const inv = inventoryCfsLinesForDiagnostics(cf, []);
-    expect(inv.find((x) => x.id === "net_income")?.classification).toBe("schedule");
-    expect(inv.find((x) => x.id === "custom_cf")?.classification).toBe("cf_disclosure_only");
-    expect(inv.find((x) => x.id === "custom_cf")?.missingMetadata.length).toBeGreaterThan(0);
+    const cfs = row({
+      id: "rou_investing_bridge",
+      label: "ROU CF",
+      cfsLink: {
+        section: "investing",
+        cfsItemId: "right_of_use_assets",
+        impact: "negative",
+        description: "",
+      },
+    });
+    expect(classifyCfsLineForProjection(cfs, bs)).toBe("maps_to_bs");
+  });
+
+  it("classifies legacy debt_issuance id as schedule without BS", () => {
+    const cfs = row({
+      id: "debt_issuance",
+      label: "Debt issuance",
+      cfsLink: { section: "financing", impact: "positive", description: "" },
+    });
+    expect(classifyCfsLineForProjection(cfs, emptyBs)).toBe("schedule");
+  });
+
+  it("keeps fixed anchors as schedule", () => {
+    expect(classifyCfsLineForProjection(row({ id: "debt_issued", label: "Issued" }), emptyBs)).toBe(
+      "schedule"
+    );
+    expect(classifyCfsLineForProjection(row({ id: "capex", label: "Capex" }), emptyBs)).toBe("schedule");
   });
 });

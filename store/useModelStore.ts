@@ -65,7 +65,7 @@ import {
 import { getRowsForCategory } from "@/lib/bs-category-mapper";
 import { getFallbackIsClassification } from "@/lib/is-fallback-classify";
 import { TEMPLATE_IS_ROW_IDS } from "@/lib/is-classification";
-import { isCoreBsRow, getCoreLockedBehavior } from "@/lib/bs-core-rows";
+import { isCoreBsRow, getCoreLockedBehavior, getUnclassifiedNonCoreBsRows } from "@/lib/bs-core-rows";
 import { CFS_ANCHOR_HISTORICAL_NATURE } from "@/lib/cfs-forecast-drivers";
 import type { CfsDisclosureProjectionSpec } from "@/lib/cfs-disclosure-projection";
 import { applyCfsDisclosurePoliciesToCashFlowTree } from "@/lib/apply-cfs-disclosure-policies-to-cash-flow";
@@ -105,7 +105,9 @@ import {
   applyEndingCashToBalanceSheet,
   applyProjectedCfsToCashFlowRows,
   computeProjectedCashFlow,
+  verifyCashBalanceCheck,
 } from "@/lib/projected-cfs-engine";
+import { syncOtherBsBridgeRowsInCashFlow } from "@/lib/other-bs-cfs-bridge";
 import { getOtherBsItems, computeOtherBsProjectedBalances } from "@/lib/other-bs-items";
 import { computeProjectedEbitByYear, computeProjectedRevCogs } from "@/lib/projected-ebit";
 import { applyAnchorForecastDriver, applyAnchorHistoricalNature } from "@/lib/cfs-forecast-drivers";
@@ -114,6 +116,8 @@ import { backfillTaxonomy, applyTaxonomyToRow } from "@/lib/row-taxonomy";
 import { enrichBalanceSheetRowWithDebtMetadata, enrichEntireBalanceSheet } from "@/lib/bs-debt-metadata";
 import { backfillCfsMetadataNature } from "@/lib/cfs-metadata-backfill";
 import { getFinalOperatingSubgroup } from "@/lib/cfs-operating-subgroups";
+import { buildModelingContext } from "@/lib/modeling-context";
+import { suggestCashFlowBehaviorWithContext } from "@/lib/company-aware-suggestions";
 
 /**
  * Helpers
@@ -501,7 +505,8 @@ function ensureWcChildrenInCashFlow(cashFlow: Row[], balanceSheet: Row[], wcExcl
 /** CFS anchor row ids in display order; each is inserted after the previous if missing. */
 const CFS_ANCHOR_ORDER: { id: string; afterId: string }[] = [
   { id: "capex", afterId: "operating_cf" },
-  { id: "acquisitions", afterId: "capex" },
+  { id: "additions_to_intangibles", afterId: "capex" },
+  { id: "acquisitions", afterId: "additions_to_intangibles" },
   { id: "asset_sales", afterId: "acquisitions" },
   { id: "investments", afterId: "asset_sales" },
   { id: "other_investing", afterId: "investments" },
@@ -3921,6 +3926,20 @@ export const useModelStore = create<ModelState & ModelActions>()(
     const projectionYears = state.meta?.years?.projection ?? [];
     if (projectionYears.length === 0) return;
 
+    const modelingProfile = buildModelingContext(state.companyContext);
+    for (const row of getUnclassifiedNonCoreBsRows(state.balanceSheet)) {
+      const { behavior } = suggestCashFlowBehaviorWithContext(row.label, modelingProfile);
+      if (behavior == null) {
+        console.warn(
+          "[applyBsBuildProjectionsToModel] Could not auto-classify BS cashFlowBehavior; skipping",
+          row.id,
+          row.label
+        );
+        continue;
+      }
+      get().setBalanceSheetRowCashFlowBehavior(row.id, behavior);
+    }
+
     // Ensure WC children are in sync with BS before computing projections
     get().ensureWcChildrenFromBS();
     // Re-read state after ensureWcChildrenFromBS may have updated BS/CFS
@@ -4120,128 +4139,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
           debtLtdByYear[y] = debtScheduleEngineResult.totalsByYear[y]?.totalEndingDebt ?? 0;
         }
       }
-    }
-
-    // ── Equity roll-forward writeback (CS, APIC, Treasury, RE) ─────────────────
-    const equityByAccount: Record<string, Record<string, number>> = {};
-    let equityRollforwardResult: EquityRollforwardResult | null = null;
-    if (state.equityRollforwardConfirmed) {
-      const findBsVal = (tt: string) => {
-        const row = flatBs.find((r) => r.taxonomyType === tt);
-        return row?.values?.[lastHistYear ?? ""] ?? 0;
-      };
-
-      // Compute projected NI (EBIT as proxy) and Revenue
-      const ebitInput = {
-        incomeStatement,
-        projectionYears,
-        lastHistoricYear: lastHistYear!,
-        revenueForecastConfigV1: state.revenueForecastConfigV1,
-        revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
-        revenueProjectionConfig: state.revenueProjectionConfig,
-        cogsForecastConfigV1: state.cogsForecastConfigV1,
-        opexForecastConfigV1: state.opexForecastConfigV1,
-        allStatements,
-        sbcBreakdowns: state.sbcBreakdowns ?? {},
-        danaBreakdowns: state.danaBreakdowns ?? {},
-        currencyUnit: (state.meta?.currencyUnit ?? "millions") as CurrencyUnit,
-      };
-      const ebitByYear = lastHistYear ? computeProjectedEbitByYear(ebitInput) : {};
-      const projNiByYear: Record<string, number> = {};
-      for (const y of projectionYears) projNiByYear[y] = ebitByYear[y] ?? 0;
-
-      const { revByYear: projRevByYear } = lastHistYear
-        ? computeProjectedRevCogs({
-            incomeStatement,
-            projectionYears,
-            lastHistoricYear: lastHistYear,
-            revenueForecastConfigV1: state.revenueForecastConfigV1,
-            revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
-            revenueProjectionConfig: state.revenueProjectionConfig,
-            cogsForecastConfigV1: state.cogsForecastConfigV1,
-            allStatements,
-            sbcBreakdowns: state.sbcBreakdowns ?? {},
-            danaBreakdowns: state.danaBreakdowns ?? {},
-            currencyUnit: (state.meta?.currencyUnit ?? "millions") as CurrencyUnit,
-          })
-        : { revByYear: {} as Record<string, number> };
-
-      // Compute SBC by year based on user's chosen method
-      const sbcByYear: Record<string, number> = {};
-      const isRows = incomeStatement ?? [];
-      const cfsRows = cashFlow ?? [];
-      if (state.equitySbcMethod === "manual_by_year") {
-        for (const y of projectionYears) sbcByYear[y] = Math.max(0, state.equityManualSbcByYear[y] ?? 0);
-      } else if (state.equitySbcMethod === "pct_revenue") {
-        for (const y of projectionYears) sbcByYear[y] = (projRevByYear[y] ?? 0) * (state.equitySbcPctRevenue / 100);
-      } else if (state.equitySbcMethod === "flat_hist") {
-        const isRow = isRows.find((r) => r.taxonomyType === "opex_sbc");
-        const cfsRow = cfsRows.find((r) => r.taxonomyType === "cfo_sbc" || r.id === "sbc");
-        const histYrs = Object.keys(isRow?.values ?? cfsRow?.values ?? {}).filter((y) => !projectionYears.includes(y)).sort();
-        const lastHistSbc = Math.abs((isRow?.values?.[histYrs[histYrs.length - 1]] ?? 0) || (cfsRow?.values?.[histYrs[histYrs.length - 1]] ?? 0));
-        for (const y of projectionYears) sbcByYear[y] = lastHistSbc;
-      } else {
-        // "auto": sbcBreakdowns → IS/CFS rows → 0
-        let hasBreakdowns = false;
-        for (const y of projectionYears) {
-          let sum = 0;
-          for (const bucket of Object.values(state.sbcBreakdowns ?? {})) sum += Math.abs(bucket[y] ?? 0);
-          sbcByYear[y] = sum;
-          if (sum > 0) hasBreakdowns = true;
-        }
-        if (!hasBreakdowns) {
-          const isRow = isRows.find((r) => r.taxonomyType === "opex_sbc");
-          const cfsRow = cfsRows.find((r) => r.taxonomyType === "cfo_sbc" || r.id === "sbc");
-          for (const y of projectionYears) {
-            const fromIs = Math.abs(isRow?.values?.[y] ?? 0);
-            const fromCfs = Math.abs(cfsRow?.values?.[y] ?? 0);
-            sbcByYear[y] = fromIs > 0 ? fromIs : fromCfs;
-          }
-        }
-      }
-
-      const equityConfig: EquityRollforwardConfig = {
-        ...defaultEquityRollforwardConfig(),
-        dividendMethod:       state.equityDividendMethod,
-        dividendPayoutRatio:  state.equityDividendPayoutRatio,
-        dividendFixedAmount:  state.equityDividendFixedAmount,
-        dividendManualByYear: state.equityDividendManualByYear,
-        buybackMethod:        state.equityBuybackMethod,
-        buybackFixedAmount:   state.equityBuybackFixedAmount,
-        buybackPctNetIncome:  state.equityBuybackPctNetIncome,
-        buybackManualByYear:  state.equityBuybackManualByYear,
-        reissuedMethod:       state.equitySharesReissuedMethod,
-        reissuedFixedAmount:  state.equitySharesReissuedFixedAmount,
-        reissuedManualByYear: state.equitySharesReissuedManualByYear,
-        issuanceMethod:       state.equityIssuanceMethod,
-        issuanceFixedAmount:  state.equityIssuanceFixedAmount,
-        issuanceManualByYear: state.equityIssuanceManualByYear,
-        optionProceedsMethod:       state.equityOptionProceedsMethod,
-        optionProceedsFixedAmount:  state.equityOptionProceedsFixedAmount,
-        optionProceedsManualByYear: state.equityOptionProceedsManualByYear,
-        esppMethod:       state.equityEsppMethod,
-        esppFixedAmount:  state.equityEsppFixedAmount,
-        esppManualByYear: state.equityEsppManualByYear,
-      };
-
-      const equityResult = computeEquityRollforward({
-        config: equityConfig,
-        projectionYears,
-        netIncomeByYear: projNiByYear,
-        fcfByYear: projNiByYear,
-        revenueByYear: projRevByYear,
-        sbcByYear,
-        lastHistCommonStock:      findBsVal("equity_common_stock"),
-        lastHistApic:             findBsVal("equity_apic"),
-        lastHistTreasuryStock:    findBsVal("equity_treasury_stock"),
-        lastHistRetainedEarnings: findBsVal("equity_retained_earnings"),
-      });
-      equityRollforwardResult = equityResult;
-
-      equityByAccount["equity_common_stock"]      = equityResult.commonStockByYear;
-      equityByAccount["equity_apic"]              = equityResult.apicByYear;
-      equityByAccount["equity_treasury_stock"]    = equityResult.treasuryStockByYear;
-      equityByAccount["equity_retained_earnings"] = equityResult.retainedEarningsByYear;
     }
 
     // ── Other BS items writeback ───────────────────────────────────────────────
@@ -4568,6 +4465,136 @@ export const useModelStore = create<ModelState & ModelActions>()(
       newIS = recomputeCalculations(newIS, year, newIS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
 
+    // ── Equity roll-forward writeback (CS, APIC, Treasury, RE) ─────────────────
+    const equityByAccount: Record<string, Record<string, number>> = {};
+    let equityRollforwardResult: EquityRollforwardResult | null = null;
+    if (state.equityRollforwardConfirmed) {
+      const findBsVal = (tt: string) => {
+        const row = flatBs.find((r) => r.taxonomyType === tt);
+        return row?.values?.[lastHistYear ?? ""] ?? 0;
+      };
+
+      // EBIT for fcfByYear only (buyback pct_fcf path); netIncomeByYear uses post-tax NI from newIS below
+      const ebitInput = {
+        incomeStatement,
+        projectionYears,
+        lastHistoricYear: lastHistYear!,
+        revenueForecastConfigV1: state.revenueForecastConfigV1,
+        revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
+        revenueProjectionConfig: state.revenueProjectionConfig,
+        cogsForecastConfigV1: state.cogsForecastConfigV1,
+        opexForecastConfigV1: state.opexForecastConfigV1,
+        allStatements,
+        sbcBreakdowns: state.sbcBreakdowns ?? {},
+        danaBreakdowns: state.danaBreakdowns ?? {},
+        currencyUnit: (state.meta?.currencyUnit ?? "millions") as CurrencyUnit,
+      };
+      const ebitByYear = lastHistYear ? computeProjectedEbitByYear(ebitInput) : {};
+      const projNiByYear: Record<string, number> = {};
+      for (const y of projectionYears) projNiByYear[y] = ebitByYear[y] ?? 0;
+
+      const { revByYear: projRevByYear } = lastHistYear
+        ? computeProjectedRevCogs({
+            incomeStatement,
+            projectionYears,
+            lastHistoricYear: lastHistYear,
+            revenueForecastConfigV1: state.revenueForecastConfigV1,
+            revenueForecastTreeV1: state.revenueForecastTreeV1 ?? [],
+            revenueProjectionConfig: state.revenueProjectionConfig,
+            cogsForecastConfigV1: state.cogsForecastConfigV1,
+            allStatements,
+            sbcBreakdowns: state.sbcBreakdowns ?? {},
+            danaBreakdowns: state.danaBreakdowns ?? {},
+            currencyUnit: (state.meta?.currencyUnit ?? "millions") as CurrencyUnit,
+          })
+        : { revByYear: {} as Record<string, number> };
+
+      // Compute SBC by year based on user's chosen method
+      const sbcByYear: Record<string, number> = {};
+      const isRows = incomeStatement ?? [];
+      const cfsRows = cashFlow ?? [];
+      if (state.equitySbcMethod === "manual_by_year") {
+        for (const y of projectionYears) sbcByYear[y] = Math.max(0, state.equityManualSbcByYear[y] ?? 0);
+      } else if (state.equitySbcMethod === "pct_revenue") {
+        for (const y of projectionYears) sbcByYear[y] = (projRevByYear[y] ?? 0) * (state.equitySbcPctRevenue / 100);
+      } else if (state.equitySbcMethod === "flat_hist") {
+        const isRow = isRows.find((r) => r.taxonomyType === "opex_sbc");
+        const cfsRow = cfsRows.find((r) => r.taxonomyType === "cfo_sbc" || r.id === "sbc");
+        const histYrs = Object.keys(isRow?.values ?? cfsRow?.values ?? {}).filter((y) => !projectionYears.includes(y)).sort();
+        const lastHistSbc = Math.abs((isRow?.values?.[histYrs[histYrs.length - 1]] ?? 0) || (cfsRow?.values?.[histYrs[histYrs.length - 1]] ?? 0));
+        for (const y of projectionYears) sbcByYear[y] = lastHistSbc;
+      } else {
+        // "auto": sbcBreakdowns → IS/CFS rows → 0
+        let hasBreakdowns = false;
+        for (const y of projectionYears) {
+          let sum = 0;
+          for (const bucket of Object.values(state.sbcBreakdowns ?? {})) sum += Math.abs(bucket[y] ?? 0);
+          sbcByYear[y] = sum;
+          if (sum > 0) hasBreakdowns = true;
+        }
+        if (!hasBreakdowns) {
+          const isRow = isRows.find((r) => r.taxonomyType === "opex_sbc");
+          const cfsRow = cfsRows.find((r) => r.taxonomyType === "cfo_sbc" || r.id === "sbc");
+          for (const y of projectionYears) {
+            const fromIs = Math.abs(isRow?.values?.[y] ?? 0);
+            const fromCfs = Math.abs(cfsRow?.values?.[y] ?? 0);
+            sbcByYear[y] = fromIs > 0 ? fromIs : fromCfs;
+          }
+        }
+      }
+
+      const equityConfig: EquityRollforwardConfig = {
+        ...defaultEquityRollforwardConfig(),
+        dividendMethod:       state.equityDividendMethod,
+        dividendPayoutRatio:  state.equityDividendPayoutRatio,
+        dividendFixedAmount:  state.equityDividendFixedAmount,
+        dividendManualByYear: state.equityDividendManualByYear,
+        buybackMethod:        state.equityBuybackMethod,
+        buybackFixedAmount:   state.equityBuybackFixedAmount,
+        buybackPctNetIncome:  state.equityBuybackPctNetIncome,
+        buybackManualByYear:  state.equityBuybackManualByYear,
+        reissuedMethod:       state.equitySharesReissuedMethod,
+        reissuedFixedAmount:  state.equitySharesReissuedFixedAmount,
+        reissuedManualByYear: state.equitySharesReissuedManualByYear,
+        issuanceMethod:       state.equityIssuanceMethod,
+        issuanceFixedAmount:  state.equityIssuanceFixedAmount,
+        issuanceManualByYear: state.equityIssuanceManualByYear,
+        optionProceedsMethod:       state.equityOptionProceedsMethod,
+        optionProceedsFixedAmount:  state.equityOptionProceedsFixedAmount,
+        optionProceedsManualByYear: state.equityOptionProceedsManualByYear,
+        esppMethod:       state.equityEsppMethod,
+        esppFixedAmount:  state.equityEsppFixedAmount,
+        esppManualByYear: state.equityEsppManualByYear,
+      };
+
+      const flatIsPost = flatIsAll(newIS);
+      const niRowForEquity =
+        flatIsPost.find((r) => r.id === "net_income") ?? flatIsPost.find((r) => r.taxonomyType === "calc_net_income");
+      const postTaxNetIncomeByYear: Record<string, number> = {};
+      for (const y of projectionYears) {
+        postTaxNetIncomeByYear[y] = niRowForEquity?.values?.[y] ?? 0;
+      }
+
+      const equityResult = computeEquityRollforward({
+        config: equityConfig,
+        projectionYears,
+        netIncomeByYear: postTaxNetIncomeByYear,
+        fcfByYear: projNiByYear,
+        revenueByYear: projRevByYear,
+        sbcByYear,
+        lastHistCommonStock:      findBsVal("equity_common_stock"),
+        lastHistApic:             findBsVal("equity_apic"),
+        lastHistTreasuryStock:    findBsVal("equity_treasury_stock"),
+        lastHistRetainedEarnings: findBsVal("equity_retained_earnings"),
+      });
+      equityRollforwardResult = equityResult;
+
+      equityByAccount["equity_common_stock"]      = equityResult.commonStockByYear;
+      equityByAccount["equity_apic"]              = equityResult.apicByYear;
+      equityByAccount["equity_treasury_stock"]    = equityResult.treasuryStockByYear;
+      equityByAccount["equity_retained_earnings"] = equityResult.retainedEarningsByYear;
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // BS PROJECTION
     // ══════════════════════════════════════════════════════════════════════════
@@ -4656,6 +4683,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
     // ── Projected CFS (pre-sweep): schedule-driven CFI/CFF + other operating + cash plug ──
     let newCF = [...cashFlow];
     ensureCFSAnchorRowsInPlace(newCF);
+    const otherBsBridgeKeys =
+      state.otherBsConfirmed ? Object.keys(otherBsProjected) : ([] as string[]);
+    syncOtherBsBridgeRowsInCashFlow(newCF, newBS, state.otherBsConfirmed, otherBsBridgeKeys);
     const cfsEngineResult = computeProjectedCashFlow({
       projectionYears,
       lastHistoricalYear: lastHistYear,
@@ -4665,6 +4695,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       debtScheduleResult: debtScheduleEngineResult,
       equityRollforwardResult,
       fxEffectByYear: {},
+      cashFlowTree: newCF,
+      intangibleAdditionsByYear: intangiblesOutput?.additionsByYear,
+      otherBsBridgeBsIds: new Set(otherBsBridgeKeys),
     });
     newCF = applyProjectedCfsToCashFlowRows(newCF, cfsEngineResult.cfsValuesByRowId);
     newCF = applyCfsDisclosurePoliciesToCashFlowTree(
@@ -4675,7 +4708,6 @@ export const useModelStore = create<ModelState & ModelActions>()(
       revenueByYear,
       freshState.cfsDisclosureProjectionByRowId ?? {}
     );
-    newBS = applyEndingCashToBalanceSheet(newBS, cfsEngineResult.endingCashByYear, projectionYears);
 
     for (const year of projectionYears) {
       const st = { incomeStatement: newIS, balanceSheet: newBS, cashFlow: newCF };
@@ -4683,6 +4715,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
       newIS = recomputeCalculations(newIS, year, newIS, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
       newCF = recomputeCalculations(newCF, year, newCF, st, sbcBreakdowns, danaBreakdowns, undefined, state.embeddedDisclosures ?? [], state.sbcDisclosureEnabled ?? true);
     }
+
+    newBS = applyEndingCashToBalanceSheet(newBS, cfsEngineResult.endingCashByYear, projectionYears);
+    verifyCashBalanceCheck(newBS, projectionYears, cfsEngineResult.endingCashByYear);
 
     set({ incomeStatement: newIS, balanceSheet: newBS, cashFlow: newCF });
   },
@@ -6943,6 +6978,13 @@ export const useModelStore = create<ModelState & ModelActions>()(
 
           // Normalize: move top-level WC-classified rows into wc_change.children (single architecture for historical WC)
           cashFlow = normalizeWcStructure(cashFlow);
+
+          syncOtherBsBridgeRowsInCashFlow(
+            cashFlow,
+            balanceSheet,
+            state.otherBsConfirmed ?? false,
+            state.otherBsConfirmed ? Object.keys(state.otherBsForecastByItemId ?? {}) : []
+          );
 
           // Recalculate all years for all statements. Preserve historical values for rows with IS Build breakdowns (rev/cogs/sga parents and SG&A children like R&D that have sub-items).
           const sgaChildren = findRowDeep(state.incomeStatement, "sga")?.children ?? [];

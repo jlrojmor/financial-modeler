@@ -24,13 +24,16 @@ export interface CfsProjectedStatementPlanLine {
   sourceRowId?: string;
 }
 
-const MAIN_TOTAL_IDS = new Set([
+/** Main CFS total row ids (IB template) — used for projected overview visibility. */
+export const CFS_PROJECTED_MAIN_TOTAL_IDS = new Set([
   "total_operating_cf",
   "total_investing_cf",
   "total_financing_cf",
   "net_cash_change",
   "total_cash_change",
 ]);
+
+const MAIN_TOTAL_IDS = CFS_PROJECTED_MAIN_TOTAL_IDS;
 
 function walkPlan(
   cfsInput: Row[],

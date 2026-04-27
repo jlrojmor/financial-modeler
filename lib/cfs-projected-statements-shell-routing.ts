@@ -8,14 +8,17 @@ import type { CfsDisclosureProjectionSpec } from "@/lib/cfs-disclosure-projectio
 import { cfsWcChildIdToBalanceSheetId } from "@/lib/working-capital-schedule";
 import { classifyCfsLineForProjection } from "@/lib/cfs-line-classification";
 import { isCfsComputedRollupRowId } from "@/lib/cfs-structural-row-ids";
+import { isOtherBsSyntheticCfsRowId } from "@/lib/other-bs-cfs-bridge";
 
 export type CfsShellForecastStatus = "forecasted" | "schedule" | "derived" | "not_configured" | "cash_plug" | "excluded";
 
 export interface CfsRoutingContext {
   wcDriversConfirmed: boolean;
   dandaScheduleConfirmed: boolean;
+  capexModelIntangibles: boolean;
   debtApplied: boolean;
   equityRollforwardConfirmed: boolean;
+  otherBsConfirmed: boolean;
   wcScheduleRowIds: Set<string>;
   balanceSheet: Row[];
   disclosureProjectionByRowId: Record<string, CfsDisclosureProjectionSpec>;
@@ -64,6 +67,19 @@ export function getCfsProjectedStatementLineRouting(
   let source = "Auto-derived from IS/BS";
   let jumpTo: CfsLineRoutingResult["jumpTo"] = null;
 
+  if (isOtherBsSyntheticCfsRowId(lineId)) {
+    if (ctx.otherBsConfirmed) {
+      source = "Other BS items (Forecast Drivers)";
+      jumpTo = { step: "forecast_drivers", subTab: OTHER_BS };
+      status = "schedule";
+    } else {
+      status = "not_configured";
+      source = "Confirm Other BS Items in Forecast Drivers to show BS cash bridges.";
+      jumpTo = { step: "forecast_drivers", subTab: OTHER_BS };
+    }
+    return { status, source, jumpTo };
+  }
+
   if (row && classifyCfsLineForProjection(row, ctx.balanceSheet ?? []) === "cf_disclosure_only") {
     const policy = ctx.disclosureProjectionByRowId[row.id];
     if (!policy) {
@@ -99,7 +115,7 @@ export function getCfsProjectedStatementLineRouting(
       ? "PP&E, Capex & D&A Schedule"
       : "Non-operating & Schedules";
     jumpTo = { step: "forecast_drivers", subTab: NON_OP };
-    if (ctx.dandaScheduleConfirmed) status = "schedule";
+    status = ctx.dandaScheduleConfirmed ? "schedule" : "derived";
   } else if (tt === "cfo_da" || tt === "cfo_sbc" || lineId === "sbc" || lineId === "da") {
     if (ctx.equityRollforwardConfirmed && (lineId === "sbc" || tt === "cfo_sbc")) {
       source = "Equity roll-forward (Other BS) / IS";
@@ -108,7 +124,7 @@ export function getCfsProjectedStatementLineRouting(
     } else {
       source = ctx.dandaScheduleConfirmed ? "From schedules" : "From IS/BS changes";
       jumpTo = { step: "forecast_drivers", subTab: NON_OP };
-      if (ctx.dandaScheduleConfirmed) status = "schedule";
+      status = ctx.dandaScheduleConfirmed ? "schedule" : "derived";
     }
   } else if (
     ctx.wcScheduleRowIds.has(lineId) ||
@@ -116,15 +132,59 @@ export function getCfsProjectedStatementLineRouting(
   ) {
     source = ctx.wcDriversConfirmed ? "WC Schedule (Forecast Drivers)" : "WC drivers";
     jumpTo = { step: "forecast_drivers", subTab: WC_TAB };
-    if (ctx.wcDriversConfirmed) status = "schedule";
+    status = ctx.wcDriversConfirmed ? "schedule" : "derived";
   } else if (tt?.startsWith("cfo_wc_") || lineId === "wc_change") {
     source = ctx.wcDriversConfirmed ? "From WC Drivers" : "From BS changes";
     jumpTo = { step: "forecast_drivers", subTab: WC_TAB };
-    if (ctx.wcDriversConfirmed) status = "schedule";
+    status = ctx.wcDriversConfirmed ? "schedule" : "derived";
   } else if (tt === "cfi_capex" || lineId === "capex") {
     source = ctx.dandaScheduleConfirmed ? "From Capex Schedule" : "From BS changes";
     jumpTo = { step: "forecast_drivers", subTab: NON_OP };
-    if (ctx.dandaScheduleConfirmed) status = "schedule";
+    status = ctx.dandaScheduleConfirmed ? "schedule" : "derived";
+  } else if (lineId === "additions_to_intangibles") {
+    const intangOn = ctx.dandaScheduleConfirmed && ctx.capexModelIntangibles;
+    source = intangOn
+      ? "From Capex & Intangibles (D&A schedule)"
+      : "Enable intangibles in Capex & D&A schedule to project this line.";
+    jumpTo = { step: "forecast_drivers", subTab: NON_OP };
+    status = intangOn ? "schedule" : "not_configured";
+  } else if (lineId === "acquisitions") {
+    source = "M&A / acquisitions (manual in Forecast Drivers)";
+    jumpTo = { step: "forecast_drivers", subTab: NON_OP };
+    status = "not_configured";
+  } else if (lineId === "asset_sales" || lineId === "investments" || lineId === "other_investing") {
+    source =
+      lineId === "asset_sales"
+        ? "Asset sales (manual)"
+        : lineId === "investments"
+          ? "Investments (manual)"
+          : "Other investing (manual)";
+    jumpTo = { step: "forecast_drivers", subTab: NON_OP };
+    status = "not_configured";
+  } else if (lineId === "debt_issued") {
+    source = ctx.debtApplied ? "From Debt Schedule" : "Not linked yet";
+    status = ctx.debtApplied ? "derived" : "not_configured";
+    jumpTo = { step: "forecast_drivers", subTab: NON_OP };
+  } else if (lineId === "debt_repaid" || lineId === "cash_interest_paid") {
+    source = ctx.debtApplied ? "From Debt Schedule" : "Not linked yet";
+    status = ctx.debtApplied ? "derived" : "not_configured";
+    jumpTo = { step: "forecast_drivers", subTab: NON_OP };
+  } else if (lineId === "equity_issued") {
+    source = ctx.equityRollforwardConfirmed ? "From Equity Roll-Forward" : "Not linked yet";
+    status = ctx.equityRollforwardConfirmed ? "derived" : "not_configured";
+    jumpTo = { step: "forecast_drivers", subTab: OTHER_BS };
+  } else if (lineId === "share_repurchases" || lineId === "dividends") {
+    source = ctx.equityRollforwardConfirmed ? "From Equity Roll-Forward" : "Not linked yet";
+    status = ctx.equityRollforwardConfirmed ? "derived" : "not_configured";
+    jumpTo = { step: "forecast_drivers", subTab: OTHER_BS };
+  } else if (lineId === "other_financing") {
+    source = "Other financing (manual)";
+    jumpTo = { step: "forecast_drivers", subTab: NON_OP };
+    status = "not_configured";
+  } else if (lineId === "fx_effect_on_cash") {
+    source = "FX / other cash bridge (manual)";
+    jumpTo = { step: "forecast_drivers", subTab: NON_OP };
+    status = "not_configured";
   } else if (tt?.startsWith("cff_")) {
     if (tt === "cff_dividends" || tt === "cff_share_repurchases") {
       source = ctx.equityRollforwardConfirmed ? "From Equity Roll-Forward" : "Not linked yet";

@@ -13,6 +13,8 @@ import { getWcScheduleItems, getWcCfsBridgeLineFromMap, type WcDriverState } fro
 import { computeWcCfsPreviewCashEffects } from "@/lib/projected-wc-cfs-bridge";
 import { computeProjectedSbcCfoByYear } from "@/lib/projected-sbc-cfo";
 import { buildCfsProjectedStatementPlanLines } from "@/lib/cfs-projected-statements-plan";
+import { filterCfsPlanLinesForProjectedOverview } from "@/lib/cfs-projected-overview-visibility";
+import { type CfsRoutingContext } from "@/lib/cfs-projected-statements-shell-routing";
 import { classifyCfsLineForProjection } from "@/lib/cfs-line-classification";
 import { applyCfsDisclosureProjectionForYear } from "@/lib/cfs-disclosure-projection";
 import { findRowInTree } from "@/lib/row-utils";
@@ -115,6 +117,8 @@ const CFS_PREVIEW_SKIP_RESOLVER_IDS = new Set([
   "sbc",
   "danda",
   "wc_change",
+  "capex",
+  "additions_to_intangibles",
   "operating_cf",
   "investing_cf",
   "financing_cf",
@@ -145,7 +149,6 @@ export default function ProjectedStatementsPreview() {
   const opexForecastConfigV1 = useModelStore((s) => s.opexForecastConfigV1);
   const applyProjections = useModelStore((s) => s.applyBsBuildProjectionsToModel);
   const cfsDisclosureProjectionByRowId = useModelStore((s) => s.cfsDisclosureProjectionByRowId ?? {});
-  const cfsRollupDisclosureExcludedInPreview = useModelStore((s) => s.cfsRollupDisclosureExcludedInPreview ?? false);
 
   const capexForecastMethod = useModelStore((s) => s.capexForecastMethod);
   const capexPctRevenue = useModelStore((s) => s.capexPctRevenue);
@@ -174,6 +177,11 @@ export default function ProjectedStatementsPreview() {
   const wcPctByItemIdByYear = useModelStore((s) => s.wcPctByItemIdByYear ?? {});
 
   const equityRollforwardConfirmed = useModelStore((s) => s.equityRollforwardConfirmed);
+  const otherBsConfirmed = useModelStore((s) => s.otherBsConfirmed);
+  const dandaScheduleConfirmed = useModelStore((s) => s.dandaScheduleConfirmed);
+  const wcDriversConfirmed = useModelStore((s) => s.wcDriversConfirmed);
+  const debtPersist = useModelStore((s) => s.debtSchedulePhase2Persist);
+  const debtApplied = debtPersist?.applied != null;
   const equitySbcMethod = useModelStore((s) => s.equitySbcMethod);
   const equitySbcPctRevenue = useModelStore((s) => s.equitySbcPctRevenue);
   const equityManualSbcByYear = useModelStore((s) => s.equityManualSbcByYear ?? {});
@@ -458,6 +466,38 @@ export default function ProjectedStatementsPreview() {
     [cashFlow, wcScheduleItems]
   );
 
+  const wcScheduleRowIds = useMemo(() => new Set(wcScheduleItems.map((i) => i.id)), [wcScheduleItems]);
+
+  const cfsRoutingCtx = useMemo(
+    (): CfsRoutingContext => ({
+      wcDriversConfirmed,
+      dandaScheduleConfirmed,
+      capexModelIntangibles,
+      debtApplied,
+      equityRollforwardConfirmed,
+      otherBsConfirmed,
+      wcScheduleRowIds,
+      balanceSheet: balanceSheet ?? [],
+      disclosureProjectionByRowId: cfsDisclosureProjectionByRowId,
+    }),
+    [
+      wcDriversConfirmed,
+      dandaScheduleConfirmed,
+      capexModelIntangibles,
+      debtApplied,
+      equityRollforwardConfirmed,
+      otherBsConfirmed,
+      wcScheduleRowIds,
+      balanceSheet,
+      cfsDisclosureProjectionByRowId,
+    ]
+  );
+
+  const cfsPlanForOverview = useMemo(
+    () => filterCfsPlanLinesForProjectedOverview(cfsPlanLines, cashFlow ?? [], cfsRoutingCtx),
+    [cfsPlanLines, cashFlow, cfsRoutingCtx]
+  );
+
   const wcScheduleCfsParity = useMemo(
     () => getWcScheduleVsCfsParity(cashFlow ?? [], balanceSheet ?? [], wcCfsCashByItemId),
     [cashFlow, balanceSheet, wcCfsCashByItemId]
@@ -735,7 +775,7 @@ export default function ProjectedStatementsPreview() {
 
     const hasWcBridge = Object.keys(wcCfsCashByItemId).length > 0;
 
-    for (const line of cfsPlanLines) {
+    for (const line of cfsPlanForOverview) {
       if (line.role === "section_header") {
         rows.push({
           id: line.id,
@@ -752,7 +792,7 @@ export default function ProjectedStatementsPreview() {
       }
 
       const style = line.previewStyle as RowStyle;
-      const sourceRow = line.sourceRowId ? findRowInTree(cashFlow ?? [], line.sourceRowId) : undefined;
+      const sourceRow = findRowInTree(cashFlow ?? [], line.sourceRowId ?? line.id);
 
       if (line.id === "wc_change" && wcScheduleItems.length > 0) {
         const wcChangeTotal: Record<string, number> = {};
@@ -792,6 +832,7 @@ export default function ProjectedStatementsPreview() {
         if (projectionYears.includes(y)) {
           const skipResolver =
             CFS_PREVIEW_SKIP_RESOLVER_IDS.has(line.id) ||
+            line.id.startsWith("mbc_") ||
             (line.id.startsWith("cfo_") && hasWcBridge);
           v[y] = skipResolver
             ? getVal(sourceRow, y)
@@ -913,18 +954,9 @@ export default function ProjectedStatementsPreview() {
           (patchedDisclosure && projectionYears.some((y) => (v[y] ?? 0) !== 0)),
         wcShowZero: patchWc && wroteFromBridge ? true : r.wcShowZero,
       };
-    })
-      .filter((r) => {
-        if (r.style === "header" || r.style === "spacer") return true;
-        if (!cfsRollupDisclosureExcludedInPreview) return true;
-        const sr = findRowInTree(cashFlow ?? [], r.id);
-        if (!sr) return true;
-        if (classifyCfsLineForProjection(sr, balanceSheet ?? []) !== "cf_disclosure_only") return true;
-        const pol = cfsDisclosureProjectionByRowId[r.id];
-        return pol?.mode !== "excluded";
-      });
+    });
   }, [
-    cfsPlanLines,
+    cfsPlanForOverview,
     cfsFlat,
     cashFlow,
     allStatements,
@@ -942,7 +974,6 @@ export default function ProjectedStatementsPreview() {
     sbcDisclosureEnabled,
     balanceSheet,
     cfsDisclosureProjectionByRowId,
-    cfsRollupDisclosureExcludedInPreview,
     lastHistYear,
     revByYear,
   ]);

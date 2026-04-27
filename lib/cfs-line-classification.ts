@@ -7,6 +7,7 @@ import type { Row } from "@/types/finance";
 import { findRowInTree } from "@/lib/row-utils";
 import { CFS_ANCHOR_FORECAST_DRIVER } from "@/lib/cfs-forecast-drivers";
 import { isCfsComputedRollupRowId } from "@/lib/cfs-structural-row-ids";
+import { isOtherBsSyntheticCfsRowId } from "@/lib/other-bs-cfs-bridge";
 
 function bsRowExists(balanceSheet: Row[], bsRowId: string): boolean {
   return findRowInTree(balanceSheet, bsRowId) != null;
@@ -20,13 +21,28 @@ export type CfsLineProjectionClass =
 
 const ANCHOR_IDS = new Set(Object.keys(CFS_ANCHOR_FORECAST_DRIVER));
 
-function bsKeyForOperatingCfsRow(row: Row, balanceSheet: Row[]): string | null {
+/** BS account id this CFS row can bridge to (cfsItemId or same id on BS). */
+function bsKeyForCfsLinkedBsRow(row: Row, balanceSheet: Row[]): string | null {
   if (row.cfsLink?.cfsItemId && bsRowExists(balanceSheet, row.cfsLink.cfsItemId)) {
     return row.cfsLink.cfsItemId;
   }
   if (bsRowExists(balanceSheet, row.id)) return row.id;
   return null;
 }
+
+/** Drivers that imply the line is model-backed (IS/BS/schedules), not 10-K disclosure-only. */
+const MODEL_BACKED_CFS_DRIVERS = new Set<string>([
+  "income_statement",
+  "danda_schedule",
+  "working_capital_schedule",
+  "capex_schedule",
+  "debt_schedule",
+  "financing_assumption",
+  "manual_mna",
+]);
+
+/** Template financing ids used by some imports (not in CFS_ANCHOR_FORECAST_DRIVER keys). */
+const LEGACY_FINANCING_ANCHOR_IDS = new Set(["debt_issuance", "debt_repayment", "equity_issuance"]);
 
 /**
  * Single-row classification for projection / routing (not historical filing audit).
@@ -40,6 +56,8 @@ export function classifyCfsLineForProjection(row: Row | null, balanceSheet: Row[
   if (ANCHOR_IDS.has(row.id)) return "schedule";
 
   const tt = row.taxonomyType as string | undefined;
+
+  if (isOtherBsSyntheticCfsRowId(row.id)) return "schedule";
 
   if (row.id.startsWith("cfo_")) return "maps_to_bs";
 
@@ -64,12 +82,30 @@ export function classifyCfsLineForProjection(row: Row | null, balanceSheet: Row[
   if (row.cfsForecastDriver === "debt_schedule" || row.cfsForecastDriver === "financing_assumption") return "schedule";
   if (row.cfsForecastDriver === "income_statement") return "maps_to_is";
 
-  if (row.cfsLink?.section === "operating" && bsKeyForOperatingCfsRow(row, balanceSheet)) {
+  if (row.cfsLink?.section === "operating" && bsKeyForCfsLinkedBsRow(row, balanceSheet)) {
     return "maps_to_bs";
   }
 
+  // Investing / financing: do NOT treat section alone as forecasted — historic filing lines
+  // often have cfsLink.section set with no BS bridge or schedule driver.
   if (row.cfsLink?.section === "investing" || row.cfsLink?.section === "financing") {
-    return "schedule";
+    const driver = row.cfsForecastDriver as string | undefined;
+    if (driver && MODEL_BACKED_CFS_DRIVERS.has(driver)) {
+      return "schedule";
+    }
+    if (driver === "manual_other" && bsKeyForCfsLinkedBsRow(row, balanceSheet)) {
+      return "maps_to_bs";
+    }
+    if (driver === "disclosure_or_assumption" && bsKeyForCfsLinkedBsRow(row, balanceSheet)) {
+      return "maps_to_bs";
+    }
+    if (bsKeyForCfsLinkedBsRow(row, balanceSheet)) {
+      return "maps_to_bs";
+    }
+    if (LEGACY_FINANCING_ANCHOR_IDS.has(row.id)) {
+      return "schedule";
+    }
+    return "cf_disclosure_only";
   }
 
   return "cf_disclosure_only";

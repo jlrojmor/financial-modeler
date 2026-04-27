@@ -12,6 +12,7 @@ import {
   buildCfsProjectedStatementPlanLines,
   filterCfsPlanLinesForBuilderCoverage,
 } from "@/lib/cfs-projected-statements-plan";
+import { filterCfsPlanLinesForProjectedOverview } from "@/lib/cfs-projected-overview-visibility";
 import {
   CFS_BUILDER_ANCHOR_ROW_IDS,
   getCfsProjectedStatementLineRouting,
@@ -79,6 +80,7 @@ export default function ProjectedStatementsShell() {
   const opexForecastConfigV1 = useModelStore((s) => s.opexForecastConfigV1);
   const wcDriversConfirmed = useModelStore((s) => s.wcDriversConfirmed);
   const otherBsConfirmed = useModelStore((s) => s.otherBsConfirmed);
+  const capexModelIntangibles = useModelStore((s) => s.capexModelIntangibles);
   const equityRollforwardConfirmed = useModelStore((s) => s.equityRollforwardConfirmed);
   const dandaScheduleConfirmed = useModelStore((s) => s.dandaScheduleConfirmed);
   const intIncomeScheduleConfirmed = useModelStore((s) => s.intIncomeScheduleConfirmed);
@@ -294,19 +296,41 @@ export default function ProjectedStatementsShell() {
     [cashFlow, wcScheduleItems]
   );
 
-  const cfsItems = useMemo((): LineItemStatus[] => {
-    const items: LineItemStatus[] = [];
-    const routingCtx: CfsRoutingContext = {
+  const cfsRoutingCtx = useMemo(
+    (): CfsRoutingContext => ({
       wcDriversConfirmed,
       dandaScheduleConfirmed,
+      capexModelIntangibles,
       debtApplied,
       equityRollforwardConfirmed,
+      otherBsConfirmed,
       wcScheduleRowIds,
       balanceSheet: balanceSheet ?? [],
       disclosureProjectionByRowId: cfsDisclosureProjectionByRowId,
-    };
+    }),
+    [
+      wcDriversConfirmed,
+      dandaScheduleConfirmed,
+      capexModelIntangibles,
+      debtApplied,
+      equityRollforwardConfirmed,
+      otherBsConfirmed,
+      wcScheduleRowIds,
+      balanceSheet,
+      cfsDisclosureProjectionByRowId,
+    ]
+  );
 
-    for (const line of filterCfsPlanLinesForBuilderCoverage(cfsPlanLines)) {
+  const cfsPlanForOverview = useMemo(
+    () => filterCfsPlanLinesForProjectedOverview(cfsPlanLines, cashFlow ?? [], cfsRoutingCtx),
+    [cfsPlanLines, cashFlow, cfsRoutingCtx]
+  );
+
+  const cfsItems = useMemo((): LineItemStatus[] => {
+    const items: LineItemStatus[] = [];
+    const routingCtx = cfsRoutingCtx;
+
+    for (const line of filterCfsPlanLinesForBuilderCoverage(cfsPlanForOverview)) {
       if (line.sourceRowId && wcChangeDescendantIds.has(line.sourceRowId) && wcScheduleItems.length > 0) {
         continue;
       }
@@ -333,7 +357,8 @@ export default function ProjectedStatementsShell() {
 
     return items;
   }, [
-    cfsPlanLines,
+    cfsPlanForOverview,
+    cfsRoutingCtx,
     cashFlow,
     dandaScheduleConfirmed,
     wcDriversConfirmed,

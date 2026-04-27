@@ -28,6 +28,7 @@ export const CFS_ANCHOR_HISTORICAL_NATURE: Record<string, HistoricalCfsNature> =
   other_operating: "reported_operating_other",
   operating_cf: "reported_meta",
   capex: "reported_investing",
+  additions_to_intangibles: "reported_investing",
   acquisitions: "reported_investing",
   asset_sales: "reported_investing",
   investments: "reported_investing",
@@ -70,6 +71,7 @@ export const CFS_ANCHOR_FORECAST_DRIVER: Record<string, CfsForecastDriver> = {
   other_operating: "manual_other",
   // Investing
   capex: "capex_schedule",
+  additions_to_intangibles: "capex_schedule",
   acquisitions: "manual_mna",
   asset_sales: "manual_other",
   investments: "manual_other",

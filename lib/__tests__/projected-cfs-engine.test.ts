@@ -121,6 +121,17 @@ describe("computeProjectedCashFlow", () => {
       "2027E": { draws: 0, mand: 8, opt: 2, int: 3 },
     });
 
+    const cashFlowTree: Row[] = [
+      {
+        id: "net_income",
+        label: "Net Income",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      },
+    ];
+
     const r = computeProjectedCashFlow({
       projectionYears: PROJ,
       lastHistoricalYear: LAST_HIST,
@@ -130,6 +141,7 @@ describe("computeProjectedCashFlow", () => {
       debtScheduleResult: debt,
       equityRollforwardResult: equity,
       fxEffectByYear: { "2026E": 0, "2027E": 0 },
+      cashFlowTree,
     });
 
     for (const y of PROJ) {
@@ -141,6 +153,172 @@ describe("computeProjectedCashFlow", () => {
 
     expect(r.byYear["2026E"]!.cfo).toBeCloseTo(100 + 20 + 5, 5);
     expect(r.endingCashByYear["2026E"]).toBeCloseTo(r.byYear["2026E"]!.endingCash, 5);
+  });
+
+  it("zeros cfsValues for historic-only investing line (cf_disclosure_only)", () => {
+    const incomeStatement: Row[] = [
+      {
+        id: "net_income",
+        label: "NI",
+        kind: "calc",
+        valueType: "currency",
+        values: { [LAST_HIST]: 10, "2026E": 10 },
+        children: [],
+      },
+      {
+        id: "da",
+        label: "D&A",
+        kind: "input",
+        valueType: "currency",
+        values: { "2026E": 0 },
+        children: [],
+        taxonomyType: "opex_danda",
+      },
+      {
+        id: "sbc_is",
+        label: "SBC",
+        kind: "input",
+        valueType: "currency",
+        values: { "2026E": 0 },
+        children: [],
+        taxonomyType: "opex_sbc",
+      },
+    ];
+    const balanceSheet: Row[] = [
+      {
+        id: "cash",
+        label: "Cash",
+        kind: "input",
+        valueType: "currency",
+        values: { [LAST_HIST]: 100, "2026E": 100 },
+        children: [],
+        taxonomyType: "asset_cash",
+      },
+    ];
+    const cashFlowTree: Row[] = [
+      {
+        id: "net_income",
+        label: "NI",
+        kind: "input",
+        valueType: "currency",
+        values: {},
+        children: [],
+      },
+      {
+        id: "deriv_settlement",
+        label: "Settlement of derivatives",
+        kind: "input",
+        valueType: "currency",
+        values: { "2026E": 999 },
+        children: [],
+        cfsLink: { section: "investing", impact: "neutral", description: "" },
+      },
+    ];
+    const r = computeProjectedCashFlow({
+      projectionYears: ["2026E"],
+      lastHistoricalYear: LAST_HIST,
+      balanceSheet,
+      incomeStatement,
+      totalCapexByYear: { "2026E": 0 },
+      cashFlowTree,
+    });
+    expect(r.cfsValuesByRowId["deriv_settlement"]?.["2026E"]).toBe(0);
+  });
+
+  it("writes cfo_* WC bridge from BS YoY and mirrors debt_issuance / equity_issuance", () => {
+    const incomeStatement: Row[] = [
+      {
+        id: "net_income",
+        label: "NI",
+        kind: "calc",
+        valueType: "currency",
+        values: { [LAST_HIST]: 50, "2026E": 50 },
+        children: [],
+      },
+      {
+        id: "da",
+        label: "D&A",
+        kind: "input",
+        valueType: "currency",
+        values: { "2026E": 0 },
+        children: [],
+        taxonomyType: "opex_danda",
+      },
+      {
+        id: "sbc_is",
+        label: "SBC",
+        kind: "input",
+        valueType: "currency",
+        values: { "2026E": 0 },
+        children: [],
+        taxonomyType: "opex_sbc",
+      },
+    ];
+    const balanceSheet: Row[] = [
+      {
+        id: "cash",
+        label: "Cash",
+        kind: "input",
+        valueType: "currency",
+        values: { [LAST_HIST]: 1000, "2026E": 1000 },
+        children: [],
+        taxonomyType: "asset_cash",
+      },
+      {
+        id: "ar",
+        label: "AR",
+        kind: "input",
+        valueType: "currency",
+        values: { [LAST_HIST]: 100, "2026E": 130 },
+        children: [],
+        cashFlowBehavior: "working_capital",
+      },
+    ];
+    const cfoAr: Row = {
+      id: "cfo_ar",
+      label: "AR",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "working_capital_schedule",
+      cfsLink: {
+        section: "operating",
+        cfsItemId: "ar",
+        impact: "negative",
+        description: "",
+      },
+    };
+    const cashFlowTree: Row[] = [
+      { id: "net_income", label: "NI", kind: "input", valueType: "currency", values: {}, children: [] },
+      cfoAr,
+    ];
+    const r = computeProjectedCashFlow({
+      projectionYears: ["2026E"],
+      lastHistoricalYear: LAST_HIST,
+      balanceSheet,
+      incomeStatement,
+      totalCapexByYear: { "2026E": 0 },
+      cashFlowTree,
+    });
+    expect(r.cfsValuesByRowId["cfo_ar"]?.["2026E"]).toBeCloseTo(-30, 5);
+
+    const debt = debtTotals(["2026E"], { "2026E": { draws: 40, mand: 0, opt: 0, int: 0 } });
+    const eq = { ...emptyEquityStub(["2026E"]), cffIssuancesByYear: { "2026E": 15 } };
+    const r2 = computeProjectedCashFlow({
+      projectionYears: ["2026E"],
+      lastHistoricalYear: LAST_HIST,
+      balanceSheet,
+      incomeStatement,
+      totalCapexByYear: { "2026E": 0 },
+      debtScheduleResult: debt,
+      equityRollforwardResult: eq,
+      cashFlowTree: [{ id: "net_income", label: "NI", kind: "input", valueType: "currency", values: {}, children: [] }],
+    });
+    expect(r2.cfsValuesByRowId["debt_issued"]?.["2026E"]).toBe(40);
+    expect(r2.cfsValuesByRowId["debt_issuance"]?.["2026E"]).toBe(40);
+    expect(r2.cfsValuesByRowId["equity_issued"]?.["2026E"]).toBe(15);
+    expect(r2.cfsValuesByRowId["equity_issuance"]?.["2026E"]).toBe(15);
   });
 
   it("applyProjectedCfsToCashFlowRows merges projection years only", () => {

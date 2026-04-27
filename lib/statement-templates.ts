@@ -529,6 +529,21 @@ export function createCashFlowTemplate(): Row[] {
       cfsLink: { section: "investing", cfsItemId: "capex", impact: "negative", description: "CapEx" },
     },
     {
+      id: "additions_to_intangibles",
+      label: "Additions to Intangible Assets",
+      kind: "input",
+      valueType: "currency",
+      values: {},
+      children: [],
+      cfsForecastDriver: "capex_schedule",
+      cfsLink: {
+        section: "investing",
+        cfsItemId: "intangible_assets",
+        impact: "negative",
+        description: "Intangible asset purchases",
+      },
+    },
+    {
       id: "acquisitions",
       label: "Acquisitions",
       kind: "input",

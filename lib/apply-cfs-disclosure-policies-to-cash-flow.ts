@@ -35,15 +35,16 @@ export function applyCfsDisclosurePoliciesToCashFlowTree(
     if (!row) continue;
     if (classifyCfsLineForProjection(row, balanceSheet) !== "cf_disclosure_only") continue;
 
-    const lastActual = lastHistYear ? row.values?.[lastHistYear] : undefined;
     out = patchRowTree(out, rowId, (r) => {
       const vals = { ...(r.values ?? {}) };
       for (const y of projectionYears) {
-        if (spec.mode === "excluded") {
-          vals[y] = 0;
-        } else {
-          vals[y] = applyCfsDisclosureProjectionForYear(spec, y, lastHistYear, revenueByYear[y], lastActual);
-        }
+        vals[y] = applyCfsDisclosureProjectionForYear(
+          spec,
+          y,
+          lastHistYear,
+          revenueByYear[y],
+          lastHistYear ? r.values?.[lastHistYear] : undefined
+        );
       }
       return { ...r, values: vals };
     });

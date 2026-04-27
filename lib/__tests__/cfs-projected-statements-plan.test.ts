@@ -7,6 +7,7 @@ import {
   buildCfsProjectedStatementPlanLines,
   filterCfsPlanLinesForBuilderCoverage,
 } from "@/lib/cfs-projected-statements-plan";
+import { filterCfsPlanLinesForProjectedOverview } from "@/lib/cfs-projected-overview-visibility";
 import type { Row } from "@/types/finance";
 import type { WcScheduleItem } from "@/lib/working-capital-schedule";
 
@@ -81,11 +82,30 @@ describe("buildCfsProjectedStatementPlanLines", () => {
     expect(cov.map((l) => l.id)).toContain("operating_cf");
   });
 
-  it("preview plan data line ids match builder coverage ids for the same inputs", () => {
-    const wcItems: WcScheduleItem[] = [{ id: "inv", label: "Inventory", side: "asset" }];
-    const full = buildCfsProjectedStatementPlanLines(minimalCashFlowWithWc(), wcItems);
-    const previewDataIds = full.filter((l) => l.role === "data").map((l) => l.id);
-    const builderIds = filterCfsPlanLinesForBuilderCoverage(full).map((l) => l.id);
+  it("preview plan data line ids match builder coverage ids for the same inputs (after FD overview filter)", () => {
+    const wcItems: WcScheduleItem[] = [
+      { id: "ar", label: "Accounts receivable", side: "asset" },
+      { id: "ap", label: "Accounts payable", side: "liability" },
+    ];
+    const cf = minimalCashFlowWithWc();
+    const full = buildCfsProjectedStatementPlanLines(cf, wcItems);
+    const overview = filterCfsPlanLinesForProjectedOverview(
+      full,
+      cf,
+      {
+        wcDriversConfirmed: true,
+        dandaScheduleConfirmed: true,
+        capexModelIntangibles: true,
+        debtApplied: true,
+        equityRollforwardConfirmed: true,
+        otherBsConfirmed: false,
+        wcScheduleRowIds: new Set(wcItems.map((i) => i.id)),
+        balanceSheet: [],
+        disclosureProjectionByRowId: {},
+      }
+    );
+    const previewDataIds = overview.filter((l) => l.role === "data").map((l) => l.id);
+    const builderIds = filterCfsPlanLinesForBuilderCoverage(overview).map((l) => l.id);
     expect(builderIds).toEqual(previewDataIds);
   });
 });
